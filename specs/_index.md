@@ -13,7 +13,7 @@ The name breaks down as:
 
 | Spec | Description | Status |
 |---|---|---|
-| [project.md](project.md) | Project structure and tooling: Python version, packaging with uv, layout conventions | Draft |
+| [project.md](project.md) | Project structure and tooling: Python version, packaging with uv, layout conventions | Stable |
 | [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to an LLM-facing prompt string | Draft |
 
 ### Status legend
