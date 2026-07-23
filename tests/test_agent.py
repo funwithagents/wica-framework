@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
@@ -181,14 +181,55 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
     assert len(model.calls) == 2
 
     second_call_messages = model.calls[1]
+    ai_messages = [m for m in second_call_messages if isinstance(m, AIMessage)]
+    # the past command is a real tool_call paired with its tool_result — not "Called add …" text
     assert any(
-        "Called add(a=1, b=2) → 3" in human_texts(m)
-        for m in second_call_messages
-        if isinstance(m, HumanMessage)
+        c["name"] == "add" and c["args"] == {"a": 1, "b": 2}
+        for m in ai_messages
+        for c in m.tool_calls
     )
+    tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
+    assert any(m.tool_call_id == "call1" and m.content == "3" for m in tool_messages)
 
     with pytest.raises(KeyError):
         world.get_entry(key)
+
+    agent.stop()
+
+
+def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
+    # Regression: past commands must be re-rendered as the model's own native tool_calls, not as
+    # a "Calling foo(...)…" assistant text block — otherwise the model imitates that prose and
+    # emits command descriptions as plain text instead of issuing real tool calls.
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = FakeChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
+            text_response("the sum is 3"),
+        )
+    )
+    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    agent.register_command(add)
+    agent.start()
+
+    world.update("input", "add them")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    messages = agent._render_messages()
+    ai_messages = [m for m in messages if isinstance(m, AIMessage)]
+    tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+
+    assert any(c["name"] == "add" for m in ai_messages for c in m.tool_calls)
+    assert any(m.tool_call_id == "call1" and m.content == "3" for m in tool_messages)
+    # no assistant message renders the call as prose
+    assert not any(
+        "Calling add" in str(m.content) or "Called add" in str(m.content) for m in ai_messages
+    )
 
     agent.stop()
 
@@ -216,11 +257,8 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
     second_call_messages = model.calls[1]
-    assert any(
-        "Called explode() → failed: boom" in human_texts(m)
-        for m in second_call_messages
-        if isinstance(m, HumanMessage)
-    )
+    tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
+    assert any(m.tool_call_id == "call1" and m.content == "failed: boom" for m in tool_messages)
 
     agent.stop()
 
@@ -259,13 +297,83 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
     assert len(model.calls) == 2
 
     second_call_messages = model.calls[1]
-    flattened = " ".join(human_texts(m) for m in second_call_messages if isinstance(m, HumanMessage))
-    assert "Called fast_tool() → fast-result" in flattened
-    assert "Calling slow_tool()…" in flattened
+    call_names = {
+        c["name"] for m in second_call_messages if isinstance(m, AIMessage) for c in m.tool_calls
+    }
+    assert {"fast_tool", "slow_tool"} <= call_names
+    tool_contents = {
+        m.tool_call_id: m.content for m in second_call_messages if isinstance(m, ToolMessage)
+    }
+    assert tool_contents.get("fast") == "fast-result"
+    assert tool_contents.get("slow") == "(in progress)"  # still running when this prompt was built
 
     with pytest.raises(KeyError):
         world.get_entry(fast_key)
     assert world.get_entry(slow_key).current.value.state == "running"
+
+    agent.stop()
+
+
+def _is_unregistered(world: World, key: str) -> bool:
+    try:
+        world.get_entry(key)
+        return False
+    except KeyError:
+        return True
+
+
+def test_dropped_command_completion_is_still_cleaned_up(loop, world, sink):
+    # A turn issues two commands. The first completes and starts a second step; while that
+    # step is in flight (busy), the second command completes — its trigger is dropped by the
+    # single-in-flight loop. That dropped completion must NOT leave a zombie entry behind.
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    release_slow = asyncio.Event()
+    release_step2 = asyncio.Event()
+    step2_running = threading.Event()
+
+    async def fast() -> str:
+        """Completes immediately."""
+        return "fast-result"
+
+    async def slow() -> str:
+        """Completes only once released."""
+        await release_slow.wait()
+        return "slow-result"
+
+    async def respond2(messages: list[BaseMessage]) -> AIMessage:
+        step2_running.set()
+        await release_step2.wait()
+        return AIMessage(content="done")
+
+    model = FakeChatModel(
+        respond=sequence(
+            tool_call_response([("fast", {}, "fast"), ("slow", {}, "slow")]),
+            respond2,
+        )
+    )
+    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent.register_command(fast)
+    agent.register_command(slow)
+    agent.start()
+
+    world.update("input", "run both")
+
+    # fast completes -> step 2 starts and blocks, so the loop is busy.
+    assert step2_running.wait(timeout=WAIT_TIMEOUT)
+
+    # Now let slow finish: its completion trigger arrives while busy and is dropped.
+    loop.call_soon_threadsafe(release_slow.set)
+
+    # The dropped completion must still be cleaned up rather than lingering in the World.
+    wait_until(lambda: _is_unregistered(world, "agent:command:slow"))
+
+    loop.call_soon_threadsafe(release_step2.set)
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert sink.texts == ["done"]
+    assert len(model.calls) == 2  # slow's completion was dropped, so no third step ran
+    assert _is_unregistered(world, "agent:command:fast")
+    assert _is_unregistered(world, "agent:command:slow")
 
     agent.stop()
 
@@ -379,6 +487,61 @@ def test_on_prompt_hook_fires_with_the_messages_the_model_receives(loop, world, 
     agent.stop()
 
 
+def test_on_trigger_hook_fires_with_the_entry_that_started_the_step(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = FakeChatModel(respond=text_response("hi"))
+    triggers: list[str] = []
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        on_trigger=lambda entry: triggers.append(entry.key),
+    )
+    agent.start()
+
+    world.update("input", "hello")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert triggers == ["input"]
+
+    agent.stop()
+
+
+def test_on_command_hook_fires_with_name_and_args_at_dispatch(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = FakeChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
+            text_response("done"),
+        )
+    )
+    commands: list[tuple[str, dict[str, Any]]] = []
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        on_command=lambda name, args: commands.append((name, args)),
+    )
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    agent.register_command(add)
+    agent.start()
+
+    world.update("input", "add them")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert commands == [("add", {"a": 1, "b": 2})]
+
+    agent.stop()
+
+
 def test_on_prompt_hook_raising_does_not_abort_the_step(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     model = FakeChatModel(respond=text_response("still replied"))
@@ -445,11 +608,8 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
     wait_until(lambda: sink.event.is_set())
 
     second_call_messages = model.calls[1]
-    assert any(
-        "Called block_forever() → cancelled" in human_texts(m)
-        for m in second_call_messages
-        if isinstance(m, HumanMessage)
-    )
+    tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
+    assert any(m.tool_call_id == "call1" and m.content == "cancelled" for m in tool_messages)
 
     agent.cancel_command("does-not-exist")  # no-op, must not raise
 

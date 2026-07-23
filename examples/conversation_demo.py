@@ -9,7 +9,8 @@ Set your provider key first (WICA-namespaced, default provider is Anthropic):
     export WICA_ANTHROPIC_API_KEY=sk-...
 
 Override the model/provider with WICA_PROVIDER / WICA_MODEL (the key var follows:
-WICA_<PROVIDER>_API_KEY, e.g. WICA_OPENAI_API_KEY).
+WICA_<PROVIDER>_API_KEY, e.g. WICA_OPENAI_API_KEY). Set WICA_LOG=DEBUG to watch the
+Agent drop triggers and retire completed command entries.
 
 This is the first runnable example (see specs/gradio-conversation-demo.md). It drives WICA
 purely through its public API: speech and sensor events enter the World; the Agent reasons
@@ -20,16 +21,23 @@ prompt sent to the model.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import queue
 import threading
 from typing import Any
 
 import gradio as gr
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from wica import AgentConfig, Content, TextPart, WorldEntry, get_world
 from wica.agent import Agent, CommandExecution
+
+# Keep third-party logs quiet but surface WICA's own. INFO shows agent start/stop, dropped
+# triggers, and command failures; DEBUG shows the full World+Agent lifecycle trace (registrations,
+# every update and whether it triggered a call, LLM output, command start/end). WICA_LOG overrides.
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("wica").setLevel(os.environ.get("WICA_LOG", "INFO").upper())
 
 # --- Configuration -------------------------------------------------------------------
 
@@ -66,6 +74,10 @@ You can act on the world with these commands:
 - set_emotion(emotion): show an emotion on your face (e.g. "happy", "curious", "sad").
 - start_user_tracking(user_id) / stop_user_tracking(user_id): begin or end following a person.
 - switch_user_tracking(user_id): focus your attention on one specific person.
+
+You only follow the person currently closest to you. Whenever the closest person changes, switch
+your tracking to them; and when no one is close to you anymore, stop tracking everyone you were
+following.
 
 Keep spoken replies short and warm — one or two sentences. Set an emotion when your mood shifts,
 and use tracking when it makes sense to follow someone. Speak naturally; never mention "world
@@ -181,10 +193,16 @@ COMMANDS = [
 #
 # The Agent owns its own event loop in a daemon thread and the World is thread-safe, so the
 # Gradio side stays fully synchronous: sensor events call world.update(...) directly, and the
-# agent's async output / prompt hook hand data back through thread-safe holders that a timer
-# polls into the panels.
+# agent's async callbacks (fired on the loop) push chat events onto one thread-safe queue that a
+# timer drains into the transcript. A single ordered queue keeps triggers, the robot's spoken
+# replies, and its command calls interleaved in the exact order they happened.
+#
+# Roles map to the two sides of the conversation:
+#  - "user"      → right side: the World entry that triggered a call (on_trigger).
+#  - "assistant" → left side:  the robot's spoken reply (output_sink) and its command calls
+#                              (on_command).
 
-_reply_queue: queue.Queue[str] = queue.Queue()
+_events: queue.Queue[dict[str, str]] = queue.Queue()
 
 _state_lock = threading.Lock()
 _conversation: list[dict[str, str]] = []
@@ -194,7 +212,32 @@ _latest_prompt = "(no prompt sent to the model yet)"
 async def output_sink(text: str) -> None:
     """Agent speech out — one complete utterance per step (v1). Runs on the agent loop."""
     if text:
-        _reply_queue.put(text)
+        _events.put({"role": "assistant", "content": text})
+
+
+def _describe_trigger(entry: WorldEntry) -> str:
+    key = entry.key
+    value = entry.current.value
+    if key == "speech_input":
+        return f'🗣️ "{value}"'
+    if key == "closest_user":
+        return "👤 Closest user gone" if value is None else f"👤 Closest user detected: {value}"
+    return f"⚡ {key} = {value!r}"
+
+
+def on_trigger(entry: WorldEntry) -> None:
+    """A World entry triggered a step — show it on the input (right) side. Skip the robot's own
+    command-completion re-triggers; those are already shown as command calls on the left."""
+    if entry.key.startswith("agent:command:"):
+        return
+    _events.put({"role": "user", "content": _describe_trigger(entry)})
+
+
+def on_command(name: str, args: dict[str, Any]) -> None:
+    """The robot issued a command — show it on the assistant (left) side, italicised to set it
+    apart from spoken replies."""
+    rendered = ", ".join(f"{k}={v!r}" for k, v in args.items())
+    _events.put({"role": "assistant", "content": f"_🦾 {name}({rendered})_"})
 
 
 def _flatten_content(content: str | list[Any]) -> str:
@@ -214,12 +257,28 @@ def _flatten_content(content: str | list[Any]) -> str:
     return "\n".join(parts)
 
 
+def _render_message(m: BaseMessage) -> str:
+    """Render one LangChain message to text for the prompt panel. An assistant message that only
+    issues a command has empty .content — the call lives in the structured .tool_calls field — so
+    we render those (and the tool_call id on a tool result) explicitly, or the AI block looks blank."""
+    lines = [f"### {m.type.upper()}"]
+    if isinstance(m, ToolMessage):
+        lines.append(f"🔧 result for [id={m.tool_call_id}] => {_flatten_content(m.content)}")
+        return "\n".join(lines)
+    body = _flatten_content(m.content)
+    if body:
+        lines.append(body)
+    if isinstance(m, AIMessage):
+        for call in m.tool_calls:
+            args = ", ".join(f"{k}={v!r}" for k, v in call["args"].items())
+            lines.append(f"🔧 tool_call {call['name']}({args})  [id={call['id']}]")
+    return "\n".join(lines)
+
+
 def on_prompt(messages: list[BaseMessage]) -> None:
     """Debug hook — capture the exact messages sent to the model. Runs on the agent loop."""
     global _latest_prompt
-    rendered = "\n\n".join(
-        f"### {m.type.upper()}\n{_flatten_content(m.content)}" for m in messages
-    )
+    rendered = "\n\n".join(_render_message(m) for m in messages)
     with _state_lock:
         _latest_prompt = rendered
 
@@ -232,6 +291,8 @@ if HAS_KEY:
         AgentConfig(provider=PROVIDER, model=MODEL, system_prompt=SYSTEM_PROMPT),
         output_sink=output_sink,
         on_prompt=on_prompt,
+        on_trigger=on_trigger,
+        on_command=on_command,
     )
     for command in COMMANDS:
         agent.register_command(command)
@@ -264,16 +325,16 @@ def _world_rows() -> list[list[str]]:
     return rows
 
 
-def on_send(user_text: str) -> tuple[list[dict[str, str]], str]:
+# Input handlers only touch the World; the transcript is fed by the agent's callbacks (a trigger
+# shows up on the right once it actually starts a step — a trigger dropped by the busy single-in-
+# flight loop simply won't appear, and no reply follows it).
+
+
+def on_send(user_text: str) -> str:
     text = user_text.strip()
-    if not text:
-        with _state_lock:
-            return list(_conversation), ""
-    with _state_lock:
-        _conversation.append({"role": "user", "content": text})
-        snapshot = list(_conversation)
-    world.update("speech_input", text)
-    return snapshot, ""
+    if text:
+        world.update("speech_input", text)
+    return ""  # clear the textbox; the transcript updates via the tick timer
 
 
 def on_detect(user_id: str) -> str:
@@ -291,10 +352,10 @@ def tick() -> tuple[list[dict[str, str]], list[list[str]], str]:
     with _state_lock:
         while True:
             try:
-                reply = _reply_queue.get_nowait()
+                event = _events.get_nowait()
             except queue.Empty:
                 break
-            _conversation.append({"role": "assistant", "content": reply})
+            _conversation.append(event)
         conversation = list(_conversation)
         prompt = _latest_prompt
     return conversation, _world_rows(), prompt
@@ -314,8 +375,10 @@ def build_ui() -> gr.Blocks:
             )
         gr.Markdown(
             "The robot handles **one thought at a time** (v1): while it's thinking or in the "
-            "middle of a long action (like a 10s dance), new inputs are *dropped*, not queued — "
-            "that's expected, not a bug."
+            "middle of a long action (like a 10s dance), a new input is *dropped*, not queued — "
+            "so it won't appear in the transcript and gets no reply. That's expected, not a bug. "
+            "Inputs (right) and the robot's replies + 🦾 command calls (left) appear as they "
+            "actually happen."
         )
 
         with gr.Row():
@@ -354,8 +417,8 @@ def build_ui() -> gr.Blocks:
                     value=_latest_prompt,
                 )
 
-        send.click(on_send, inputs=msg, outputs=[chatbot, msg])
-        msg.submit(on_send, inputs=msg, outputs=[chatbot, msg])
+        send.click(on_send, inputs=msg, outputs=msg)
+        msg.submit(on_send, inputs=msg, outputs=msg)
         detect.click(on_detect, inputs=user_id, outputs=user_id)
         gone.click(on_user_gone)
 

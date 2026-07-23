@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -9,9 +10,22 @@ from typing import Any
 
 from wica.content import Content, TextPart
 
+_logger = logging.getLogger(__name__)
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _describe_value(value: Any) -> str:
+    """A short, log-safe rendering of a stored value — never dumps large blobs (e.g. image
+    bytes) in full."""
+    if value is None:
+        return "None"
+    if isinstance(value, bytes | bytearray):
+        return f"<{len(value)} bytes>"
+    text = repr(value)
+    return text if len(text) <= 80 else text[:77] + "..."
 
 
 @dataclass
@@ -83,6 +97,14 @@ class World:
                 current=WorldEntryVersion(id=new_id, value=None, timestamp=_now()),
                 previous=None,
             )
+        _logger.debug(
+            "registered %r (type=%s, include_in_prompt=%s, triggers_llm_call=%s, ttl=%s)",
+            key,
+            type.__name__,
+            include_in_prompt,
+            triggers_llm_call,
+            ttl,
+        )
 
     def unregister(self, key: str) -> None:
         with self._lock:
@@ -94,6 +116,7 @@ class World:
             timer = self._timers.pop(key, None)
             if timer is not None:
                 timer.cancel()
+        _logger.debug("unregistered %r", key)
 
     def get(self, key: str) -> Any:
         with self._lock:
@@ -156,10 +179,11 @@ class World:
                 timer.start()
 
             listeners = list(self._listeners.get(key, ()))
+            has_handler = self._trigger_handler is not None
+            triggers_configured = config.triggers_llm_call and not ttl_reset
             if (
-                not ttl_reset
-                and config.triggers_llm_call
-                and self._trigger_handler is not None
+                triggers_configured
+                and has_handler
                 and (
                     config.trigger_condition_fn is None
                     or config.trigger_condition_fn(old_entry.current.value, value)
@@ -167,12 +191,30 @@ class World:
             ):
                 trigger_handler = self._trigger_handler
 
+        new_id = new_entry.current.id
+        _logger.debug(
+            "updated %r → id=%d, value=%s%s",
+            key,
+            new_id,
+            _describe_value(value),
+            " [ttl reset]" if ttl_reset else "",
+        )
+        if listeners:
+            _logger.debug("dispatching %d listener(s) for %r (id=%d)", len(listeners), key, new_id)
+        if trigger_handler is not None:
+            _logger.debug("update to %r (id=%d) triggers an LLM call", key, new_id)
+        elif triggers_configured and has_handler:
+            _logger.debug(
+                "update to %r (id=%d) did not trigger an LLM call (condition unmet)", key, new_id
+            )
+
         for listener in listeners:
             self._executor.submit(listener, new_entry)
         if trigger_handler is not None:
             self._executor.submit(trigger_handler, new_entry)
 
     def _ttl_expire(self, key: str, expected_id: int) -> None:
+        _logger.debug("TTL fired for %r (expected id=%d)", key, expected_id)
         try:
             self._update(key, None, ttl_reset=True, expected_id=expected_id)
         except KeyError:
@@ -183,6 +225,7 @@ class World:
             if key not in self._configs:
                 raise KeyError(key)
             self._listeners.setdefault(key, []).append(callback)
+        _logger.debug("added listener for %r", key)
 
     def remove_listener(self, key: str, callback: Callable[[WorldEntry], None]) -> None:
         with self._lock:
@@ -193,6 +236,7 @@ class World:
     def set_trigger_handler(self, handler: Callable[[WorldEntry], None] | None) -> None:
         with self._lock:
             self._trigger_handler = handler
+        _logger.debug("trigger handler %s", "set" if handler is not None else "cleared")
 
     def get_prompt_entries(self) -> list[WorldEntry]:
         with self._lock:

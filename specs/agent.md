@@ -54,7 +54,7 @@ History is an ordered list of three record kinds:
 
 All three are immutable once created; history is append-only — no record is ever edited after creation, including the Command record once its result is known.
 
-Still open (residual of Open question #9): exactly how Assistant-text/Command records interleave with Observation records when rendered into messages — e.g. whether consecutive Assistant-text/Command records from the same step collapse into a single message.
+**Rendering to messages (resolves Open question #9).** A step's records render as: its Observation → a user message of `<entry>` blocks; then that step's Assistant-text + Command records → a **single** assistant message whose text is the utterance and whose `tool_calls` are the Commands rendered as the model's **native tool calls** (reconstructed from the neutral `CommandRecord` — see [commands.md](commands.md)); then one **`tool_result`** per Command carrying its stringified outcome (a placeholder while still running). Commands are deliberately **not** rendered as `"Calling foo…"` assistant *text* — the model imitated that prose and emitted descriptions as free text instead of real tool calls. Because a Command's outcome rides on its `tool_result`, the completed `agent:command:<call_id>` World entry is skipped when rendering the Observation, so the result isn't duplicated (and a retired entry needn't be re-serialized).
 
 ### Fresh vs. archival rendering
 
@@ -73,7 +73,7 @@ The Agent's acting mechanism is **Commands** — WICA's unit of agent action on 
 
 - Commands are registered easily — the Agent exposes `register_command(fn)` over LangChain's `@tool` / `bind_tools`, building the backing tool the model is bound to.
 - **Commands are used as-implemented.** The Agent must not require a backing tool to provide any WICA-specific hook (a describe/serialize function, a mode annotation, …). Off-the-shelf LangChain tools work unmodified. Anything WICA needs beyond `name`/`args`/`result` is optional and lives at the *registration/wrapper* layer, never inside the tool.
-- Command execution is **async** and **cancellable** (asyncio tasks on the Agent's loop), tracked as a `agent:command:<call_id>` World entry whose value is a `CommandExecution` (see [commands.md](commands.md), "Command execution as a World entry"). A terminal execution triggers the next step; the durable history record is the generic call **description** (`CommandRecord` + a subsequent Observation), not the native `tool_use`/`tool_result` pair.
+- Command execution is **async** and **cancellable** (asyncio tasks on the Agent's loop), tracked as a `agent:command:<call_id>` World entry whose value is a `CommandExecution` (see [commands.md](commands.md), "Command execution as a World entry"). A terminal execution triggers the next step. The durable history record is the neutral `CommandRecord` (name/args/`call_id`) plus its result; the model's native `tool_call`/`tool_result` pair is **reconstructed from that neutral record at render time** (see "History → Rendering to messages"), not stored.
 - v1 always takes the uniform event-driven path for every Command; the inline fast-path for quick Commands is deferred (see [commands.md](commands.md), "Sync vs. async").
 
 ### Concurrency & interruption
@@ -94,9 +94,19 @@ Cancellation is itself a **Command** (`cancel_activity(task_id)`, a WICA-native 
 
 **Known limitation — accepted for now: races.** Concurrency is unbounded (as many concurrent calls as arise) and triggers originate on World dispatch threads, so genuine races exist: two concurrently-thinking calls can both decide to "cancel the other and proceed," cancel-cycling or briefly double-speaking. Knowingly accepted at this stage. Mitigating factor: the single loop reduces it to cooperative interleaving, and the World's `RLock` keeps state access safe — races are logical/ordering, not memory corruption. Future tightening (deferred, see open question below): bound concurrency; make "cancel current owner + take the output channel" an atomic critical section between `await`s on the loop; and/or a single-owner output sink as a hard backstop against double-speak.
 
-### Instrumentation: the `on_prompt` hook
+### Instrumentation: observability hooks
 
-The Agent takes an optional `on_prompt: Callable[[list[BaseMessage]], None]`, called with the exact rendered messages **immediately before** each model `ainvoke`. It's the observability seam for "show me what the Agent actually sent" — the rendered prompt is otherwise internal to `_run_step`. It is **instrumentation, not control flow**: it can't alter the messages (they're passed after rendering, and its return value is ignored), and a hook that raises is caught and logged so it can never abort a step. The first consumer is the conversation demo's prompt panel (see [gradio-conversation-demo.md](gradio-conversation-demo.md)); it's equally a plain debugging aid. Fresh/archival rendering means the deep prefix is byte-stable across calls, so a hook logging every prompt sees the same cacheable prefix the provider does.
+The Agent takes a small family of optional callbacks, all **instrumentation, not control flow**: none can alter what the loop does (return values are ignored), and each is invoked through a single guard that catches and logs any exception so a misbehaving hook can never abort a step. They exist because the interesting moments of a step (what was sent, what fired it, what it decided to do) are otherwise internal to `_run_step`.
+
+| Hook | Signature | Fired |
+|---|---|---|
+| `on_trigger` | `Callable[[WorldEntry], None]` | at the start of a step, with the World entry whose update caused it — **only for steps that actually run** (a dropped single-in-flight trigger fires nothing). Includes command-completion re-triggers; a consumer that only cares about external inputs filters out `agent:command:*` keys itself |
+| `on_prompt` | `Callable[[list[BaseMessage]], None]` | with the exact rendered messages, immediately before each model `ainvoke`. Fresh/archival rendering keeps the deep prefix byte-stable, so a hook logging every prompt sees the same cacheable prefix the provider does |
+| `on_command` | `Callable[[str, dict[str, Any]], None]` | with each Command's `(name, args)` at dispatch time, as the model issues it |
+
+The first consumer is the conversation demo (see [gradio-conversation-demo.md](gradio-conversation-demo.md)): `on_prompt` feeds its prompt panel, `on_trigger` shows inputs on the conversation's input side, and `on_command` shows the robot's actions on the assistant side. They are equally plain debugging aids.
+
+Complementing the hooks, the World and Agent emit **lifecycle logs** under the standard-library `wica.*` loggers, so the whole loop is traceable without wiring any hook: **DEBUG** for per-event detail (registrations, every World update and whether it triggered a call, trigger receipt, step start/complete, LLM output, command dispatch/start/end), **INFO** for coarse lifecycle (agent start/stop, dropped triggers), and **WARNING** for command failures. This is debug tracing, not the project's eventual error-handling story — fire-and-forget listener/trigger exceptions in the World are still swallowed (see [world.md](world.md)).
 
 ## Open questions
 
@@ -118,7 +128,7 @@ These are unresolved and several are central. Do not treat the "Settled" split a
 
 8. **Context-window growth / truncation.** Append-only snapshot history needs an eventual truncation/summarization strategy.
 
-9. **History wrapper object shape — mostly resolved, see "History record shape" above.** The three record kinds and their fields are now settled: Observation, Assistant text, Command. Remaining: how Assistant-text/Command records interleave with Observation records when rendered into messages.
+9. **History wrapper object shape — resolved, see "History record shape" above.** The three record kinds and their fields are settled (Observation, Assistant text, Command), and so is how they render into messages: a step's Assistant-text + Command records collapse into one assistant message (text + native `tool_calls`) followed by `tool_result`s — see "Rendering to messages" above.
 
 10. **Single agent for now.** One World trigger handler ⇒ one Agent, matching the World singleton. No multi-agent partitioning yet.
 
@@ -130,7 +140,7 @@ These are unresolved and several are central. Do not treat the "Settled" split a
 
 The v1 implementation ships a reduced slice on purpose. These are already directionally decided — not open questions — but not yet built, so they don't get lost once v1 ships:
 
-- **Full concurrency & interruption model.** `agent:activity` World entries, model-issued `cancel_activity(task_id)`, and genuinely concurrent in-flight calls (see "Concurrency & interruption" above). v1 ships single-in-flight instead: a new trigger arriving while a call is in flight is dropped and logged, not queued or coalesced — no step is started for it and no history record is created for it. Revisit once the basic loop runs — this is Open question #3's tightening, plus the concurrency model itself.
+- **Full concurrency & interruption model.** `agent:activity` World entries, model-issued `cancel_activity(task_id)`, and genuinely concurrent in-flight calls (see "Concurrency & interruption" above). v1 ships single-in-flight instead: a new trigger arriving while a call is in flight is dropped and logged, not queued or coalesced — no step is started for it and no history record is created for it. **One exception on cleanup:** a dropped trigger that is a *command completion* still retires its `agent:command:<call_id>` World entry (the Agent doesn't run a reasoning step to react to it, but the entry must not leak — otherwise a completed Command lingers in the World and in every subsequent prompt indefinitely; its effect already lives in whatever other World entries the Command wrote). More generally, the Agent retires **every** terminal command entry it observes on each step, not only the one that fired, so a completion dropped mid-step is still cleaned up on the next step that runs. Revisit once the basic loop runs — this is Open question #3's tightening, plus the concurrency model itself.
 - **Sync/async Command optimization.** The inline fast-path for quick Commands (auto-by-latency or a registration flag — see [commands.md](commands.md), "Sync vs. async"). v1 always takes the async/event-driven path for every Command, per that spec's "default execution model" framing.
 - **Streaming output + live progress.** Token-level streaming to the output sink, and the sink writing live "currently speaking: …" progress to a World entry as it goes (this only matters once concurrent calls exist, so a competing call has something current to judge against). v1's sink receives one complete string per step.
 - **`speak()` Command.** v1 uses free-text-as-speech (Open question #2, resolved *for v1* in this direction). An explicit `speak(text)` Command remains a live alternative if free-visible-text-is-speech turns out too coarse — e.g. needing internal reasoning text that isn't spoken.

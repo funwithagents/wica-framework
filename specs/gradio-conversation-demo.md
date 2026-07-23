@@ -27,8 +27,13 @@ deployment can change who the robot *is* without touching the demo.
 
 Four surfaces, side by side:
 
-1. **Conversation.** A chat transcript. The user types an utterance (their "speech"); the robot's
-   spoken replies appear as they're produced. This is the primary interaction.
+1. **Conversation.** A chat transcript that doubles as a trace of the reasoning loop. The user
+   types an utterance (their "speech"); more broadly, whatever World entry triggers a reasoning
+   step shows on the **input (right) side** — a typed utterance or a sensor event like a user being
+   detected. The robot's **spoken replies and its command calls** show on the **assistant (left)
+   side**, in the order they happen, so a turn reads as "input → the robot says X → the robot does
+   Y". An input that's *dropped* by the single-in-flight loop (robot busy) doesn't appear and gets
+   no reply — faithful to what actually happened.
 2. **World state.** A live view of the current World — every entry the demo tracks, shown as raw
    values (key, version id, value, when it last changed). This is the robot's whole mind laid bare:
    what it heard, who's nearby, how it feels, who it's tracking, and any command currently running.
@@ -83,6 +88,13 @@ and the point is to watch the model choose them in context.
 Tracking models the robot deciding to follow specific people over time — distinct from the
 transient "closest user" perception input. Emotion and tracking persist in the World until changed;
 "dance" is a momentary action.
+
+The robot is instructed (via its system prompt) to **only follow the person currently closest to
+it**: when the closest person changes it switches tracking to them, and when no one is close it
+stops tracking everyone. This is LLM-driven, not a hard rule — it demonstrates the robot reasoning
+from the `closest_user` perception (which triggers a step when it changes, including when it clears
+to "no one") and issuing `switch`/`stop` tracking commands in response, rather than the demo
+wiring the effect deterministically behind the agent's back.
 
 ## Configuration
 
