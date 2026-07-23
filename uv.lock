@@ -922,10 +922,13 @@ wheels = [
 name = "wica"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "langchain" },
+    { name = "langchain-core" },
+]
 
 [package.dev-dependencies]
 dev = [
-    { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "pyright" },
     { name = "pytest" },
@@ -933,10 +936,13 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "langchain", specifier = ">=0.3.0" },
+    { name = "langchain-core", specifier = ">=0.3.0" },
+]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "langchain", specifier = ">=0.3.0" },
     { name = "langchain-anthropic", specifier = ">=0.3.0" },
     { name = "pyright", specifier = ">=1.1.411" },
     { name = "pytest", specifier = ">=8.0.0" },

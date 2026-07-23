@@ -194,6 +194,16 @@ class World:
         with self._lock:
             self._trigger_handler = handler
 
+    def get_prompt_entries(self) -> list[WorldEntry]:
+        with self._lock:
+            entries = [
+                entry
+                for key, entry in self._entries.items()
+                if self._configs[key].include_in_prompt
+            ]
+            entries.sort(key=lambda e: e.current.timestamp)
+        return entries
+
     def render_entry(self, entry: WorldEntry, *, archival: bool = False) -> Content:
         with self._lock:
             config = self._configs.get(entry.key)
@@ -211,13 +221,7 @@ class World:
         return [opening, *body, closing]
 
     def render_full_prompt(self) -> Content:
-        with self._lock:
-            entries = [
-                entry
-                for key, entry in self._entries.items()
-                if self._configs[key].include_in_prompt
-            ]
-            entries.sort(key=lambda e: e.current.timestamp)
+        entries = self.get_prompt_entries()
 
         content: Content = []
         for i, entry in enumerate(entries):

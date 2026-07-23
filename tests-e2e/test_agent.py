@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+from collections.abc import Callable
+from typing import Any
+
+from wica.agent import Agent
+from wica.content import Content, TextPart
+from wica.world import World, WorldEntry, get_world
+
+from support import real_chat_model
+
+WAIT_TIMEOUT = 15.0
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = WAIT_TIMEOUT) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if predicate():
+                return
+        except KeyError:
+            pass
+        time.sleep(0.05)
+    raise AssertionError(f"condition not met within {timeout}s")
+
+
+def identity_serialize(value: Any, previous: Any) -> Content:
+    return [TextPart(str(value))]
+
+
+def find_tool_call_entry(world: World) -> WorldEntry | None:
+    for entry in world.get_prompt_entries():
+        if entry.key.startswith("agent:tool_call:"):
+            return entry
+    return None
+
+
+class RecordingSink:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+        self.event = threading.Event()
+
+    async def __call__(self, text: str) -> None:
+        self.texts.append(text)
+        self.event.set()
+
+
+def test_plain_text_round_trip():
+    world = get_world()
+    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+
+    sink = RecordingSink()
+    agent = Agent(
+        real_chat_model(),
+        system_prompt="You are a terse test assistant.",
+        world=world,
+        output_sink=sink,
+    )
+    agent.start()
+    try:
+        world.update("prompt", "Say hello in one short sentence.")
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert sink.texts
+        assert sink.texts[0].strip()
+    finally:
+        agent.stop()
+
+
+def test_real_tool_calling_round_trip():
+    world = get_world()
+    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+
+    sink = RecordingSink()
+    agent = Agent(
+        real_chat_model(),
+        system_prompt="You are a terse test assistant. Use tools when appropriate.",
+        world=world,
+        output_sink=sink,
+    )
+
+    async def add(a: int, b: int) -> int:
+        """Add two integers and return their sum."""
+        await asyncio.sleep(0.1)  # gives the polling loop below a chance to see "running"
+        return a + b
+
+    agent.register_tool(add)
+    agent.start()
+    try:
+        world.update("prompt", "What is 2 + 2? Use the add tool.")
+
+        wait_until(lambda: find_tool_call_entry(world) is not None)
+        running_entry = find_tool_call_entry(world)
+        assert running_entry is not None
+        assert running_entry.current.value.state == "running"
+
+        # Listen on this specific key so the terminal update is captured via the
+        # immutable snapshot handed to the listener — reading world.get_entry(key)
+        # again would race the Agent's own cleanup, which unregisters the key right
+        # after folding its terminal value into history (see agent.md decision on
+        # tool-status World keys).
+        terminal: list[WorldEntry] = []
+        done = threading.Event()
+
+        def on_update(entry: WorldEntry) -> None:
+            if entry.current.value.is_terminal():
+                terminal.append(entry)
+                done.set()
+
+        world.add_listener(running_entry.key, on_update)
+        assert done.wait(timeout=WAIT_TIMEOUT)
+        assert terminal[0].current.value.state == "complete"
+        assert "4" in (terminal[0].current.value.result or "")
+
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert sink.texts
+    finally:
+        agent.stop()

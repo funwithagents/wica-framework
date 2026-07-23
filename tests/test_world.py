@@ -437,6 +437,24 @@ def test_render_entry_ignores_include_in_prompt():
     assert "secret" in flatten(world.render_entry(world.get_entry("hidden")))
 
 
+def test_get_prompt_entries_omits_excluded_and_orders_by_timestamp():
+    world = World()
+    world.register("first", str, serialize_fn=identity_serialize, include_in_prompt=True)
+    world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)
+    world.register("second", str, serialize_fn=identity_serialize, include_in_prompt=True)
+    world.update("first", "1")
+    world.update("hidden", "secret")
+    world.update("second", "2")
+
+    entries = world.get_prompt_entries()
+    assert [e.key for e in entries] == ["first", "second"]
+    assert all(isinstance(e, WorldEntry) for e in entries)
+
+    world.update("first", "1-updated")
+    entries = world.get_prompt_entries()
+    assert [e.key for e in entries] == ["second", "first"]
+
+
 def test_render_full_prompt_omits_excluded_entries():
     world = World()
     world.register("shown", str, serialize_fn=identity_serialize, include_in_prompt=True)
