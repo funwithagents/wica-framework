@@ -40,6 +40,21 @@ History is owned by the Agent, not the World (the World is snapshot-only — `cu
 
 - **History is an ordered list of WICA's own wrapper objects** over World snapshots (`WorldEntry`/`WorldEntryVersion` copies, which the World already hands out immutably — cheap, safe to keep). The wrapper is ours (not raw LangChain messages) so we retain maximum data and convert to LangChain messages only at call time.
 - **Messages are re-rendered from these objects on every LLM call**, not stored as frozen messages. Storing objects (not baked messages) is precisely what enables position-aware rendering (below).
+- **Each trigger's snapshot is the full `include_in_prompt` World state, not just the entry that fired.** History holds one bundle per trigger — every currently-included `WorldEntry` (via the World's `get_prompt_entries()`), not only the one whose update caused the trigger — so entries that are `include_in_prompt=True` but never themselves `triggers_llm_call` (passive context) still reach the model. Resolves world.md open question #2 in favor of "full."
+
+### History record shape
+
+History is an ordered list of three record kinds:
+
+| Record | Fields | Notes |
+|---|---|---|
+| Observation | `entries: list[WorldEntry]` | The full `include_in_prompt` bundle at trigger time (`get_prompt_entries()`), not just the entry that fired (see above) |
+| Assistant text | `text: str` | The model's own free-text output for a step — the utterance, under free-text-as-speech (see Open question #2) |
+| Tool call | `call_id: str`, `name: str`, `args: dict[str, Any]` | Written at dispatch time, before the result is known — no `result` field here; the result surfaces later via a subsequent Observation record once the tool's World entry goes terminal, not by mutating this record |
+
+All three are immutable once created; history is append-only — no record is ever edited after creation, including the tool-call record once its result is known.
+
+Still open (residual of Open question #9): exactly how Assistant-text/Tool-call records interleave with Observation records when rendered into messages — e.g. whether consecutive Assistant-text/Tool-call records from the same step collapse into a single message.
 
 ### Fresh vs. archival rendering
 
@@ -110,7 +125,7 @@ These are unresolved and several are central. Do not treat the "Settled" split a
 
 3. **Concurrency races (deferred tightening).** The concurrency/interruption *model* is settled (see Concurrency & interruption): unbounded concurrent calls, binary model-decided interruption (cancel-and-proceed or do-nothing), mutual awareness via `agent:activity` World entries. What's deferred is hardening against the accepted races: whether to **bound** concurrency, make **take-over atomic** (cancel current owner + acquire the output channel in one critical section between `await`s), and/or enforce a **single-owner output sink** as a hard backstop against double-speak. Revisit once the basic loop runs.
 
-4. **Full vs. incremental prompt.** Effectively leaning to "re-render from snapshots each call" (see Fresh vs. archival above), which supersedes the earlier full-`render_full_prompt`-each-time idea. Confirm this is the committed strategy and update World open question #2 accordingly once locked.
+4. **Full vs. incremental prompt — resolved.** Committed strategy: re-render from an Agent-owned history of snapshots each call (see Fresh vs. archival above; not a from-scratch `render_full_prompt()` every time), and each snapshot captured per trigger is the *full* `include_in_prompt` World state via `get_prompt_entries()`, not only the entry that fired — see "History" above. World open question #2 updated to match.
 
 5. **Where the freshness/renderer policy is configured.** The World provides fresh/archival serialization per entry; the Agent decides *when* archival applies and how snapshots group into messages. Exact shape of that Agent-side renderer/registry is TBD.
 
@@ -120,8 +135,23 @@ These are unresolved and several are central. Do not treat the "Settled" split a
 
 8. **Context-window growth / truncation.** Append-only snapshot history needs an eventual truncation/summarization strategy.
 
-9. **History wrapper object shape.** The concrete fields of the Agent's own history wrapper are still undefined, but the kinds of record are now clearer: (a) **World snapshots** (observations), (b) the Agent's own **assistant text** turns, and (c) **tool-call descriptions** (the generic `Called xxx(args) → result` text, per "Tools" above — not raw `tool_use`/`tool_result`). Tool activity is no longer a gap: it's captured both as the history description and, for anything run via the World-entry lifecycle, as a snapshot. Remaining: the exact record union/fields and how assistant text turns interleave with snapshots at render time.
+9. **History wrapper object shape — mostly resolved, see "History record shape" above.** The three record kinds and their fields are now settled: Observation, Assistant text, Tool call. Remaining: how Assistant-text/Tool-call records interleave with Observation records when rendered into messages.
 
 10. **Single agent for now.** One World trigger handler ⇒ one Agent, matching the World singleton. No multi-agent partitioning yet.
 
 11. **`set_trigger_handler` shape.** May fold into a broader Agent registration API once Commands/Agents are further specced (noted in the World implementation plan).
+
+12. **Generic tool-call-activity listening.** The "one World entry per tool call" design (Tool lifecycle as a World entry) is race-free — each call fully owns its own key, so concurrent calls never contend on the same `update()` — but it means a listener can't subscribe to "any tool call" in general without already knowing every `call_id` in advance, since `add_listener` needs a concrete key. Sketched fix, not yet decided or built: keep the per-call entries as the race-free source of truth, and additionally register one persistent broadcast entry (e.g. `agent:tool_call_activity`, `include_in_prompt=False`, `triggers_llm_call=False`) that the Agent plain-overwrites (never merges) on every tool-call status change, so a listener can subscribe once and be notified of all tool-call activity without needing `call_id`s ahead of time. A plain overwrite carries no read-modify-write race, unlike a shared list would. Revisit once a concrete consumer needs this.
+
+## Future improvements (deferred out of v1)
+
+The v1 implementation ships a reduced slice on purpose. These are already directionally decided — not open questions — but not yet built, so they don't get lost once v1 ships:
+
+- **Full concurrency & interruption model.** `agent:activity` World entries, model-issued `cancel_activity(task_id)`, and genuinely concurrent in-flight calls (see "Concurrency & interruption" above). v1 ships single-in-flight instead: a new trigger arriving while a call is in flight is dropped and logged, not queued or coalesced — no step is started for it and no history record is created for it. Revisit once the basic loop runs — this is Open question #3's tightening, plus the concurrency model itself.
+- **Sync/async tool optimization.** The inline fast-path for quick tools (auto-by-latency or a registration flag — see "Sync vs. async (deferred optimization)"). v1 always takes the async/event-driven path for every tool, per the spec's own "default execution model" framing — folds into Open question #1's residual details.
+- **Streaming output + live progress.** Token-level streaming to the output sink, and the sink writing live "currently speaking: …" progress to a World entry as it goes (this only matters once concurrent calls exist, so a competing call has something current to judge against). v1's sink receives one complete string per step.
+- **`speak()` tool.** v1 uses free-text-as-speech (Open question #2, resolved *for v1* in this direction). An explicit `speak(text)` tool remains a live alternative if free-visible-text-is-speech turns out too coarse — e.g. needing internal reasoning text that isn't spoken.
+- **`AgentConfig` from env/file.** v1 constructs `AgentConfig` directly in code; loading it from a config file or environment variables is unbuilt.
+- **History truncation / summarization.** `self._history` is append-only and unbounded in v1 (Open question #8).
+- **Agent-level (non-tool) error handling.** A model call itself raising isn't yet given a World-state/history story — only tool failures are (they land in a terminal `ToolCallStatus` with the error). Ties into the project's broader logging story (Open question #7).
+- **Multi-agent partitioning.** Still one `Agent` per one World (Open question #10).

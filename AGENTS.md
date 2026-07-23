@@ -8,6 +8,16 @@ Start at [specs/_index.md](specs/_index.md) for an overview of the specs and the
 - Avoid trivial/tautological tests — e.g. asserting a constant, asserting an object is not `None`, asserting a mock was called. If a test would pass for a broken implementation, it's not worth writing.
 - Prefer driving the public API the way a real caller would over asserting on internals.
 
+### Live/e2e tests
+
+Some tests call a real LLM provider over the network. They live in `tests-e2e/`, a directory separate from `tests/`, so the default `uv run pytest` never runs them — no network access or API key is needed for the normal dev loop. Run them explicitly, and only when you actually want to verify against a live provider:
+
+```
+uv run pytest tests-e2e
+```
+
+Each e2e test skips itself (does not fail) if its required API key isn't set in the environment — see `tests-e2e/support.py`.
+
 ## Implementation plans
 
 - Write implementation plans as files in the [plans](plans/) folder.
