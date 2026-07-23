@@ -1,6 +1,6 @@
 # Gradio conversation demo (first runnable example)
 
-**Status:** In progress
+**Status:** Done
 
 ## Goal
 
@@ -123,16 +123,16 @@ without credentials.
 
 ## Verification
 
-- ✅ `uv run ruff check .`, `uv run pyright`, `uv run pytest` all pass (53 tests, incl. two new
-  `on_prompt` tests). `examples/` is linted by ruff but kept out of pyright's `include` (it depends
-  on `gradio`, a non-core dep) — the reusable `on_prompt` hook is what's unit-tested, not the UI.
+- ✅ `uv run ruff check .`, `uv run pyright`, `uv run pytest` all pass. `examples/` is linted by
+  ruff but kept out of pyright's `include` (it depends on `gradio`, a non-core dep) — the reusable
+  Agent hooks (`on_prompt`/`on_trigger`/`on_command`) are what's unit-tested, not the UI.
 - ✅ Headless smoke test (no key): module imports, the World bridge (`on_send`/`on_detect`/`tick`)
   updates state correctly, and `build_ui()` builds the Blocks — the no-key path stays explorable.
-- ⏳ **Remaining — live run.** `uv run --group demo python examples/conversation_demo.py` with a
-  real `WICA_ANTHROPIC_API_KEY` — send speech, confirm a reply, a Command firing (watch the 10s
-  `dance` sit `running` in the World panel), and the Prompt panel updating. Not run here: no
-  provider key is available in this environment. This is the last step before flipping to **Done**.
+- ✅ **Live run** (with a real `WICA_ANTHROPIC_API_KEY`): confirmed end-to-end — speech and sensor
+  inputs trigger the robot, it replies and fires Commands (including the 10s `dance` sitting
+  `running` in the World panel), and the World/prompt panels update live. Live testing surfaced
+  several bugs since fixed in follow-up commits (zombie command entries; the model emitting commands
+  as prose instead of native tool calls; prompt-panel rendering of tool calls; the tracking model).
 
-Once the live run is confirmed, set this plan **Done** and promote
-[specs/conversation-demo.md](../specs/conversation-demo.md) from **Draft** to
-**Stable** (its status rule: Stable requires a Done plan).
+Both statuses updated: this plan is **Done** and [specs/conversation-demo.md](../specs/conversation-demo.md)
+is promoted to **Stable**.

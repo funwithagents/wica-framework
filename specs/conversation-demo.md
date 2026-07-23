@@ -1,6 +1,6 @@
 # Conversation demo
 
-**Status:** Draft
+**Status:** Stable
 
 ## Purpose
 
