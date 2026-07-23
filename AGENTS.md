@@ -2,6 +2,31 @@
 
 Start at [specs/_index.md](specs/_index.md) for an overview of the specs and their status before making design decisions or writing code — it lists each spec and whether it's settled ("Stable") or still open ("Draft"/"Not started"). For what's been (or is being) built, see [plans/_index.md](plans/_index.md), which lists each implementation plan and its status ("Todo"/"In progress"/"Done").
 
+## Project map
+
+Where things live. This is a coarse, module-level map — for the full file inventory use `git ls-files`; for design detail follow the spec links.
+
+### Top-level layout
+
+| Path | What's there |
+|---|---|
+| `src/wica/` | The library itself — one module per core concept (see below) |
+| `specs/` | Pre-implementation design docs, one per concept, each with a `**Status:**` — indexed by [specs/_index.md](specs/_index.md) |
+| `plans/` | Implementation plans turning settled specs into buildable steps — indexed by [plans/_index.md](plans/_index.md) |
+| `tests/` | Fast, deterministic, no-network tests; mirrors the `src/wica/` module structure |
+| `tests-e2e/` | Opt-in live tests that call a real LLM provider (not collected by default `pytest`) |
+
+### `src/wica/` modules
+
+| Module | Role | Spec |
+|---|---|---|
+| [content.py](src/wica/content.py) | Provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`), shared everywhere | [content.md](specs/content.md) |
+| [world.py](src/wica/world.py) | The World state registry: typed entries, register/update/get API, rendering to `Content`, `get_world()` singleton | [world.md](specs/world.md) |
+| [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
+| [__init__.py](src/wica/__init__.py) | Public API surface — re-exports the names above | — |
+
+**Keep this map current:** when you add, rename, or remove a top-level `src/wica/` module or a root directory, update the map in the same change — same discipline as keeping spec/plan statuses honest (below). A test (`tests/test_project_map.py`) enforces that every `src/wica/*.py` module appears here and vice-versa.
+
 ## Keeping statuses current
 
 Specs and plans both carry a status, and you are responsible for keeping it honest as work progresses — update it in the same change that does the work, not as an afterthought:
