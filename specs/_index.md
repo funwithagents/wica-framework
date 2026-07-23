@@ -14,7 +14,9 @@ The name breaks down as:
 | Spec | Description | Status |
 |---|---|---|
 | [project.md](project.md) | Project structure and tooling: Python version, packaging with uv, layout conventions | Stable |
-| [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to an LLM-facing prompt string | Draft |
+| [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Draft |
+| [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to LLM-facing `Content` | Draft |
+| [agent.md](agent.md) | Agent reasoning loop: LangChain-backed inference, snapshot history, fresh/archival rendering, async cancellable tools, output sink | Draft |
 
 ### Status legend
 
