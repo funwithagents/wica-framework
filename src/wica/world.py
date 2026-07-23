@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from wica.content import Content, TextPart
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -15,7 +17,8 @@ def _now() -> datetime:
 @dataclass
 class WorldEntryConfig:
     type: type
-    serialize_fn: Callable[[Any, Any], str]
+    serialize_fn: Callable[[Any, Any], Content]
+    archival_serialize_fn: Callable[[Any, Any], Content] | None = None
     include_in_prompt: bool = True
     triggers_llm_call: bool = False
     trigger_condition_fn: Callable[[Any, Any], bool] | None = None
@@ -53,7 +56,8 @@ class World:
         key: str,
         type: type[T],
         *,
-        serialize_fn: Callable[[T | None, T | None], str],
+        serialize_fn: Callable[[T | None, T | None], Content],
+        archival_serialize_fn: Callable[[T | None, T | None], Content] | None = None,
         include_in_prompt: bool = True,
         triggers_llm_call: bool = False,
         trigger_condition_fn: Callable[[T | None, T | None], bool] | None = None,
@@ -65,6 +69,7 @@ class World:
             self._configs[key] = WorldEntryConfig(
                 type=type,
                 serialize_fn=serialize_fn,
+                archival_serialize_fn=archival_serialize_fn,
                 include_in_prompt=include_in_prompt,
                 triggers_llm_call=triggers_llm_call,
                 trigger_condition_fn=trigger_condition_fn,
@@ -189,22 +194,23 @@ class World:
         with self._lock:
             self._trigger_handler = handler
 
-    def render_entry(self, entry: WorldEntry) -> str:
+    def render_entry(self, entry: WorldEntry, *, archival: bool = False) -> Content:
         with self._lock:
             config = self._configs.get(entry.key)
         if config is None:
             raise KeyError(entry.key)
 
-        previous_value = entry.previous.value if entry.previous is not None else None
-        content = config.serialize_fn(entry.current.value, previous_value)
-        return (
-            f'<entry key="{entry.key}" id="{entry.current.id}">\n'
-            f"{content}\n"
-            f"Updated: {entry.current.timestamp.isoformat()}\n"
-            f"</entry>"
-        )
+        serialize_fn = config.serialize_fn
+        if archival and config.archival_serialize_fn is not None:
+            serialize_fn = config.archival_serialize_fn
 
-    def render_full_prompt(self) -> str:
+        previous_value = entry.previous.value if entry.previous is not None else None
+        body = serialize_fn(entry.current.value, previous_value)
+        opening = TextPart(f'<entry key="{entry.key}" id="{entry.current.id}">\n')
+        closing = TextPart(f"\nUpdated: {entry.current.timestamp.isoformat()}\n</entry>")
+        return [opening, *body, closing]
+
+    def render_full_prompt(self) -> Content:
         with self._lock:
             entries = [
                 entry
@@ -212,7 +218,13 @@ class World:
                 if self._configs[key].include_in_prompt
             ]
             entries.sort(key=lambda e: e.current.timestamp)
-        return "\n".join(self.render_entry(entry) for entry in entries)
+
+        content: Content = []
+        for i, entry in enumerate(entries):
+            if i > 0:
+                content.append(TextPart("\n"))
+            content.extend(self.render_entry(entry))
+        return content
 
     def _cancel_all_timers(self) -> None:
         with self._lock:
