@@ -81,20 +81,18 @@ and the point is to watch the model choose them in context.
 |---|---|---|
 | **Dance** | Performs a ~10-second dance. | Long-running: visibly "in progress" in the World state for its whole duration, and (per single-track attention) the robot ignores new input until it finishes. Best illustration of a long physical action. |
 | **Set emotion `<emotion>`** | Sets the robot's current emotional state. | Reflected in World state and in the robot's subsequent prompt/behaviour. |
-| **Start tracking user `<id>`** | Adds a person to the set the robot is actively tracking. | |
-| **Stop tracking user `<id>`** | Removes a person from that set. | |
-| **Switch tracking to user `<id>`** | Focuses tracking on one specific person. | |
+| **Switch tracking to user `<id>` (or nobody)** | Follows one specific person, or stops tracking when called with no user. | The robot follows **at most one** person at a time — a single `tracked_user` entry, not a set. Passing no user (null) clears it. |
 
-Tracking models the robot deciding to follow specific people over time — distinct from the
+Tracking models the robot deciding to follow a specific person over time — distinct from the
 transient "closest user" perception input. Emotion and tracking persist in the World until changed;
 "dance" is a momentary action.
 
 The robot is instructed (via its system prompt) to **only follow the person currently closest to
 it**: when the closest person changes it switches tracking to them, and when no one is close it
-stops tracking everyone. This is LLM-driven, not a hard rule — it demonstrates the robot reasoning
-from the `closest_user` perception (which triggers a step when it changes, including when it clears
-to "no one") and issuing `switch`/`stop` tracking commands in response, rather than the demo
-wiring the effect deterministically behind the agent's back.
+stops tracking (switches to nobody). This is LLM-driven, not a hard rule — it demonstrates the
+robot reasoning from the `closest_user` perception (which triggers a step when it changes, including
+when it clears to "no one") and issuing the `switch_user_tracking` command in response, rather than
+the demo wiring the effect deterministically behind the agent's back.
 
 ## Configuration
 

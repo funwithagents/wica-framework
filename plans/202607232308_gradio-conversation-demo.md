@@ -4,14 +4,14 @@
 
 ## Goal
 
-Implement the conversation demo specced in [specs/gradio-conversation-demo.md](../specs/gradio-conversation-demo.md): the first runnable
+Implement the conversation demo specced in [specs/conversation-demo.md](../specs/conversation-demo.md): the first runnable
 example that lets someone *see* WICA work end-to-end — type "speech" at an agent, watch it reason
 over the World, issue Commands, and reply, with the live World state and the exact prompt sent to
 the model visible alongside. It doubles as a manual test harness for the framework
 (World → Inputs → Commands → Agent all exercised through the public API).
 
 This plan covers the build; the product/UX (surfaces, robot persona, sensor inputs, robot actions)
-lives in [specs/gradio-conversation-demo.md](../specs/gradio-conversation-demo.md) and is not restated here.
+lives in [specs/conversation-demo.md](../specs/conversation-demo.md) and is not restated here.
 
 Non-goal: exercising v1's deferred features (concurrency/interruption, streaming). v1 Agent is
 single-in-flight and hands the sink one complete string per step; the demo lives within that.
@@ -134,5 +134,5 @@ without credentials.
   provider key is available in this environment. This is the last step before flipping to **Done**.
 
 Once the live run is confirmed, set this plan **Done** and promote
-[specs/gradio-conversation-demo.md](../specs/gradio-conversation-demo.md) from **Draft** to
+[specs/conversation-demo.md](../specs/conversation-demo.md) from **Draft** to
 **Stable** (its status rule: Stable requires a Done plan).

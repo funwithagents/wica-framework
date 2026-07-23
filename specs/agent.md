@@ -104,7 +104,7 @@ The Agent takes a small family of optional callbacks, all **instrumentation, not
 | `on_prompt` | `Callable[[list[BaseMessage]], None]` | with the exact rendered messages, immediately before each model `ainvoke`. Fresh/archival rendering keeps the deep prefix byte-stable, so a hook logging every prompt sees the same cacheable prefix the provider does |
 | `on_command` | `Callable[[str, dict[str, Any]], None]` | with each Command's `(name, args)` at dispatch time, as the model issues it |
 
-The first consumer is the conversation demo (see [gradio-conversation-demo.md](gradio-conversation-demo.md)): `on_prompt` feeds its prompt panel, `on_trigger` shows inputs on the conversation's input side, and `on_command` shows the robot's actions on the assistant side. They are equally plain debugging aids.
+The first consumer is the conversation demo (see [conversation-demo.md](conversation-demo.md)): `on_prompt` feeds its prompt panel, `on_trigger` shows inputs on the conversation's input side, and `on_command` shows the robot's actions on the assistant side. They are equally plain debugging aids.
 
 Complementing the hooks, the World and Agent emit **lifecycle logs** under the standard-library `wica.*` loggers, so the whole loop is traceable without wiring any hook: **DEBUG** for per-event detail (registrations, every World update and whether it triggered a call, trigger receipt, step start/complete, LLM output, command dispatch/start/end), **INFO** for coarse lifecycle (agent start/stop, dropped triggers), and **WARNING** for command failures. This is debug tracing, not the project's eventual error-handling story — fire-and-forget listener/trigger exceptions in the World are still swallowed (see [world.md](world.md)).
 

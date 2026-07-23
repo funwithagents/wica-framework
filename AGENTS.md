@@ -15,7 +15,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | `plans/` | Implementation plans turning settled specs into buildable steps — indexed by [plans/_index.md](plans/_index.md) |
 | `tests/` | Fast, deterministic, no-network tests; mirrors the `src/wica/` module structure |
 | `tests-e2e/` | Opt-in live tests that call a real LLM provider (not collected by default `pytest`) |
-| `examples/` | Runnable example apps demonstrating the framework — e.g. the Gradio conversation demo ([specs/gradio-conversation-demo.md](specs/gradio-conversation-demo.md)); deps live in the `demo` uv group, not core |
+| `examples/` | Runnable example apps demonstrating the framework — e.g. the Gradio conversation demo ([specs/conversation-demo.md](specs/conversation-demo.md)); deps live in the `demo` uv group, not core |
 
 ### `src/wica/` modules
 

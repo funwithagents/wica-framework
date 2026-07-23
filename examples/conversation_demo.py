@@ -12,7 +12,7 @@ Override the model/provider with WICA_PROVIDER / WICA_MODEL (the key var follows
 WICA_<PROVIDER>_API_KEY, e.g. WICA_OPENAI_API_KEY). Set WICA_LOG=DEBUG to watch the
 Agent drop triggers and retire completed command entries.
 
-This is the first runnable example (see specs/gradio-conversation-demo.md). It drives WICA
+This is the first runnable example (see specs/conversation-demo.md). It drives WICA
 purely through its public API: speech and sensor events enter the World; the Agent reasons
 over the World, issues Commands, and replies; the UI shows the live World state and the exact
 prompt sent to the model.
@@ -72,12 +72,11 @@ not only to what they say.
 You can act on the world with these commands:
 - dance(): do a little dance (takes about 10 seconds).
 - set_emotion(emotion): show an emotion on your face (e.g. "happy", "curious", "sad").
-- start_user_tracking(user_id) / stop_user_tracking(user_id): begin or end following a person.
-- switch_user_tracking(user_id): focus your attention on one specific person.
+- switch_user_tracking(user_id): follow one specific person; pass no user (null) to stop tracking.
 
-You only follow the person currently closest to you. Whenever the closest person changes, switch
-your tracking to them; and when no one is close to you anymore, stop tracking everyone you were
-following.
+You follow at most one person at a time — the one currently closest to you. Whenever the closest
+person changes, switch your tracking to them; and when no one is close to you anymore, stop
+tracking by switching to nobody.
 
 Keep spoken replies short and warm — one or two sentences. Set an emotion when your mood shifts,
 and use tracking when it makes sense to follow someone. Speak naturally; never mention "world
@@ -111,29 +110,17 @@ def _emotion(value: Any, previous: Any) -> Content:
     return [TextPart(f"You currently feel {value}.")]
 
 
-def _tracked_users(value: Any, previous: Any) -> Content:
-    if not value:
-        return [TextPart("You are not tracking anyone.")]
-    joined = ", ".join(str(u) for u in value)
-    return [TextPart(f"You are tracking these users: {joined}.")]
-
-
-def _active_user(value: Any, previous: Any) -> Content:
+def _tracked_user(value: Any, previous: Any) -> Content:
     if value is None:
-        return [TextPart("You are not focused on anyone in particular.")]
-    return [TextPart(f'You are focused on user "{value}".')]
-
-
-# Keys the World panel reads back, in display order.
-DEMO_KEYS = ["speech_input", "closest_user", "emotion", "tracked_users", "active_tracked_user"]
+        return [TextPart("You are not tracking anyone.")]
+    return [TextPart(f'You are tracking user "{value}".')]
 
 
 def register_world() -> None:
     world.register("speech_input", str, serialize_fn=_speech, triggers_llm_call=True)
     world.register("closest_user", str, serialize_fn=_closest_user, triggers_llm_call=True)
     world.register("emotion", str, serialize_fn=_emotion)
-    world.register("tracked_users", list, serialize_fn=_tracked_users)
-    world.register("active_tracked_user", str, serialize_fn=_active_user)
+    world.register("tracked_user", str, serialize_fn=_tracked_user)
 
 
 # --- Commands (the robot's fake actions) --------------------------------------------
@@ -151,41 +138,16 @@ def set_emotion(emotion: str) -> str:
     return f"Now showing emotion: {emotion}."
 
 
-def start_user_tracking(user_id: str) -> str:
-    """Begin visually tracking the user with this id, following them over time."""
-    tracked = list(world.get("tracked_users") or [])
-    if user_id not in tracked:
-        tracked.append(user_id)
-        world.update("tracked_users", tracked)
-    return f"Started tracking user {user_id}."
-
-
-def stop_user_tracking(user_id: str) -> str:
-    """Stop visually tracking the user with this id."""
-    tracked = list(world.get("tracked_users") or [])
-    if user_id in tracked:
-        tracked.remove(user_id)
-        world.update("tracked_users", tracked)
-    if world.get("active_tracked_user") == user_id:
-        world.update("active_tracked_user", None)
-    return f"Stopped tracking user {user_id}."
-
-
-def switch_user_tracking(user_id: str) -> str:
-    """Focus your attention on this user specifically, tracking them from now on."""
-    tracked = list(world.get("tracked_users") or [])
-    if user_id not in tracked:
-        tracked.append(user_id)
-        world.update("tracked_users", tracked)
-    world.update("active_tracked_user", user_id)
-    return f"Now focused on user {user_id}."
+def switch_user_tracking(user_id: str | None = None) -> str:
+    """Follow one specific person, tracking them from now on. Pass no user (null) to stop
+    tracking anyone. You follow at most one person at a time."""
+    world.update("tracked_user", user_id)
+    return "Stopped tracking." if user_id is None else f"Now tracking user {user_id}."
 
 
 COMMANDS = [
     dance,
     set_emotion,
-    start_user_tracking,
-    stop_user_tracking,
     switch_user_tracking,
 ]
 
