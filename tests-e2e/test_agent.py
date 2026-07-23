@@ -31,9 +31,9 @@ def identity_serialize(value: Any, previous: Any) -> Content:
     return [TextPart(str(value))]
 
 
-def find_tool_call_entry(world: World) -> WorldEntry | None:
+def find_command_entry(world: World) -> WorldEntry | None:
     for entry in world.get_prompt_entries():
-        if entry.key.startswith("agent:tool_call:"):
+        if entry.key.startswith("agent:command:"):
             return entry
     return None
 
@@ -86,21 +86,21 @@ def test_real_tool_calling_round_trip():
         await asyncio.sleep(0.1)  # gives the polling loop below a chance to see "running"
         return a + b
 
-    agent.register_tool(add)
+    agent.register_command(add)
     agent.start()
     try:
         world.update("prompt", "What is 2 + 2? Use the add tool.")
 
-        wait_until(lambda: find_tool_call_entry(world) is not None)
-        running_entry = find_tool_call_entry(world)
+        wait_until(lambda: find_command_entry(world) is not None)
+        running_entry = find_command_entry(world)
         assert running_entry is not None
         assert running_entry.current.value.state == "running"
 
         # Listen on this specific key so the terminal update is captured via the
         # immutable snapshot handed to the listener — reading world.get_entry(key)
         # again would race the Agent's own cleanup, which unregisters the key right
-        # after folding its terminal value into history (see agent.md decision on
-        # tool-status World keys).
+        # after folding its terminal value into history (see commands.md decision on
+        # command-execution World keys).
         terminal: list[WorldEntry] = []
         done = threading.Event()
 

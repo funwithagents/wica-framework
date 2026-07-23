@@ -10,6 +10,7 @@ Implementation plans for WICA — each plan turns a settled part of a spec (see 
 | [202607231408_world-content-model.md](202607231408_world-content-model.md) | Neutral `Content` model (`TextPart`/`ImagePart`) and migrating World serialization/rendering from `str` to `Content`, with fresh/archival split | Done |
 | [202607231754_e2e-test-framework.md](202607231754_e2e-test-framework.md) | Reusable `tests-e2e/` scaffolding: skip-without-credentials mechanics and a real-chat-model helper | Done |
 | [202607231801_agent-v1-implementation.md](202607231801_agent-v1-implementation.md) | Agent v1 reasoning loop: LangChain-backed inference over World, snapshot history, event-driven async tools, output sink | Done |
+| [202607232000_command-abstraction.md](202607232000_command-abstraction.md) | Command abstraction: new `commands.md` spec, reframe agent.md "Tools" → "Commands", rename code (`register_command`, `CommandExecution`, `agent:command:<id>`) — tools become the under-the-hood primitive | Done |
 
 ## Status legend
 

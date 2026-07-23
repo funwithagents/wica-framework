@@ -29,8 +29,11 @@ class AgentConfig:
     model_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
+# A Command is WICA's unit of agent action on the World, backed under the hood by a
+# LangChain tool (see specs/commands.md). CommandExecution is the value stored in the
+# per-call `agent:command:<call_id>` World entry that tracks its lifecycle.
 @dataclass(frozen=True)
-class ToolCallStatus:
+class CommandExecution:
     name: str
     args: dict[str, Any]
     state: Literal["running", "complete", "failed", "cancelled"]
@@ -55,24 +58,24 @@ class AssistantTextRecord:
 
 
 @dataclass(frozen=True)
-class ToolCallRecord:
+class CommandRecord:
     call_id: str
     name: str
     args: dict[str, Any]
 
 
-HistoryRecord = ObservationRecord | AssistantTextRecord | ToolCallRecord
+HistoryRecord = ObservationRecord | AssistantTextRecord | CommandRecord
 
 
 def _format_args(args: dict[str, Any]) -> str:
     return ", ".join(f"{k}={v!r}" for k, v in args.items())
 
 
-def _serialize_tool_call_status(
-    value: ToolCallStatus | None, previous: ToolCallStatus | None
+def _serialize_command_execution(
+    value: CommandExecution | None, previous: CommandExecution | None
 ) -> Content:
     if value is None:
-        return [TextPart("(no tool call)")]
+        return [TextPart("(no command)")]
     call = f"{value.name}({_format_args(value.args)})"
     if value.state == "running":
         text = f"Calling {call}…"
@@ -131,12 +134,13 @@ class Agent:
             self._loop = loop
             self._loop_thread = None
 
-        self._tools: dict[str, BaseTool] = {}
+        # name -> the LangChain tool backing each registered Command (see commands.md)
+        self._commands: dict[str, BaseTool] = {}
         self._bound_model: Runnable[Any, AIMessage] = self.model
         self._history: list[HistoryRecord] = []
         self._busy = False
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
-        self._tool_call_keys: set[str] = set()
+        self._command_keys: set[str] = set()
         # Rendered (fresh, archival) Content for entries unregistered right after being
         # captured into history (see _append_observation) — World.render_entry needs the
         # entry's serialize_fn, which unregister() deletes, so a detached entry can no
@@ -150,13 +154,16 @@ class Agent:
         )
         return cls(model, system_prompt=config.system_prompt, **kwargs)
 
-    def register_tool(
+    def register_command(
         self,
         fn: Callable[..., Any] | BaseTool,
         *,
         name: str | None = None,
         description: str | None = None,
     ) -> None:
+        """Register a Command. Commonly a plain function or an off-the-shelf LangChain
+        tool — the tool is the under-the-hood primitive the model issues the Command
+        through (see specs/commands.md)."""
         wrapped: BaseTool
         if isinstance(fn, BaseTool):
             wrapped = fn
@@ -164,8 +171,8 @@ class Agent:
             wrapped = tool(name, description=description)(fn)
         else:
             wrapped = tool(fn, description=description)
-        self._tools[wrapped.name] = wrapped
-        self._bound_model = self.model.bind_tools(list(self._tools.values()))
+        self._commands[wrapped.name] = wrapped
+        self._bound_model = self.model.bind_tools(list(self._commands.values()))
 
     def start(self) -> None:
         self._world.set_trigger_handler(self._on_world_trigger)
@@ -175,24 +182,24 @@ class Agent:
     def stop(self) -> None:
         self._world.set_trigger_handler(None)
         for key in list(self._running_tasks):
-            call_id = key.removeprefix("agent:tool_call:")
-            self.cancel_tool_call(call_id)
+            call_id = key.removeprefix("agent:command:")
+            self.cancel_command(call_id)
         if self._owns_loop and self._loop_thread is not None and self._loop_thread.is_alive():
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._loop_thread.join()
 
-    def cancel_tool_call(self, call_id: str) -> None:
+    def cancel_command(self, call_id: str) -> None:
         try:
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
         if running_loop is self._loop:
-            self._cancel_tool_call_on_loop(call_id)
+            self._cancel_command_on_loop(call_id)
         else:
-            self._loop.call_soon_threadsafe(self._cancel_tool_call_on_loop, call_id)
+            self._loop.call_soon_threadsafe(self._cancel_command_on_loop, call_id)
 
-    def _cancel_tool_call_on_loop(self, call_id: str) -> None:
-        key = f"agent:tool_call:{call_id}"
+    def _cancel_command_on_loop(self, call_id: str) -> None:
+        key = f"agent:command:{call_id}"
         task = self._running_tasks.get(key)
         if task is not None:
             task.cancel()
@@ -226,51 +233,51 @@ class Agent:
 
         for call in response.tool_calls:
             call_id = call["id"] or uuid.uuid4().hex
-            self._history.append(ToolCallRecord(call_id, call["name"], call["args"]))
-            self._dispatch_tool_call(call_id, call["name"], call["args"])
+            self._history.append(CommandRecord(call_id, call["name"], call["args"]))
+            self._dispatch_command(call_id, call["name"], call["args"])
 
-    def _dispatch_tool_call(self, call_id: str, name: str, args: dict[str, Any]) -> None:
-        key = f"agent:tool_call:{call_id}"
-        self._tool_call_keys.add(key)
+    def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
+        key = f"agent:command:{call_id}"
+        self._command_keys.add(key)
         self._world.register(
             key,
-            ToolCallStatus,
-            serialize_fn=_serialize_tool_call_status,
+            CommandExecution,
+            serialize_fn=_serialize_command_execution,
             include_in_prompt=True,
             triggers_llm_call=True,
             trigger_condition_fn=lambda old, new: new is not None and new.is_terminal(),
         )
-        self._world.update(key, ToolCallStatus(name=name, args=args, state="running"))
-        task = self._loop.create_task(self._run_tool(key, call_id, name, args))
+        self._world.update(key, CommandExecution(name=name, args=args, state="running"))
+        task = self._loop.create_task(self._run_command(key, call_id, name, args))
         self._running_tasks[key] = task
 
-    async def _run_tool(self, key: str, call_id: str, name: str, args: dict[str, Any]) -> None:
+    async def _run_command(self, key: str, call_id: str, name: str, args: dict[str, Any]) -> None:
         try:
-            tool_ = self._tools[name]
-            result = await tool_.ainvoke(args)
+            command = self._commands[name]
+            result = await command.ainvoke(args)
         except asyncio.CancelledError:
-            self._world.update(key, ToolCallStatus(name=name, args=args, state="cancelled"))
+            self._world.update(key, CommandExecution(name=name, args=args, state="cancelled"))
             raise
         except Exception as exc:
             self._world.update(
-                key, ToolCallStatus(name=name, args=args, state="failed", error=str(exc))
+                key, CommandExecution(name=name, args=args, state="failed", error=str(exc))
             )
         else:
             self._world.update(
-                key, ToolCallStatus(name=name, args=args, state="complete", result=str(result))
+                key, CommandExecution(name=name, args=args, state="complete", result=str(result))
             )
         finally:
             self._running_tasks.pop(key, None)
 
     def _append_observation(self, entry: WorldEntry) -> None:
         self._history.append(ObservationRecord(self._world.get_prompt_entries()))
-        if entry.key in self._tool_call_keys and entry.current.value.is_terminal():
+        if entry.key in self._command_keys and entry.current.value.is_terminal():
             self._detached_renders[(entry.key, entry.current.id)] = (
                 self._world.render_entry(entry, archival=False),
                 self._world.render_entry(entry, archival=True),
             )
             self._world.unregister(entry.key)
-            self._tool_call_keys.discard(entry.key)
+            self._command_keys.discard(entry.key)
 
     def _render_messages(self) -> list[BaseMessage]:
         messages: list[BaseMessage] = [SystemMessage(content=self.system_prompt)]
@@ -304,7 +311,7 @@ class Agent:
                 messages.append(HumanMessage(content=blocks))
             elif isinstance(record, AssistantTextRecord):
                 pending_ai_blocks.append({"type": "text", "text": record.text})
-            elif isinstance(record, ToolCallRecord):
+            elif isinstance(record, CommandRecord):
                 pending_ai_blocks.append(
                     {
                         "type": "text",

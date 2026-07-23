@@ -165,12 +165,12 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
         await asyncio.sleep(0.05)  # slow enough that "running" is observable below
         return a + b
 
-    agent.register_tool(add)
+    agent.register_command(add)
     agent.start()
 
     world.update("input", "add 1 and 2")
 
-    key = "agent:tool_call:call1"
+    key = "agent:command:call1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
     entry = world.get_entry(key)
     assert entry.current.value.name == "add"
@@ -208,7 +208,7 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
         await asyncio.sleep(0.05)  # slow enough that "running" is observable below
         raise ValueError("boom")
 
-    agent.register_tool(explode)
+    agent.register_command(explode)
     agent.start()
 
     world.update("input", "explode please")
@@ -245,14 +245,14 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
         )
     )
     agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
-    agent.register_tool(fast_tool)
-    agent.register_tool(slow_tool)
+    agent.register_command(fast_tool)
+    agent.register_command(slow_tool)
     agent.start()
 
     world.update("input", "run both")
 
-    fast_key = "agent:tool_call:fast"
-    slow_key = "agent:tool_call:slow"
+    fast_key = "agent:command:fast"
+    slow_key = "agent:command:slow"
     wait_until(lambda: world.get_entry(slow_key).current.value.state == "running")
 
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
@@ -368,7 +368,7 @@ def test_stop_clears_trigger_handler(loop, world, sink):
     assert model.calls == []
 
 
-def test_cancel_tool_call_marks_cancelled_and_retriggers(loop, world, sink):
+def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     block = asyncio.Event()
 
@@ -384,15 +384,15 @@ def test_cancel_tool_call_marks_cancelled_and_retriggers(loop, world, sink):
         )
     )
     agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
-    agent.register_tool(block_forever)
+    agent.register_command(block_forever)
     agent.start()
 
     world.update("input", "block please")
 
-    key = "agent:tool_call:call1"
+    key = "agent:command:call1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
 
-    agent.cancel_tool_call("call1")
+    agent.cancel_command("call1")
     wait_until(lambda: sink.event.is_set())
 
     second_call_messages = model.calls[1]
@@ -402,7 +402,7 @@ def test_cancel_tool_call_marks_cancelled_and_retriggers(loop, world, sink):
         if isinstance(m, HumanMessage)
     )
 
-    agent.cancel_tool_call("does-not-exist")  # no-op, must not raise
+    agent.cancel_command("does-not-exist")  # no-op, must not raise
 
     agent.stop()
 
@@ -418,12 +418,12 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
 
     model = FakeChatModel(respond=tool_call_response([("block_forever", {}, "call1")]))
     agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
-    agent.register_tool(block_forever)
+    agent.register_command(block_forever)
     agent.start()
 
     world.update("input", "block please")
 
-    key = "agent:tool_call:call1"
+    key = "agent:command:call1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
 
     agent.stop()
