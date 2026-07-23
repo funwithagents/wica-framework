@@ -94,6 +94,10 @@ Cancellation is itself a **Command** (`cancel_activity(task_id)`, a WICA-native 
 
 **Known limitation — accepted for now: races.** Concurrency is unbounded (as many concurrent calls as arise) and triggers originate on World dispatch threads, so genuine races exist: two concurrently-thinking calls can both decide to "cancel the other and proceed," cancel-cycling or briefly double-speaking. Knowingly accepted at this stage. Mitigating factor: the single loop reduces it to cooperative interleaving, and the World's `RLock` keeps state access safe — races are logical/ordering, not memory corruption. Future tightening (deferred, see open question below): bound concurrency; make "cancel current owner + take the output channel" an atomic critical section between `await`s on the loop; and/or a single-owner output sink as a hard backstop against double-speak.
 
+### Instrumentation: the `on_prompt` hook
+
+The Agent takes an optional `on_prompt: Callable[[list[BaseMessage]], None]`, called with the exact rendered messages **immediately before** each model `ainvoke`. It's the observability seam for "show me what the Agent actually sent" — the rendered prompt is otherwise internal to `_run_step`. It is **instrumentation, not control flow**: it can't alter the messages (they're passed after rendering, and its return value is ignored), and a hook that raises is caught and logged so it can never abort a step. The first consumer is the conversation demo's prompt panel (see [gradio-conversation-demo.md](gradio-conversation-demo.md)); it's equally a plain debugging aid. Fresh/archival rendering means the deep prefix is byte-stable across calls, so a hook logging every prompt sees the same cacheable prefix the provider does.
+
 ## Open questions
 
 These are unresolved and several are central. Do not treat the "Settled" split above as covering them.

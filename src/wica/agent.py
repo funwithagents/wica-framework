@@ -119,11 +119,16 @@ class Agent:
         world: World | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         output_sink: Callable[[str], Awaitable[None]] | None = None,
+        on_prompt: Callable[[list[BaseMessage]], None] | None = None,
     ) -> None:
         self.model = model
         self.system_prompt = system_prompt
         self._world = world if world is not None else get_world()
         self._output_sink = output_sink if output_sink is not None else _noop_output_sink
+        # Optional debug/observability hook fired with the exact messages just before each
+        # model call. Instrumentation only — never control flow; a raising hook is caught
+        # and logged so it can't abort a step. See specs/agent.md "Instrumentation".
+        self._on_prompt = on_prompt
 
         self._owns_loop = loop is None
         self._loop_thread: threading.Thread | None
@@ -224,6 +229,11 @@ class Agent:
     async def _run_step(self, entry: WorldEntry) -> None:
         self._append_observation(entry)
         messages = self._render_messages()
+        if self._on_prompt is not None:
+            try:
+                self._on_prompt(messages)
+            except Exception:
+                _logger.exception("on_prompt hook raised; ignoring")
         response = await self._bound_model.ainvoke(messages)
 
         text = response.text

@@ -356,6 +356,55 @@ def test_freshness_flips_at_bundle_boundary(loop, world, sink):
     agent.stop()
 
 
+def test_on_prompt_hook_fires_with_the_messages_the_model_receives(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = FakeChatModel(respond=text_response("hi"))
+    captured: list[list[BaseMessage]] = []
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        on_prompt=captured.append,
+    )
+    agent.start()
+
+    world.update("input", "hello")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(captured) == 1  # one hook call per step
+    assert captured[0] == model.calls[0]  # exactly the messages handed to the model
+
+    agent.stop()
+
+
+def test_on_prompt_hook_raising_does_not_abort_the_step(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = FakeChatModel(respond=text_response("still replied"))
+
+    def boom(messages: list[BaseMessage]) -> None:
+        raise RuntimeError("hook failure")
+
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        on_prompt=boom,
+    )
+    agent.start()
+
+    world.update("input", "hello")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert sink.texts == ["still replied"]  # the raising hook didn't break the step
+    assert len(model.calls) == 1
+
+    agent.stop()
+
+
 def test_stop_clears_trigger_handler(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     model = FakeChatModel(respond=text_response("hi"))
