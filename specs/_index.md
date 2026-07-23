@@ -14,12 +14,13 @@ The name breaks down as:
 | Spec | Description | Status |
 |---|---|---|
 | [project.md](project.md) | Project structure and tooling: Python version, packaging with uv, layout conventions | Stable |
-| [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Draft |
-| [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to LLM-facing `Content` | Draft |
+| [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Stable |
+| [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to LLM-facing `Content` | Stable |
 | [agent.md](agent.md) | Agent reasoning loop: LangChain-backed inference, snapshot history, fresh/archival rendering, async cancellable tools, output sink | Draft |
 
 ### Status legend
 
 - **Not started** — no design decisions made yet
 - **Draft** — actively being brainstormed/defined, contains open questions
-- **Stable** — settled, implementation-ready
+- **Stable** — settled **and** fully reflected in the implementation (design and code are in sync)
+- **Updated** — the design is settled, but the spec has been edited since it was last implemented, so the code no longer matches it; a new implementation plan is needed (or in progress) to catch up. Returns to **Stable** once that plan is Done.

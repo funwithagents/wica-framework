@@ -1,5 +1,7 @@
 # World content-model update
 
+**Status:** Done
+
 Introduces the neutral `Content` model ([specs/content.md](../specs/content.md)) and switches World serialization/rendering from `str` to `Content`, plus adds the fresh/archival serialization split ([specs/world.md](../specs/world.md)). Builds on the shipped World registry (`src/wica/world.py`).
 
 ## Scope

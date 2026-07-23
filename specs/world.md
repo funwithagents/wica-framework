@@ -1,6 +1,6 @@
 # World
 
-**Status:** Draft
+**Status:** Stable
 
 ## Purpose
 

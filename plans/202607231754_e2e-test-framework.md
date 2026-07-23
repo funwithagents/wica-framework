@@ -1,5 +1,7 @@
 # E2E test framework
 
+**Status:** Done
+
 Introduces the reusable scaffolding for **live** tests — tests that call a real LLM provider over the network — per [specs/project.md](../specs/project.md) "Live/e2e tests". This plan ships the framework only: the `tests-e2e/` directory, skip-without-credentials mechanics, and a helper to build a real chat model from env. It adds no concrete e2e test cases for any particular module — those belong to whichever feature plan needs live coverage, built on top of this framework.
 
 ## Why a separate plan

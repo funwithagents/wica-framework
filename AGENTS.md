@@ -1,6 +1,16 @@
 # Agent instructions
 
-Start at [specs/_index.md](specs/_index.md) for an overview of the specs and their status before making design decisions or writing code — it lists each spec and whether it's settled ("Stable") or still open ("Draft"/"Not started").
+Start at [specs/_index.md](specs/_index.md) for an overview of the specs and their status before making design decisions or writing code — it lists each spec and whether it's settled ("Stable") or still open ("Draft"/"Not started"). For what's been (or is being) built, see [plans/_index.md](plans/_index.md), which lists each implementation plan and its status ("Todo"/"In progress"/"Done").
+
+## Keeping statuses current
+
+Specs and plans both carry a status, and you are responsible for keeping it honest as work progresses — update it in the same change that does the work, not as an afterthought:
+
+- **Spec status** (`**Status:**` line near the top of each spec, and the Status column in [specs/_index.md](specs/_index.md)) tracks both *design maturity* and *whether the code reflects the current spec*: `Not started` → `Draft` (open questions remain) → `Stable` (settled **and** fully implemented — design and code in sync). Promote a spec to `Stable` only once its core design is settled, its remaining open questions are genuine deferrals (not load-bearing unknowns), **and** a plan implementing it is `Done`. Keep the `**Status:**` line and the index row in sync.
+  - **When you edit a `Stable` spec in a way that requires new code, set its status to `Updated` in the same change.** `Updated` means the design is settled but the implementation now lags it. Then write a new implementation plan for the gap (see below) and, once that plan is `Done`, flip the spec back to `Stable`. This `Stable → Updated → Stable` loop is what keeps a spec's status an honest signal of whether the code actually matches it — never leave a re-designed spec sitting at `Stable`.
+  - A purely editorial edit to a `Stable` spec (typos, clarifications, reordering — nothing that changes what the code should do) stays `Stable`; it does **not** need `Updated`.
+- **Plan status** (`**Status:**` line near the top of each plan, and the Status column in [plans/_index.md](plans/_index.md)) tracks *implementation progress*: `Todo` → `In progress` → `Done`. Mark a plan `Done` only once it's implemented and verified (lint, type check, tests all pass — see Verification). Keep the `**Status:**` line and the index row in sync.
+- Whenever you add a spec or plan, add its row to the relevant `_index.md`; whenever you change a status, change it in both the file and the index.
 
 ## Testing
 
@@ -23,6 +33,7 @@ Each e2e test skips itself (does not fail) if its required API key isn't set in 
 - Write implementation plans as files in the [plans](plans/) folder.
 - Name each file `YYYYMMDDHHmm_plan-title.md`: a compact date-time prefix, then an underscore, then a kebab-case title (words separated by `-`).
   - Example: `202607201830_world-registry-refactor.md`
+- Give each plan a `**Status:**` line just under its title (`Todo`/`In progress`/`Done`) and add a row for it to [plans/_index.md](plans/_index.md). Keep both current as work progresses (see "Keeping statuses current" above).
 
 ## Verification
 

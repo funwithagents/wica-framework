@@ -1,5 +1,7 @@
 # World registry implementation
 
+**Status:** Done
+
 Implements the settled behavior in `specs/world.md` ("Core concepts"). The three spec "Open questions" are deferred (see end).
 
 ## Scope

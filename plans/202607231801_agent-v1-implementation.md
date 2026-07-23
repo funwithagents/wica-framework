@@ -1,5 +1,7 @@
 # Agent v1 implementation
 
+**Status:** Done
+
 Implements a first working slice of the Agent reasoning loop ([specs/agent.md](../specs/agent.md)), on top of the shipped `Content` model (`src/wica/content.py`) and World registry (`src/wica/world.py`). `agent.md` is Draft with several open questions still unresolved; this plan deliberately scopes v1 to a subset and records the concrete calls made to fill the gaps that block writing code at all. Everything else stays deferred (see "Out of scope / deferred").
 
 Builds on [plans/202607231754_e2e-test-framework.md](202607231754_e2e-test-framework.md) for the e2e tier (see "E2E tests" below) — that plan should land first.
