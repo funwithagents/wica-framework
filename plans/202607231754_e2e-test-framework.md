@@ -12,7 +12,7 @@ The mechanics of "a test tier that never runs in the normal dev loop and skips c
 - `tests-e2e/conftest.py` — **new**: the same autouse World-reset fixture `tests/conftest.py` has (duplicated, not imported — `tests-e2e` isn't a package that imports from `tests`, and the fixture is a few lines).
 - `tests-e2e/support.py` — **new**, shared helpers (no `test_` prefix, so pytest doesn't collect it as a test module):
   - `require_env(name: str) -> str` — returns the env var's value, or calls `pytest.skip(...)` if unset.
-  - `real_chat_model(**kwargs) -> BaseChatModel` — calls `require_env("ANTHROPIC_API_KEY")`, then `init_chat_model(model, model_provider="anthropic", **kwargs)` where `model` defaults to `os.environ.get("WICA_E2E_MODEL", "claude-haiku-4-5")` (cheapest/fastest available, overridable without a code change since model names/aliases drift).
+  - `real_chat_model(**kwargs) -> BaseChatModel` — calls `require_env("WICA_ANTHROPIC_API_KEY")`, then `init_chat_model(model, model_provider="anthropic", api_key=..., **kwargs)` where `model` defaults to `os.environ.get("WICA_E2E_MODEL", "claude-haiku-4-5")` (cheapest/fastest available, overridable without a code change since model names/aliases drift). The var is namespaced `WICA_ANTHROPIC_API_KEY` (not the provider's own `ANTHROPIC_API_KEY`) so setting it can't be mistaken for configuring some other tool/product that reads the generic name; the key is passed to `init_chat_model` explicitly since `langchain-anthropic` only auto-reads the generic env var.
 - `tests-e2e/test_smoke.py` — **new**, one throwaway test proving the framework itself works (see "Implementation steps").
 - `pyproject.toml` — add `langchain-anthropic` to the `dev` dependency group (needed to actually construct a real chat model), and add `tests-e2e` to `[tool.pyright]`'s `include`.
 - `AGENTS.md` — new subsection under "Testing" documenting the tier and how to run it (see below).
@@ -37,12 +37,12 @@ def require_env(name: str) -> str:
 
 
 def real_chat_model(**kwargs) -> BaseChatModel:
-    require_env("ANTHROPIC_API_KEY")
+    api_key = require_env("WICA_ANTHROPIC_API_KEY")
     model = os.environ.get("WICA_E2E_MODEL", "claude-haiku-4-5")
-    return init_chat_model(model, model_provider="anthropic", **kwargs)
+    return init_chat_model(model, model_provider="anthropic", api_key=api_key, **kwargs)
 ```
 
-- `pytest.skip` (not a hard failure) inside `require_env` is the point: running `uv run pytest tests-e2e` without `ANTHROPIC_API_KEY` set produces a skip, not a red build.
+- `pytest.skip` (not a hard failure) inside `require_env` is the point: running `uv run pytest tests-e2e` without `WICA_ANTHROPIC_API_KEY` set produces a skip, not a red build.
 - `WICA_E2E_MODEL` exists so the pinned default model name can be bumped via env instead of a code change once it's deprecated/renamed by the provider — model aliases have historically drifted.
 
 ## `pyproject.toml` changes
@@ -92,7 +92,7 @@ Each e2e test skips itself (does not fail) if its required API key isn't set in 
 
 1. `pyproject.toml`: add `langchain-anthropic` to `dev`; add `tests-e2e` to `[tool.pyright]` `include`; `uv sync --dev`.
 2. `tests-e2e/conftest.py`: World-reset fixture. `tests-e2e/support.py`: `require_env`, `real_chat_model`.
-3. `tests-e2e/test_smoke.py`: one throwaway test (e.g. `real_chat_model().invoke("say hi").content` is non-empty) confirming the mechanics actually behave as described before anything else builds on top: `uv run pytest` (no args) does **not** collect anything under `tests-e2e/`, and `uv run pytest tests-e2e` with `ANTHROPIC_API_KEY` unset produces a **skip**, not a failure or error.
+3. `tests-e2e/test_smoke.py`: one throwaway test (e.g. `real_chat_model().invoke("say hi").content` is non-empty) confirming the mechanics actually behave as described before anything else builds on top: `uv run pytest` (no args) does **not** collect anything under `tests-e2e/`, and `uv run pytest tests-e2e` with `WICA_ANTHROPIC_API_KEY` unset produces a **skip**, not a failure or error.
 4. `AGENTS.md`: add the "Live/e2e tests" subsection.
 
 ## Out of scope / deferred

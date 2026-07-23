@@ -12,6 +12,8 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "langchain>=0.3.0",
+    "langchain-anthropic>=0.3.0",
     "pyright>=1.1.411",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
@@ -24,7 +26,7 @@ target-version = "py312"
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "tests-e2e"]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.12"
