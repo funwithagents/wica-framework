@@ -23,6 +23,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 |---|---|---|
 | [content.py](src/wica/content.py) | Provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`), shared everywhere | [content.md](specs/content.md) |
 | [world.py](src/wica/world.py) | The World state registry: typed entries, register/update/get API, rendering to `Content`, `get_world()` singleton | [world.md](specs/world.md) |
+| [config.py](src/wica/config.py) | Framework config: `AgentConfig`/`WicaConfig` dataclasses, strict JSON loading (`from_dict`/`from_json`), `system_prompt_file`, `api_key`/`api_key_env` resolution | [config.md](specs/config.md) |
 | [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
 | [__init__.py](src/wica/__init__.py) | Public API surface — re-exports the names above | — |
 
@@ -53,6 +54,14 @@ uv run pytest tests-e2e
 ```
 
 Each e2e test skips itself (does not fail) if its required API key isn't set in the environment — see `tests-e2e/support.py`.
+
+**A real key is available via `~/.zshrc`** (`WICA_ANTHROPIC_API_KEY`), but the shell tool runs non-interactive `bash`/`zsh`, which doesn't source it — a plain `uv run pytest tests-e2e` in that shell sees no key and every test skips. To actually run against the live provider, source it explicitly in an interactive `zsh` invocation:
+
+```
+zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e'
+```
+
+Never `echo`/print the key itself; when checking whether it's set, redact the value (e.g. `env | grep WICA | sed -E 's/=.*/=<set>/'`).
 
 ## Implementation plans
 

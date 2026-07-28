@@ -6,11 +6,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from wica.agent import Agent
 from wica.content import Content, TextPart
 from wica.world import World, WorldEntry, get_world
 
-from support import real_chat_model
+from support import real_agent
 
 WAIT_TIMEOUT = 15.0
 
@@ -53,12 +52,7 @@ def test_plain_text_round_trip():
     world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
 
     sink = RecordingSink()
-    agent = Agent(
-        real_chat_model(),
-        system_prompt="You are a terse test assistant.",
-        world=world,
-        output_sink=sink,
-    )
+    agent = real_agent(world=world, output_sink=sink)
     agent.start()
     try:
         world.update("prompt", "Say hello in one short sentence.")
@@ -74,12 +68,7 @@ def test_real_tool_calling_round_trip():
     world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
 
     sink = RecordingSink()
-    agent = Agent(
-        real_chat_model(),
-        system_prompt="You are a terse test assistant. Use tools when appropriate.",
-        world=world,
-        output_sink=sink,
-    )
+    agent = real_agent(world=world, output_sink=sink)
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""
@@ -113,8 +102,10 @@ def test_real_tool_calling_round_trip():
         assert done.wait(timeout=WAIT_TIMEOUT)
         assert terminal[0].current.value.state == "complete"
         assert "4" in (terminal[0].current.value.result or "")
-
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
-        assert sink.texts
+        # Deliberately not asserting the model also speaks a follow-up text reply here: whether
+        # free text follows a completed tool call is model-decided, not a WICA guarantee (see
+        # agent.md open question #2) — asserting it would make this test flaky on real
+        # non-determinism unrelated to the tool-calling round trip under test. The sink/output
+        # path itself is already covered by test_plain_text_round_trip.
     finally:
         agent.stop()

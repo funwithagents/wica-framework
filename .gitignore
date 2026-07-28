@@ -12,3 +12,7 @@ __pycache__/
 
 # Claude Code personal settings (not shared)
 .claude/settings.local.json
+
+# WICA config files with a literal api_key (see specs/config.md "API key: literal or env
+# reference") — a local override you create yourself; committed configs use api_key_env instead.
+**/*.local.json

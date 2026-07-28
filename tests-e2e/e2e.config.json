@@ -1,0 +1,8 @@
+{
+  "agent": {
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5",
+    "api_key_env": "WICA_ANTHROPIC_API_KEY",
+    "system_prompt": "You are a terse test assistant. Use tools when appropriate."
+  }
+}

@@ -6,7 +6,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from langchain.chat_models import init_chat_model
@@ -21,18 +21,11 @@ from langchain_core.messages import (
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
 
+from wica.config import AgentConfig
 from wica.content import Content, ImagePart, TextPart
 from wica.world import World, WorldEntry, get_world
 
 _logger = logging.getLogger(__name__)
-
-
-@dataclass
-class AgentConfig:
-    provider: str
-    model: str
-    system_prompt: str
-    model_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 # A Command is WICA's unit of agent action on the World, backed under the hood by a
@@ -182,9 +175,10 @@ class Agent:
 
     @classmethod
     def from_config(cls, config: AgentConfig, **kwargs: Any) -> Agent:
-        model = init_chat_model(
-            config.model, model_provider=config.provider, **config.model_kwargs
-        )
+        model_kwargs = dict(config.model_kwargs)
+        if config.api_key is not None:
+            model_kwargs["api_key"] = config.api_key
+        model = init_chat_model(config.model, model_provider=config.provider, **model_kwargs)
         return cls(model, system_prompt=config.system_prompt, **kwargs)
 
     def register_command(

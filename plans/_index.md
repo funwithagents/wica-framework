@@ -12,6 +12,7 @@ Implementation plans for WICA — each plan turns a settled part of a spec (see 
 | [202607231801_agent-v1-implementation.md](202607231801_agent-v1-implementation.md) | Agent v1 reasoning loop: LangChain-backed inference over World, snapshot history, event-driven async tools, output sink | Done |
 | [202607232000_command-abstraction.md](202607232000_command-abstraction.md) | Command abstraction: new `commands.md` spec, reframe agent.md "Tools" → "Commands", rename code (`register_command`, `CommandExecution`, `agent:command:<id>`) — tools become the under-the-hood primitive | Done |
 | [202607232308_gradio-conversation-demo.md](202607232308_gradio-conversation-demo.md) | First runnable example ([specs/conversation-demo.md](../specs/conversation-demo.md)): Gradio conversation UI over a simulated social robot, live World/prompt panels, sensor inputs + robot-action Commands; adds an `Agent.on_prompt` debug hook | Done |
+| [202607281051_config-from-json.md](202607281051_config-from-json.md) | Framework config from JSON ([specs/config.md](../specs/config.md)): `config.py` with `WicaConfig`/`AgentConfig`, strict `from_json` loader, `system_prompt_file`, `api_key`/`api_key_env`; migrates the conversation demo and e2e tier to committed config files, each composing `WicaConfig.from_json` + `Agent.from_config` directly (no `from_config_file`) | Done |
 
 ## Status legend
 

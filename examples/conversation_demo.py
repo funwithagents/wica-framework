@@ -4,13 +4,16 @@ Run with:
 
     uv run --group demo python examples/conversation_demo.py
 
-Set your provider key first (WICA-namespaced, default provider is Anthropic):
+Configuration comes from agent.config.json (next to this file), which reads its API key from the
+WICA-namespaced WICA_ANTHROPIC_API_KEY env var (see agent.config.json's "api_key_env") — set it
+before running:
 
     export WICA_ANTHROPIC_API_KEY=sk-...
 
-Override the model/provider with WICA_PROVIDER / WICA_MODEL (the key var follows:
-WICA_<PROVIDER>_API_KEY, e.g. WICA_OPENAI_API_KEY). Set WICA_LOG=DEBUG to watch the
-Agent drop triggers and retire completed command entries.
+To use a different provider/model, or a literal key, edit agent.config.json directly (see
+specs/config.md) — e.g. copy it to a `*.local.json` file (git-ignored) with a literal "api_key".
+Its "logging" field controls the wica.* loggers; DEBUG shows the full World+Agent lifecycle trace
+(registrations, every update and whether it triggered a call, LLM output, command start/end).
 
 This is the first runnable example (see specs/conversation-demo.md). It drives WICA
 purely through its public API: speech and sensor events enter the World; the Agent reasons
@@ -22,66 +25,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import queue
 import threading
+from pathlib import Path
 from typing import Any
 
 import gradio as gr
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from wica import AgentConfig, Content, TextPart, WorldEntry, get_world
+from wica import Content, TextPart, WorldEntry, get_world
 from wica.agent import Agent, CommandExecution
+from wica.config import MissingEnvError, WicaConfig, apply_logging
 
-# Keep third-party logs quiet but surface WICA's own. INFO shows agent start/stop, dropped
-# triggers, and command failures; DEBUG shows the full World+Agent lifecycle trace (registrations,
-# every update and whether it triggered a call, LLM output, command start/end). WICA_LOG overrides.
+# Keep third-party logs quiet; the config's "logging" field sets the wica.* level once the Agent
+# is built. Until then (or if it fails to build), default to INFO.
 logging.basicConfig(level=logging.WARNING)
-logging.getLogger("wica").setLevel(os.environ.get("WICA_LOG", "INFO").upper())
+logging.getLogger("wica").setLevel(logging.INFO)
 
 # --- Configuration -------------------------------------------------------------------
 
-PROVIDER = os.environ.get("WICA_PROVIDER", "anthropic")
-MODEL = os.environ.get("WICA_MODEL", "claude-sonnet-5")
-
-# WICA reads its *own* namespaced key (e.g. WICA_ANTHROPIC_API_KEY) so it never collides with a
-# provider key another tool in your environment already uses. We route it into the provider's
-# standard env var (ANTHROPIC_API_KEY, …) for this process only, so LangChain picks it up normally.
-_STANDARD_KEY_ENV_BY_PROVIDER = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "google_genai": "GOOGLE_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "mistralai": "MISTRAL_API_KEY",
-}
-WICA_KEY_ENV = f"WICA_{PROVIDER.upper()}_API_KEY"
-_standard_key_env = _STANDARD_KEY_ENV_BY_PROVIDER.get(PROVIDER)
-_wica_key = os.environ.get(WICA_KEY_ENV)
-HAS_KEY = bool(_wica_key)
-if _wica_key and _standard_key_env:
-    os.environ[_standard_key_env] = _wica_key
-
-SYSTEM_PROMPT = """\
-You are Wica, a friendly social robot standing in a room, greeting and chatting with people.
-
-Your senses and body are described to you as a set of world entries in each message: what the
-closest person said to you, who is standing closest to you, how you currently feel, and who you
-are tracking. React naturally to what changes — you may respond to someone walking up to you,
-not only to what they say.
-
-You can act on the world with these commands:
-- dance(): do a little dance (takes about 10 seconds).
-- set_emotion(emotion): show an emotion on your face (e.g. "happy", "curious", "sad").
-- switch_user_tracking(user_id): follow one specific person; pass no user (null) to stop tracking.
-
-You follow at most one person at a time — the one currently closest to you. Whenever the closest
-person changes, switch your tracking to them; and when no one is close to you anymore, stop
-tracking by switching to nobody.
-
-Keep spoken replies short and warm — one or two sentences. Set an emotion when your mood shifts,
-and use tracking when it makes sense to follow someone. Speak naturally; never mention "world
-entries", "commands", or that you are an AI.
-"""
+CONFIG_PATH = Path(__file__).parent / "agent.config.json"
 
 # --- World entries the demo owns ----------------------------------------------------
 #
@@ -245,12 +208,19 @@ def on_prompt(messages: list[BaseMessage]) -> None:
         _latest_prompt = rendered
 
 
-# Build the agent only when a key is present, so the app opens and is explorable without one.
+# Build the agent from the committed config; fall back to explore-only if its api_key_env isn't
+# set, so the app still opens and is explorable without credentials.
+register_world()
 agent: Agent | None = None
-if HAS_KEY:
-    register_world()
+config_error: str | None = None
+try:
+    wica_config = WicaConfig.from_json(CONFIG_PATH)
+except MissingEnvError as exc:
+    config_error = f"environment variable {exc.env_var!r} is not set"
+else:
+    apply_logging(wica_config.logging)
     agent = Agent.from_config(
-        AgentConfig(provider=PROVIDER, model=MODEL, system_prompt=SYSTEM_PROMPT),
+        wica_config.agent,
         output_sink=output_sink,
         on_prompt=on_prompt,
         on_trigger=on_trigger,
@@ -259,8 +229,6 @@ if HAS_KEY:
     for command in COMMANDS:
         agent.register_command(command)
     agent.start()
-else:
-    register_world()
 
 
 # --- UI handlers ---------------------------------------------------------------------
@@ -329,11 +297,11 @@ def tick() -> tuple[list[dict[str, str]], list[list[str]], str]:
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="WICA — social robot demo") as demo:
         gr.Markdown("# WICA — talk to a social robot")
-        if not HAS_KEY:
+        if config_error is not None:
             gr.Markdown(
-                f"> ⚠️ **No API key found.** Set `{WICA_KEY_ENV}` and restart "
-                "to enable the robot's reasoning. You can still explore the World panel: sensor "
-                "inputs below update the World, but nothing will reason over it yet."
+                f"> ⚠️ **Agent not started: {config_error}.** Set it and restart to enable the "
+                "robot's reasoning. You can still explore the World panel: sensor inputs below "
+                "update the World, but nothing will reason over it yet."
             )
         gr.Markdown(
             "The robot handles **one thought at a time** (v1): while it's thinking or in the "
