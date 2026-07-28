@@ -179,7 +179,10 @@ def _flatten_content(content: str | list[Any]) -> str:
                 parts.append(str(block))
         else:
             parts.append(str(block))
-    return "\n".join(parts)
+    # Concatenate (don't newline-join): each World-rendered block already carries its own
+    # newlines (an `<entry ...>\n` opener, a `\n...</entry>\n` closer), so this shows the exact
+    # text the model receives when the provider merges adjacent blocks — no phantom blank lines.
+    return "".join(parts)
 
 
 def _render_message(m: BaseMessage) -> str:

@@ -261,16 +261,17 @@ class World:
         previous_value = entry.previous.value if entry.previous is not None else None
         body = serialize_fn(entry.current.value, previous_value)
         opening = TextPart(f'<entry key="{entry.key}" id="{entry.current.id}">\n')
-        closing = TextPart(f"\nUpdated: {entry.current.timestamp.isoformat()}\n</entry>")
+        # The closing part ends with a trailing newline so that, when entries are concatenated
+        # (the way adjacent parts merge — see content.md), each `</entry>` sits on its own line
+        # and the next `<entry ...>` starts on the following one, rather than gluing together.
+        closing = TextPart(f"\nUpdated: {entry.current.timestamp.isoformat()}\n</entry>\n")
         return [opening, *body, closing]
 
     def render_full_prompt(self) -> Content:
         entries = self.get_prompt_entries()
 
         content: Content = []
-        for i, entry in enumerate(entries):
-            if i > 0:
-                content.append(TextPart("\n"))
+        for entry in entries:
             content.extend(self.render_entry(entry))
         return content
 

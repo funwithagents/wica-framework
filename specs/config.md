@@ -40,7 +40,7 @@ The config is a **top-level framework config** with an `agent` block nested insi
 
 ### JSON, loaded via plain dataclasses
 
-The config objects stay **plain dataclasses** — `AgentConfig` (as today, [agent.py](../src/wica/agent.py)) plus a new `WicaConfig` — with hand-written `from_dict(data)` / `from_json(path)` classmethods. No pydantic dependency is added; agent.md's "pydantic-style" phrasing is treated as intent (a small validated settings object), not a mandate to adopt pydantic.
+The config objects stay **plain dataclasses** — `AgentConfig` plus `WicaConfig`, both now in [config.py](../src/wica/config.py) (see "Module placement" — `AgentConfig` moved here out of `agent.py`) — with hand-written `from_dict(data)` / `from_json(path)` classmethods. No pydantic dependency is added; agent.md's "pydantic-style" phrasing is treated as intent (a small validated settings object), not a mandate to adopt pydantic.
 
 Loading is **strict**, so a broken file fails loudly at load time rather than silently doing nothing:
 
@@ -94,7 +94,7 @@ A new `src/wica/config.py` module owns **both config dataclasses** — `AgentCon
 
 Direction of dependency: `config.py` holds only **pure data + loading** and imports nothing from `agent.py`; `agent.py` imports `AgentConfig` from `config.py`. This keeps the dependency one-way (no import cycle): model construction (`init_chat_model`) stays in `Agent.from_config` in `agent.py`, so `config.py` never needs to know about `Agent`. `WicaConfig` therefore carries no `build_agent()` method, and `Agent` carries no `from_config_file` — "file → running Agent" is the two-call composition described above ("Flow into the Agent"), not a single convenience method on either side.
 
-The public API (`__init__.py`) re-exports both `AgentConfig` and `WicaConfig` from `config.py`. Adding a top-level `src/wica/` module means the **Project map in AGENTS.md** and its drift-guard test (`tests/test_project_map.py`) are updated in the same change.
+The public API (`__init__.py`) re-exports the config surface a caller composes an Agent from a file with — `AgentConfig`, `WicaConfig`, the `apply_logging` startup helper, and the `ConfigError`/`MissingEnvError` types a caller catches (the demo falls back to explore-only on `MissingEnvError`, the e2e helper skips) — all from `config.py`. Adding a top-level `src/wica/` module means the **Project map in AGENTS.md** and its drift-guard test (`tests/test_project_map.py`) are updated in the same change.
 
 ## Open questions
 

@@ -66,6 +66,8 @@ The live state for a registered key — created by `register()` and updated by e
 
 The World is a **singleton** — one instance exists per process/run, and (for now) there's a single global World rather than any per-agent partitioning/nesting. It's accessed via a module-level `get_world()` accessor (lazily creating the shared instance on first call) rather than a classic `__new__`-overridden singleton class — the more idiomatic Python shape (cf. `logging.getLogger()`), and it avoids the gotcha where `__init__` re-runs on every direct `World()` call even when `__new__` returns the cached instance. Calling `World()` directly is discouraged by convention, not structurally prevented.
 
+A companion module-level `reset_world()` drops the cached instance (after cancelling its outstanding TTL timers and shutting down its executor) so the next `get_world()` builds a fresh one. It exists **for tests** — giving each test an isolated World without leaking timers/threads between them — not as part of the runtime API; production code holds a single World for the process's life.
+
 Internally, the World holds two parallel per-key stores: registration metadata (`WorldEntryConfig`) and live state (`WorldEntry`), both keyed by the plain string `key`. Keeping registration and live state apart means, e.g., the snapshot handed to listener/trigger callbacks (below) only ever needs to copy the small `WorldEntry`, never the callables living in `WorldEntryConfig`.
 
 The World exposes the following API:
@@ -85,7 +87,7 @@ The World exposes the following API:
 
 ### Rendered entry format
 
-Each entry — whether from `render_entry(entry)` or as part of `render_full_prompt()` — is wrapped in an XML-style tag, chosen because Claude tracks tag boundaries and attribute values reliably — both reading them and echoing them back precisely, which matters since the model may need to reference a `key`/`id` exactly (e.g. in a Command). Because rendering now yields `Content` (parts) rather than a string, the wrapper is expressed as `TextPart`s **bracketing** the serialized parts: an opening `TextPart` (`<entry ...>\n`), then the parts returned by the (fresh or archival) serialize function, then a closing `TextPart` (`\nUpdated: ...\n</entry>`). For a text-only entry this flattens to exactly the block below; for a multimodal one the image sits as its own part between the two text parts (the Agent's adapter may merge adjacent `TextPart`s when converting to provider blocks):
+Each entry — whether from `render_entry(entry)` or as part of `render_full_prompt()` — is wrapped in an XML-style tag, chosen because Claude tracks tag boundaries and attribute values reliably — both reading them and echoing them back precisely, which matters since the model may need to reference a `key`/`id` exactly (e.g. in a Command). Because rendering now yields `Content` (parts) rather than a string, the wrapper is expressed as `TextPart`s **bracketing** the serialized parts: an opening `TextPart` (`<entry ...>\n`), then the parts returned by the (fresh or archival) serialize function, then a closing `TextPart` (`\nUpdated: ...\n</entry>\n`). The closing part's **trailing newline** makes each entry self-separating: when entries are concatenated (the way adjacent parts merge — see [content.md](content.md)), each `</entry>` lands on its own line and the next `<entry ...>` starts on the following line, so blocks never glue together (`</entry><entry ...>`) and no separator part is needed between them. For a text-only entry this flattens to exactly the block below; for a multimodal one the image sits as its own part between the two text parts (the Agent's adapter may merge adjacent `TextPart`s when converting to provider blocks):
 
 ```
 <entry key="user_profile" id="1">
@@ -98,7 +100,7 @@ Updated: 2026-07-20T14:32:10Z
 - **Content**: the untouched parts returned by `serialize_fn` (fresh) or `archival_serialize_fn` (archival).
 - **Trailing line** (in the closing `TextPart`, after the content): a plain `Updated: <ISO 8601 timestamp>` line, deliberately not an attribute — visually separating stable identity (`key`/`id`, referenceable) from freshness (informational only), while staying structurally inside `<entry>...</entry>` so its association with this entry (and not a neighboring one) is unambiguous rather than relying on line ordering. The timestamp is always **absolute**, never relative phrasing ("updated 5s ago"): once text is sent to the LLM it's frozen, so a pre-rendered relative time would silently go stale as soon as that message sits in history (or a cached prompt prefix) longer than the phrasing implies. If recency framing is wanted, it's the model's job at inference time, informed by a small "current time" marker injected fresh outside the cached/stable part of the prompt on each call — not stored on the entry or persisted into history.
 
-`render_full_prompt()` concatenates these blocks' parts, one per included entry (each produced by `render_entry(entry)`), in timestamp order, into a single `Content`.
+`render_full_prompt()` concatenates these blocks' parts, one per included entry (each produced by `render_entry(entry)`), in timestamp order, into a single `Content` — relying on each block's trailing newline to separate adjacent entries rather than inserting its own separator part.
 
 ## Open questions
 

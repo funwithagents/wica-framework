@@ -370,7 +370,7 @@ def test_render_entry_format():
         r'^<entry key="user_profile" id="2">\n'
         r"Jane is logged in\.\n"
         r"Updated: (?P<ts>.+)\n"
-        r"</entry>$",
+        r"</entry>\n$",
         rendered,
     )
     assert match is not None
@@ -385,7 +385,7 @@ def test_render_entry_body_parts_are_returned_unwrapped():
     assert content == [
         TextPart('<entry key="photo" id="2">\n'),
         ImagePart(b"\x89PNG", "image/png"),
-        TextPart(f"\nUpdated: {world.get_entry('photo').current.timestamp.isoformat()}\n</entry>"),
+        TextPart(f"\nUpdated: {world.get_entry('photo').current.timestamp.isoformat()}\n</entry>\n"),
     ]
 
 
@@ -407,7 +407,7 @@ def test_render_entry_uses_archival_serialize_fn_when_requested():
     assert archival == [
         TextPart(f'<entry key="photo" id="{entry.current.id}">\n'),
         TextPart("a photo"),
-        TextPart(f"\nUpdated: {entry.current.timestamp.isoformat()}\n</entry>"),
+        TextPart(f"\nUpdated: {entry.current.timestamp.isoformat()}\n</entry>\n"),
     ]
 
 
@@ -490,6 +490,21 @@ def test_render_full_prompt_block_matches_render_entry():
     assert flatten(world.render_full_prompt()) == flatten(
         world.render_entry(world.get_entry("solo"))
     )
+
+
+def test_render_full_prompt_separates_entries_with_a_single_newline():
+    world = World()
+    world.register("first", str, serialize_fn=identity_serialize)
+    world.register("second", str, serialize_fn=identity_serialize)
+    world.update("first", "1")
+    world.update("second", "2")
+
+    prompt = flatten(world.render_full_prompt())
+    # Entries self-separate: one entry's `</entry>` and the next `<entry ...>` sit on adjacent
+    # lines — never glued together, and never with a blank line between them.
+    assert '</entry>\n<entry key="second"' in prompt
+    assert "</entry>\n\n<entry" not in prompt
+    assert "</entry><entry" not in prompt
 
 
 def test_render_full_prompt_places_multimodal_part_between_entries():
