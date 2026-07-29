@@ -27,6 +27,7 @@ import asyncio
 import logging
 import queue
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -129,9 +130,18 @@ COMMANDS = [
 
 _events: queue.Queue[dict[str, str]] = queue.Queue()
 
+_NO_PROMPT_YET = "(no prompt sent to the model yet)"
+
 _state_lock = threading.Lock()
 _conversation: list[dict[str, str]] = []
-_latest_prompt = "(no prompt sent to the model yet)"
+# Every reasoning step's prompt, append-only, each {"label": ..., "text": ...} — never mutated in
+# place, so readers (tick/on_select_prompt) can pull `text` outside the lock once they've read len.
+_prompts: list[dict[str, str]] = []
+# The trigger that started the current step. on_trigger fires just before on_prompt on the agent
+# loop (see agent.py _run_step), so on_prompt reads this to label each captured prompt.
+_last_trigger_label = "start"
+# How many prompts the UI has shown; tick snaps the view to the newest whenever this trails len().
+_last_shown_count = 0
 
 
 async def output_sink(text: str) -> None:
@@ -147,15 +157,22 @@ def _describe_trigger(entry: WorldEntry) -> str:
         return f'🗣️ "{value}"'
     if key == "closest_user":
         return "👤 Closest user gone" if value is None else f"👤 Closest user detected: {value}"
+    if key.startswith("agent:command:"):
+        name = value.name if isinstance(value, CommandExecution) else key
+        return f"⚡ command finished: {name}"
     return f"⚡ {key} = {value!r}"
 
 
 def on_trigger(entry: WorldEntry) -> None:
     """A World entry triggered a step — show it on the input (right) side. Skip the robot's own
-    command-completion re-triggers; those are already shown as command calls on the left."""
+    command-completion re-triggers on the transcript (they're already shown as command calls on the
+    left), but always record the label so on_prompt can tag this step's prompt correctly."""
+    global _last_trigger_label
+    label = _describe_trigger(entry)
+    _last_trigger_label = label
     if entry.key.startswith("agent:command:"):
         return
-    _events.put({"role": "user", "content": _describe_trigger(entry)})
+    _events.put({"role": "user", "content": label})
 
 
 def on_command(name: str, args: dict[str, Any]) -> None:
@@ -204,11 +221,13 @@ def _render_message(m: BaseMessage) -> str:
 
 
 def on_prompt(messages: list[BaseMessage]) -> None:
-    """Debug hook — capture the exact messages sent to the model. Runs on the agent loop."""
-    global _latest_prompt
+    """Debug hook — capture the exact messages sent to the model, appending to the prompt history
+    labelled by time + the trigger that caused this step. Runs on the agent loop."""
     rendered = "\n\n".join(_render_message(m) for m in messages)
+    stamp = datetime.now().astimezone().strftime("%H:%M:%S")
     with _state_lock:
-        _latest_prompt = rendered
+        label = f"{stamp} — {_last_trigger_label}"
+        _prompts.append({"label": label, "text": rendered})
 
 
 # Build the agent from the committed config; fall back to explore-only if its api_key_env isn't
@@ -281,7 +300,18 @@ def on_user_gone() -> None:
     world.update("closest_user", None)
 
 
-def tick() -> tuple[list[dict[str, str]], list[list[str]], str]:
+def on_select_prompt(index: int | None) -> Any:
+    """User picked a prompt from the dropdown — show its exact text."""
+    if index is None:
+        return gr.update()
+    with _state_lock:
+        if 0 <= index < len(_prompts):
+            return _prompts[index]["text"]
+    return gr.update()
+
+
+def tick() -> tuple[list[dict[str, str]], list[list[str]], Any, Any]:
+    global _last_shown_count
     with _state_lock:
         while True:
             try:
@@ -290,8 +320,21 @@ def tick() -> tuple[list[dict[str, str]], list[list[str]], str]:
                 break
             _conversation.append(event)
         conversation = list(_conversation)
-        prompt = _latest_prompt
-    return conversation, _world_rows(), prompt
+        count = len(_prompts)
+        choices = [(p["label"], i) for i, p in enumerate(_prompts)]
+        newest_text = _prompts[-1]["text"] if _prompts else None
+
+    # Snap the view to the newest prompt only when a new step has appeared; between steps leave the
+    # dropdown and textbox untouched (bare gr.update()) so the user can browse older prompts.
+    if count > _last_shown_count:
+        _last_shown_count = count
+        newest = count - 1
+        selector_update = gr.update(choices=choices, value=newest)
+        prompt_update = gr.update(value=newest_text)
+    else:
+        selector_update = gr.update()
+        prompt_update = gr.update()
+    return conversation, _world_rows(), selector_update, prompt_update
 
 
 # --- Layout --------------------------------------------------------------------------
@@ -343,20 +386,26 @@ def build_ui() -> gr.Blocks:
                     interactive=False,
                     wrap=True,
                 )
+                prompt_selector = gr.Dropdown(
+                    label="Prompt sent to the model (newest shown automatically)",
+                    choices=[],
+                    interactive=True,
+                )
                 prompt_view = gr.Textbox(
-                    label="Prompt sent to the model (last step)",
+                    show_label=False,
                     lines=16,
                     interactive=False,
-                    value=_latest_prompt,
+                    value=_NO_PROMPT_YET,
                 )
 
         send.click(on_send, inputs=msg, outputs=msg)
         msg.submit(on_send, inputs=msg, outputs=msg)
         detect.click(on_detect, inputs=user_id, outputs=user_id)
         gone.click(on_user_gone)
+        prompt_selector.change(on_select_prompt, inputs=prompt_selector, outputs=prompt_view)
 
         timer = gr.Timer(0.4)
-        timer.tick(tick, outputs=[chatbot, world_view, prompt_view])
+        timer.tick(tick, outputs=[chatbot, world_view, prompt_selector, prompt_view])
 
     return demo
 

@@ -38,8 +38,13 @@ Four surfaces, side by side:
    values (key, version id, value, when it last changed). This is the robot's whole mind laid bare:
    what it heard, who's nearby, how it feels, who it's tracking, and any command currently running.
    It updates in real time as inputs arrive and the robot acts.
-3. **Prompt.** The exact prompt sent to the model on the most recent reasoning step, shown as
-   read-only text. Lets the user see *how* World state becomes an LLM prompt — the core idea of WICA.
+3. **Prompt.** The exact prompt sent to the model, shown as read-only text — so the user can see
+   *how* World state becomes an LLM prompt, the core idea of WICA. Every reasoning step's prompt is
+   kept, not just the last one: a dropdown above the text lists them (labelled by time and the
+   trigger that caused the step, e.g. `14:03:12 — 🗣️ "hello"`) so the user can scroll back through
+   the history. When a new step runs, its prompt is appended and **automatically shown** — the view
+   always snaps to the newest, even if the user had an older one selected. Between steps the user is
+   free to browse earlier prompts.
 4. **Inputs.** Buttons that inject sensor-style events into the World (below), simulating a robot's
    perception without real hardware.
 
