@@ -94,7 +94,7 @@ def _serialize_command_execution(
         return [TextPart("(no command)")]
     call = f"{value.name}({_format_args(value.args)})"
     if value.state == "running":
-        text = f"Calling {call}…"
+        text = f"Calling {call}… (still running — not finished)"
     elif value.state == "complete":
         text = f"Called {call} → {value.result}"
     elif value.state == "failed":
@@ -120,6 +120,23 @@ def _content_to_message_blocks(content: Content) -> list[dict[str, Any]]:
         else:
             blocks.append({"type": "text", "text": part.to_string()})
     return blocks
+
+
+_COMMAND_KEY_PREFIX = "agent:command:"
+
+
+def _command_ack(call_id: str) -> str:
+    """The stringified outcome carried by a Command's tool_result. It is a fixed *pointer*, not the
+    result: a tool_result is pinned immediately after its tool_use (a tool_use can't be left
+    dangling across turns), so it can only sit at the Command's dispatch site, not where the Command
+    actually finished — and while a Command is in flight a tool_result present at all reads as "the
+    call returned." So the real status/result is delivered by the Command's World entry
+    (`agent:command:<call_id>`), rendered as an observation at the point it happens. See
+    specs/commands.md, specs/agent.md ("Rendering to messages")."""
+    return (
+        f"Dispatched. Live status and result appear in the World state as entry "
+        f"{_COMMAND_KEY_PREFIX}{call_id}."
+    )
 
 
 async def _noop_output_sink(text: str) -> None:
@@ -169,9 +186,6 @@ class Agent:
         self._busy = False
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._command_keys: set[str] = set()
-        # call_id -> stringified command result, used to render the tool_result that pairs with
-        # each past command's native tool_call when re-rendering history (see _render_messages).
-        self._command_results: dict[str, str] = {}
 
     @classmethod
     def from_config(cls, config: AgentConfig, **kwargs: Any) -> Agent:
@@ -212,7 +226,7 @@ class Agent:
         _logger.info("agent stopping")
         self._world.set_trigger_handler(None)
         for key in list(self._running_tasks):
-            call_id = key.removeprefix("agent:command:")
+            call_id = key.removeprefix(_COMMAND_KEY_PREFIX)
             self.cancel_command(call_id)
         if self._owns_loop and self._loop_thread is not None and self._loop_thread.is_alive():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -229,7 +243,7 @@ class Agent:
             self._loop.call_soon_threadsafe(self._cancel_command_on_loop, call_id)
 
     def _cancel_command_on_loop(self, call_id: str) -> None:
-        key = f"agent:command:{call_id}"
+        key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         task = self._running_tasks.get(key)
         if task is not None:
             _logger.debug("cancelling command call_id=%s", call_id)
@@ -244,14 +258,11 @@ class Agent:
             _logger.info(
                 "dropping trigger (%s) — a call is already in flight", _describe_entry(entry)
             )
-            # A dropped input trigger is simply not reacted to. But a dropped *command
-            # completion* must still be cleaned up, or the terminal command entry would
-            # linger in the World (and every future prompt) forever — the v1 single-in-flight
-            # loop just won't run a step to react to it. Its effect already lives in whatever
-            # other World entries the command wrote.
-            if self._is_terminal_command(entry):
-                _logger.debug("cleaning up dropped command completion %r", entry.key)
-                self._cleanup_command_entry(entry.key)
+            # We don't run a step for a dropped trigger. A dropped *command completion* is left
+            # in place on purpose — NOT retired here — so the terminal entry stays part of
+            # current World state and gets rendered into history (then retired) by the next step
+            # that observes it (see _append_observation). This keeps the invariant that a
+            # completed Command is always in history or in current state, never silently lost.
             return
         self._busy = True
         try:
@@ -296,7 +307,7 @@ class Agent:
     def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         self._fire_hook(self._on_command, name, args)
         _logger.debug("dispatching command %s(%s) call_id=%s", name, _format_args(args), call_id)
-        key = f"agent:command:{call_id}"
+        key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         self._command_keys.add(key)
         self._world.register(
             key,
@@ -317,12 +328,10 @@ class Agent:
             result = await command.ainvoke(args)
         except asyncio.CancelledError:
             _logger.debug("command %s [call_id=%s] cancelled", name, call_id)
-            self._command_results[call_id] = "cancelled"
             self._world.update(key, CommandExecution(name=name, args=args, state="cancelled"))
             raise
         except Exception as exc:
             _logger.warning("command %s [call_id=%s] failed: %s", name, call_id, exc)
-            self._command_results[call_id] = f"failed: {exc}"
             self._world.update(
                 key, CommandExecution(name=name, args=args, state="failed", error=str(exc))
             )
@@ -330,7 +339,6 @@ class Agent:
             _logger.debug(
                 "command %s [call_id=%s] complete → %s", name, call_id, _truncate(str(result))
             )
-            self._command_results[call_id] = str(result)
             self._world.update(
                 key, CommandExecution(name=name, args=args, state="complete", result=str(result))
             )
@@ -340,11 +348,12 @@ class Agent:
     def _append_observation(self, entry: WorldEntry) -> None:
         observation = self._world.get_prompt_entries()
         self._history.append(ObservationRecord(observation))
-        # Now that this observation has captured their results, retire every command entry
-        # that has reached a terminal state — not just the one that fired. Cleaning all of
-        # them means a completion whose own trigger was dropped by the single-in-flight loop
-        # (e.g. a second command finishing while we were busy reacting to the first) still
-        # gets cleaned up on the next step that runs, instead of lingering forever.
+        # This snapshot has now captured every terminal command entry's outcome (they render from
+        # it in _render_messages), so retire them all here — not just the one that fired. This is
+        # the *sole* retirement path: a completion whose own trigger was dropped by the
+        # single-in-flight loop stays in the World until some step observes it here, so its outcome
+        # always reaches history before the entry goes away (never silently lost). The captured
+        # snapshot keeps re-rendering from history via render_entry's override after unregister.
         for world_entry in observation:
             if self._is_terminal_command(world_entry):
                 _logger.debug("retiring completed command entry %r", world_entry.key)
@@ -386,9 +395,13 @@ class Agent:
             messages.append(
                 AIMessage(content="\n".join(pending_text), tool_calls=list(pending_calls))
             )
+            # The tool_result is a fixed ack pointing at the Command's World entry — never the
+            # outcome. The outcome is delivered by that entry, rendered as an observation at the
+            # step where the completion is observed (see _command_ack and the loop below).
             for call in pending_calls:
-                result = self._command_results.get(call["id"], "(in progress)")
-                messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+                messages.append(
+                    ToolMessage(content=_command_ack(call["id"]), tool_call_id=call["id"])
+                )
             pending_text.clear()
             pending_calls.clear()
 
@@ -398,12 +411,16 @@ class Agent:
                 archival = i != newest_observation_index
                 blocks: list[str | dict[str, Any]] = []
                 for world_entry in record.entries:
-                    # A command's outcome is carried by its tool_result above, so its World entry
-                    # isn't re-rendered here (it would duplicate the result — and its serialize_fn
-                    # may already be gone once the entry is retired).
-                    if world_entry.key.startswith("agent:command:"):
-                        continue
-                    rendered = self._world.render_entry(world_entry, archival=archival)
+                    # Command entries carry the outcome (running → terminal). They render through
+                    # the Agent's own serializer via render_entry's override, so the World stays
+                    # command-agnostic and a retired entry still re-renders from this snapshot
+                    # after its config was unregistered. Other entries use the registered fn.
+                    if world_entry.key.startswith(_COMMAND_KEY_PREFIX):
+                        rendered = self._world.render_entry(
+                            world_entry, archival=archival, serialize_fn=_serialize_command_execution
+                        )
+                    else:
+                        rendered = self._world.render_entry(world_entry, archival=archival)
                     blocks.extend(_content_to_message_blocks(rendered))
                 messages.append(HumanMessage(content=blocks))
             elif isinstance(record, AssistantTextRecord):

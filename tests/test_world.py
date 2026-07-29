@@ -430,6 +430,29 @@ def test_render_entry_raises_when_entry_key_no_longer_registered():
         world.render_entry(stale_entry)
 
 
+def test_render_entry_serialize_fn_override_used_and_survives_unregister():
+    world = World()
+    world.register("temp", str, serialize_fn=identity_serialize)
+    world.update("temp", "raw value")
+    entry = world.get_entry("temp")
+
+    # The override replaces the registered serialize_fn for the body; the <entry …> envelope stays.
+    rendered = flatten(
+        world.render_entry(entry, serialize_fn=lambda v, p: [TextPart("OVERRIDDEN")])
+    )
+    assert '<entry key="temp" id="2">' in rendered
+    assert "OVERRIDDEN" in rendered
+    assert "raw value" not in rendered
+
+    # It also works from a stale snapshot after the key is unregistered (the override skips the
+    # config lookup) — this is what lets the Agent re-render a retired command entry from history.
+    world.unregister("temp")
+    rendered_after = flatten(
+        world.render_entry(entry, serialize_fn=lambda v, p: [TextPart(f"body={v}")])
+    )
+    assert "body=raw value" in rendered_after
+
+
 def test_render_entry_ignores_include_in_prompt():
     world = World()
     world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)

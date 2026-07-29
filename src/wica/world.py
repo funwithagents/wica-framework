@@ -248,15 +248,25 @@ class World:
             entries.sort(key=lambda e: e.current.timestamp)
         return entries
 
-    def render_entry(self, entry: WorldEntry, *, archival: bool = False) -> Content:
-        with self._lock:
-            config = self._configs.get(entry.key)
-        if config is None:
-            raise KeyError(entry.key)
-
-        serialize_fn = config.serialize_fn
-        if archival and config.archival_serialize_fn is not None:
-            serialize_fn = config.archival_serialize_fn
+    def render_entry(
+        self,
+        entry: WorldEntry,
+        *,
+        archival: bool = False,
+        serialize_fn: Callable[[Any, Any], Content] | None = None,
+    ) -> Content:
+        # An explicit serialize_fn overrides the registered one and skips the config lookup
+        # entirely, so a caller can still render an entry whose key has since been unregistered
+        # (e.g. the Agent re-rendering a retired command entry from a history snapshot — see
+        # specs/agent.md). The <entry …> envelope below stays owned by the World either way.
+        if serialize_fn is None:
+            with self._lock:
+                config = self._configs.get(entry.key)
+            if config is None:
+                raise KeyError(entry.key)
+            serialize_fn = config.serialize_fn
+            if archival and config.archival_serialize_fn is not None:
+                serialize_fn = config.archival_serialize_fn
 
         previous_value = entry.previous.value if entry.previous is not None else None
         body = serialize_fn(entry.current.value, previous_value)

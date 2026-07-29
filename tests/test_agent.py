@@ -14,7 +14,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
-from wica.agent import Agent, AssistantTextRecord, ObservationRecord
+from wica.agent import Agent, AssistantTextRecord, ObservationRecord, _command_ack
 from wica.content import Content, TextPart
 from wica.world import World
 
@@ -182,14 +182,22 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
 
     second_call_messages = model.calls[1]
     ai_messages = [m for m in second_call_messages if isinstance(m, AIMessage)]
-    # the past command is a real tool_call paired with its tool_result — not "Called add …" text
+    # the past command is a real tool_call — not "Called add …" text
     assert any(
         c["name"] == "add" and c["args"] == {"a": 1, "b": 2}
         for m in ai_messages
         for c in m.tool_calls
     )
+    # its tool_result is a fixed ack pointing at the command entry, never the outcome
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
-    assert any(m.tool_call_id == "call1" and m.content == "3" for m in tool_messages)
+    assert any(
+        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+    )
+    # the outcome (3) is delivered by the command's World entry, rendered into the observation
+    observation = "".join(
+        str(m.content) for m in second_call_messages if isinstance(m, HumanMessage)
+    )
+    assert "Called add(a=1, b=2) → 3" in observation
 
     with pytest.raises(KeyError):
         world.get_entry(key)
@@ -225,8 +233,9 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
     tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
 
     assert any(c["name"] == "add" for m in ai_messages for c in m.tool_calls)
-    assert any(m.tool_call_id == "call1" and m.content == "3" for m in tool_messages)
-    # no assistant message renders the call as prose
+    assert any(m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages)
+    # no *assistant* message renders the call as prose (the outcome lives in the observation, a
+    # user-role HumanMessage, so there is nothing for the model to imitate as its own output)
     assert not any(
         "Calling add" in str(m.content) or "Called add" in str(m.content) for m in ai_messages
     )
@@ -257,8 +266,64 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
     second_call_messages = model.calls[1]
+    # the tool_result is the fixed ack; the failure is delivered by the command's World entry
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
-    assert any(m.tool_call_id == "call1" and m.content == "failed: boom" for m in tool_messages)
+    assert any(
+        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+    )
+    observation = "".join(
+        str(m.content) for m in second_call_messages if isinstance(m, HumanMessage)
+    )
+    assert "Called explode() → failed: boom" in observation
+
+    agent.stop()
+
+
+def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, sink):
+    # Regression (specs/_todo.md, "dance then say hello during dance"): while a command is still
+    # running, a new input starts a fresh step; that step must be told the command is NOT finished.
+    # The running command renders as an in-progress observation entry, and its tool_result is a
+    # fixed ack — not a completed result that would read as "the call returned".
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    block = asyncio.Event()
+
+    async def dance() -> str:
+        """Blocks until released — models a long-running action."""
+        await block.wait()
+        return "done dancing"
+
+    model = FakeChatModel(
+        respond=sequence(
+            tool_call_response([("dance", {}, "call1")]),
+            text_response("hi"),
+        )
+    )
+    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent.register_command(dance)
+    agent.start()
+
+    world.update("input", "dance for me")
+    key = "agent:command:call1"
+    wait_until(lambda: world.get_entry(key).current.value.state == "running")
+    wait_until(lambda: agent._busy is False)  # step 1 finished; dance still running in background
+
+    # A new input arrives while dance is still running -> a concurrent step runs.
+    world.update("input", "say hi")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert sink.texts == ["hi"]
+    assert len(model.calls) == 2
+
+    step2 = model.calls[1]
+    # the running command is shown as an in-progress observation entry (the model knows it's not
+    # done and could reason about / cancel it), rather than looking completed
+    observation = "".join(str(m.content) for m in step2 if isinstance(m, HumanMessage))
+    assert "Calling dance()… (still running — not finished)" in observation
+    # its tool_result is the fixed ack, never a completed result
+    tool_messages = [m for m in step2 if isinstance(m, ToolMessage)]
+    assert any(
+        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+    )
+    assert world.get_entry(key).current.value.state == "running"
 
     agent.stop()
 
@@ -304,8 +369,15 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
     tool_contents = {
         m.tool_call_id: m.content for m in second_call_messages if isinstance(m, ToolMessage)
     }
-    assert tool_contents.get("fast") == "fast-result"
-    assert tool_contents.get("slow") == "(in progress)"  # still running when this prompt was built
+    assert tool_contents.get("fast") == _command_ack("fast")
+    assert tool_contents.get("slow") == _command_ack("slow")
+    # the mixed status is delivered by the command entries in the observation: fast completed,
+    # slow was still running when this prompt was built
+    observation = "".join(
+        str(m.content) for m in second_call_messages if isinstance(m, HumanMessage)
+    )
+    assert "Called fast_tool() → fast-result" in observation
+    assert "Calling slow_tool()… (still running — not finished)" in observation
 
     with pytest.raises(KeyError):
         world.get_entry(fast_key)
@@ -322,10 +394,12 @@ def _is_unregistered(world: World, key: str) -> bool:
         return True
 
 
-def test_dropped_command_completion_is_still_cleaned_up(loop, world, sink):
-    # A turn issues two commands. The first completes and starts a second step; while that
-    # step is in flight (busy), the second command completes — its trigger is dropped by the
-    # single-in-flight loop. That dropped completion must NOT leave a zombie entry behind.
+def test_dropped_command_completion_persists_until_observed(loop, world, sink):
+    # A turn issues two commands. The first completes and starts a second step; while that step is
+    # in flight (busy), the second command completes — its trigger is dropped by the single-in-flight
+    # loop. The dropped completion is NOT eagerly retired: it stays as current World state and is
+    # rendered into history (then retired) by the next step that observes it, so the completed
+    # Command is never silently lost — the invariant "always in history or current state".
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     release_slow = asyncio.Event()
     release_step2 = asyncio.Event()
@@ -349,6 +423,7 @@ def test_dropped_command_completion_is_still_cleaned_up(loop, world, sink):
         respond=sequence(
             tool_call_response([("fast", {}, "fast"), ("slow", {}, "slow")]),
             respond2,
+            text_response("ack"),
         )
     )
     agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
@@ -361,19 +436,30 @@ def test_dropped_command_completion_is_still_cleaned_up(loop, world, sink):
     # fast completes -> step 2 starts and blocks, so the loop is busy.
     assert step2_running.wait(timeout=WAIT_TIMEOUT)
 
-    # Now let slow finish: its completion trigger arrives while busy and is dropped.
+    # Let slow finish: its completion trigger arrives while busy and is dropped (no step runs).
     loop.call_soon_threadsafe(release_slow.set)
+    wait_until(lambda: world.get_entry("agent:command:slow").current.value.state == "complete")
 
-    # The dropped completion must still be cleaned up rather than lingering in the World.
-    wait_until(lambda: _is_unregistered(world, "agent:command:slow"))
-
+    # Finish step 2. fast was observed and retired by it; slow's completion was dropped, so no
+    # third step ran for it — and it must persist as current terminal state, not be lost.
     loop.call_soon_threadsafe(release_step2.set)
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
-
     assert sink.texts == ["done"]
-    assert len(model.calls) == 2  # slow's completion was dropped, so no third step ran
+    assert len(model.calls) == 2
     assert _is_unregistered(world, "agent:command:fast")
-    assert _is_unregistered(world, "agent:command:slow")
+    assert world.get_entry("agent:command:slow").current.value.state == "complete"
+
+    # A fresh input starts step 3, which observes slow: its outcome renders into that step's
+    # prompt, and only then is the entry retired — the completion reaches history before it goes.
+    sink.event.clear()
+    world.update("input", "poke")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert len(model.calls) == 3
+    step3_observation = "".join(
+        str(m.content) for m in model.calls[2] if isinstance(m, HumanMessage)
+    )
+    assert "Called slow() → slow-result" in step3_observation
+    wait_until(lambda: _is_unregistered(world, "agent:command:slow"))
 
     agent.stop()
 
@@ -608,8 +694,15 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
     wait_until(lambda: sink.event.is_set())
 
     second_call_messages = model.calls[1]
+    # the tool_result is the fixed ack; the cancellation is delivered by the command's World entry
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
-    assert any(m.tool_call_id == "call1" and m.content == "cancelled" for m in tool_messages)
+    assert any(
+        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+    )
+    observation = "".join(
+        str(m.content) for m in second_call_messages if isinstance(m, HumanMessage)
+    )
+    assert "Called block_forever() → cancelled" in observation
 
     agent.cancel_command("does-not-exist")  # no-op, must not raise
 
