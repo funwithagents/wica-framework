@@ -164,6 +164,7 @@ class Agent:
         system_prompt: str,
         world: World | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
+        coalesce_window: float = 0.2,
         output_sink: Callable[[str], Awaitable[None]] | None = None,
         on_prompt: Callable[[list[BaseMessage]], None] | None = None,
         on_trigger: Callable[[WorldEntry], None] | None = None,
@@ -172,6 +173,11 @@ class Agent:
         self.model = model
         self.system_prompt = system_prompt
         self._world = world if world is not None else get_world()
+        # Trigger-coalescing window (seconds): a burst of triggers arriving within this window is
+        # batched into a single step, rather than starting one step per trigger (and, under the
+        # single-in-flight loop, dropping the rest). 0 disables it — each trigger fires immediately,
+        # the pre-coalescing behavior. See specs/agent.md "Trigger coalescing".
+        self._coalesce_window = coalesce_window
         self._output_sink = output_sink if output_sink is not None else _noop_output_sink
         # Optional debug/observability hooks — instrumentation only, never control flow: each is
         # fired via _fire_hook, which swallows+logs a raising hook so it can't abort a step. See
@@ -197,6 +203,10 @@ class Agent:
         self._bound_model: Runnable[Any, AIMessage] = self.model
         self._history: list[HistoryRecord] = []
         self._busy = False
+        # Coalescing-window state, touched only on the loop thread (like _running_tasks): the
+        # triggers batched into the currently-open window, and the timer that will flush them.
+        self._window_batch: list[WorldEntry] = []
+        self._window_timer: asyncio.TimerHandle | None = None
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._command_keys: set[str] = set()
 
@@ -247,12 +257,26 @@ class Agent:
     def stop(self) -> None:
         _logger.info("agent stopping")
         self._world.set_trigger_handler(None)
+        # Cancel any pending coalescing-window timer on the loop thread (where all window state
+        # lives). Hygiene: for an owned loop it's about to stop anyway, but an injected loop keeps
+        # running, so a stale timer must not fire a step after stop().
+        try:
+            self._loop.call_soon_threadsafe(self._cancel_window)
+        except RuntimeError:
+            pass  # loop already closed
         for key in list(self._running_tasks):
             call_id = key.removeprefix(_COMMAND_KEY_PREFIX)
             self.cancel_command(call_id)
         if self._owns_loop and self._loop_thread is not None and self._loop_thread.is_alive():
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._loop_thread.join()
+
+    def _cancel_window(self) -> None:
+        """Cancel a pending coalescing-window timer and drop its batch (loop thread only)."""
+        if self._window_timer is not None:
+            self._window_timer.cancel()
+            self._window_timer = None
+        self._window_batch.clear()
 
     def cancel_command(self, call_id: str) -> None:
         try:
@@ -289,6 +313,9 @@ class Agent:
         asyncio.run_coroutine_threadsafe(self._handle_trigger(entry), self._loop)
 
     async def _handle_trigger(self, entry: WorldEntry) -> None:
+        # Runs on the loop thread (scheduled by _on_world_trigger). All window state below is
+        # therefore touched single-threaded, so open/join/flush are race-free — the same invariant
+        # that makes cancellation race-free (see specs/agent.md "The Agent owns the event loop").
         _logger.debug("trigger received: %s", _describe_entry(entry))
         if self._busy:
             _logger.info(
@@ -299,10 +326,40 @@ class Agent:
             # current World state and gets rendered into history (then retired) by the next step
             # that observes it (see _append_observation). This keeps the invariant that a
             # completed Command is always in history or in current state, never silently lost.
+            #
+            # Coalescing only batches the arrival burst *before* a step starts; a trigger arriving
+            # while one is in flight is still dropped (bypass_coalescing skips the wait, not this
+            # drop). Collecting during-flight triggers is the deferred concurrency/queue question.
             return
+
+        self._window_batch.append(entry)
+        if entry.bypass_coalescing or self._coalesce_window <= 0:
+            # Fire immediately: an urgent entry flushes the window early (carrying anything already
+            # batched), and a zero window is simply a window that closes at once.
+            self._flush_window()
+        elif self._window_timer is None:
+            # First trigger of a burst opens a fixed leading-edge window. Later triggers join the
+            # batch above without rescheduling, so the window never extends (bounded latency).
+            self._window_timer = self._loop.call_later(self._coalesce_window, self._flush_window)
+
+    def _flush_window(self) -> None:
+        """Close the coalescing window and start the single step for the batched triggers. Sync,
+        runs on the loop thread (called directly for an immediate flush, or by the window timer)."""
+        if self._window_timer is not None:
+            self._window_timer.cancel()
+            self._window_timer = None
+        if not self._window_batch:
+            return
+        batch = self._window_batch
+        self._window_batch = []
+        # Set _busy before the step task runs so triggers arriving in the gap are dropped, not
+        # folded into a second concurrent step (single-in-flight).
         self._busy = True
+        self._loop.create_task(self._run_batch(batch))
+
+    async def _run_batch(self, batch: list[WorldEntry]) -> None:
         try:
-            await self._run_step(entry)
+            await self._run_step(batch)
         finally:
             self._busy = False
 
@@ -316,10 +373,22 @@ class Agent:
         except Exception:
             _logger.exception("agent instrumentation hook raised; ignoring")
 
-    async def _run_step(self, entry: WorldEntry) -> None:
-        _logger.debug("step starting (trigger: %s)", _describe_entry(entry))
-        self._fire_hook(self._on_trigger, entry)
-        self._append_observation(entry)
+    async def _run_step(self, batch: list[WorldEntry]) -> None:
+        # A coalesced burst runs a single step, but on_trigger fires once per trigger that joined
+        # the window (so a UI still shows every input). The Observation, on_prompt, and the model
+        # call below happen once. See specs/agent.md "Trigger coalescing".
+        representative = batch[-1]
+        if len(batch) > 1:
+            _logger.debug(
+                "step starting (coalesced %d triggers, latest: %s)",
+                len(batch),
+                _describe_entry(representative),
+            )
+        else:
+            _logger.debug("step starting (trigger: %s)", _describe_entry(representative))
+        for triggered in batch:
+            self._fire_hook(self._on_trigger, triggered)
+        self._append_observation()
         messages = self._render_messages()
         self._fire_hook(self._on_prompt, messages)
         response = await self._bound_model.ainvoke(messages)
@@ -338,7 +407,7 @@ class Agent:
             call_id = call["id"] or uuid.uuid4().hex
             self._history.append(CommandRecord(call_id, call["name"], call["args"]))
             self._dispatch_command(call_id, call["name"], call["args"])
-        _logger.debug("step complete (trigger: %s)", _describe_entry(entry))
+        _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
 
     def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         self._fire_hook(self._on_command, name, args)
@@ -381,7 +450,7 @@ class Agent:
         finally:
             self._running_tasks.pop(key, None)
 
-    def _append_observation(self, entry: WorldEntry) -> None:
+    def _append_observation(self) -> None:
         observation = self._world.get_prompt_entries()
         self._history.append(ObservationRecord(observation))
         # This snapshot has now captured every terminal command entry's outcome (they render from

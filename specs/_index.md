@@ -14,11 +14,11 @@ The name breaks down as:
 | Spec | Description | Status |
 |---|---|---|
 | [project.md](project.md) | Project structure and tooling: Python version, packaging with uv, layout conventions | Stable |
+| [config.md](config.md) | Framework config loaded from JSON: provider/model/api key/system prompt, plain-dataclass `from_json`, strict validation, `api_key`/`api_key_env` | Stable |
 | [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Stable |
 | [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to LLM-facing `Content` | Stable |
 | [inputs.md](inputs.md) | Inputs: external multimodal data entering the World, modeled as externally-fed World entries (register + `update`, `triggers_llm_call`) — a role/pattern, not new machinery | Stable |
 | [commands.md](commands.md) | Commands: WICA's unit of agent action on the World, backed by LangChain tools; execution-as-World-entry lifecycle, generic call description | Draft |
-| [config.md](config.md) | Framework config loaded from JSON: provider/model/api key/system prompt, plain-dataclass `from_json`, strict validation, `api_key`/`api_key_env` | Stable |
 | [agent.md](agent.md) | Agent reasoning loop: LangChain-backed inference, snapshot history, fresh/archival rendering, async cancellable Commands, output sink | Draft |
 | [conversation-demo.md](conversation-demo.md) | Conversation demo product: browser UI to talk to a simulated social robot, with live World state and prompt views; simulated sensor inputs and robot-action Commands | Stable |
 

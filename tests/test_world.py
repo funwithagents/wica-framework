@@ -156,6 +156,23 @@ def test_get_entry_unregistered_raises():
         world.get_entry("temp")
 
 
+def test_bypass_coalescing_defaults_false_and_is_carried_onto_the_entry():
+    world = World()
+    world.register("plain", int, serialize_fn=identity_serialize)
+    world.register("urgent", int, serialize_fn=identity_serialize, bypass_coalescing=True)
+
+    # Carried onto the initial entry (like `type`) so the trigger-handler snapshot is
+    # self-describing without a config lookup.
+    assert world.get_entry("plain").bypass_coalescing is False
+    assert world.get_entry("urgent").bypass_coalescing is True
+
+    # ...and preserved across updates (a new version, not a config change).
+    world.update("urgent", 1)
+    world.update("plain", 2)
+    assert world.get_entry("urgent").bypass_coalescing is True
+    assert world.get_entry("plain").bypass_coalescing is False
+
+
 def test_listener_fires_on_update_but_not_for_unrelated_keys():
     world = World()
     world.register("temp", str, serialize_fn=identity_serialize)

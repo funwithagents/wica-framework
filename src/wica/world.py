@@ -37,6 +37,7 @@ class WorldEntryConfig:
     triggers_llm_call: bool = False
     trigger_condition_fn: Callable[[Any, Any], bool] | None = None
     ttl: timedelta | None = None
+    bypass_coalescing: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,11 @@ class WorldEntryVersion:
 class WorldEntry:
     key: str
     type: type
+    # Copied from WorldEntryConfig at register() (like `type`) so the snapshot handed to the
+    # trigger handler is self-describing: the Agent reads this to decide whether an update skips
+    # its coalescing window. The World only carries the bit — it never acts on it. See
+    # specs/world.md and specs/agent.md ("Trigger coalescing").
+    bypass_coalescing: bool
     current: WorldEntryVersion
     previous: WorldEntryVersion | None
 
@@ -76,6 +82,7 @@ class World:
         triggers_llm_call: bool = False,
         trigger_condition_fn: Callable[[T | None, T | None], bool] | None = None,
         ttl: timedelta | None = None,
+        bypass_coalescing: bool = False,
     ) -> None:
         with self._lock:
             if key in self._configs:
@@ -88,22 +95,26 @@ class World:
                 triggers_llm_call=triggers_llm_call,
                 trigger_condition_fn=trigger_condition_fn,
                 ttl=ttl,
+                bypass_coalescing=bypass_coalescing,
             )
             new_id = self._id_counters.get(key, 0) + 1
             self._id_counters[key] = new_id
             self._entries[key] = WorldEntry(
                 key=key,
                 type=type,
+                bypass_coalescing=bypass_coalescing,
                 current=WorldEntryVersion(id=new_id, value=None, timestamp=_now()),
                 previous=None,
             )
         _logger.debug(
-            "registered %r (type=%s, include_in_prompt=%s, triggers_llm_call=%s, ttl=%s)",
+            "registered %r (type=%s, include_in_prompt=%s, triggers_llm_call=%s, ttl=%s, "
+            "bypass_coalescing=%s)",
             key,
             type.__name__,
             include_in_prompt,
             triggers_llm_call,
             ttl,
+            bypass_coalescing,
         )
 
     def unregister(self, key: str) -> None:
@@ -163,7 +174,11 @@ class World:
 
             new_version = WorldEntryVersion(id=new_id, value=value, timestamp=_now())
             new_entry = WorldEntry(
-                key=key, type=old_entry.type, current=new_version, previous=old_entry.current
+                key=key,
+                type=old_entry.type,
+                bypass_coalescing=old_entry.bypass_coalescing,
+                current=new_version,
+                previous=old_entry.current,
             )
             self._entries[key] = new_entry
 

@@ -840,3 +840,160 @@ def test_cancel_command_action_is_a_noop_for_unknown_id(loop, world, sink):
     assert "not a running command" in result
 
     agent.stop()
+
+
+def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
+    # Two triggers within the coalescing window run a *single* step whose observation captures
+    # both — but on_trigger still fires once per collected trigger. See specs/agent.md.
+    world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = FakeChatModel(respond=text_response("ok"))
+    triggers: list[str] = []
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        coalesce_window=0.3,
+        output_sink=sink,
+        on_trigger=lambda entry: triggers.append(entry.key),
+    )
+    agent.start()
+
+    world.update("a", "a-value")
+    world.update("b", "b-value")  # joins the same window → same step
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    time.sleep(0.3)  # let any (incorrect) second step have a chance to run
+
+    assert len(model.calls) == 1
+    # dispatch order across the World's executor isn't guaranteed, so compare as a set
+    assert sorted(triggers) == ["a", "b"]
+    observation = agent._history[0]
+    assert isinstance(observation, ObservationRecord)
+    assert {e.key for e in observation.entries} == {"a", "b"}
+
+    agent.stop()
+
+
+def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
+    # coalesce_window=0 is the pre-coalescing behavior: each trigger fires at once (no wait), and a
+    # trigger arriving while a step is in flight is dropped, not coalesced.
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    hold = asyncio.Event()
+    started = threading.Event()
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        started.set()
+        await hold.wait()
+        return AIMessage(content="done")
+
+    model = FakeChatModel(respond=respond)
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        coalesce_window=0,
+        output_sink=sink,
+    )
+    agent.start()
+
+    t0 = time.monotonic()
+    world.update("input", "first")
+    assert started.wait(timeout=WAIT_TIMEOUT)
+    assert time.monotonic() - t0 < 0.15  # no window wait, unlike the 0.2s default
+
+    world.update("input", "second")  # arrives while busy → dropped
+    time.sleep(0.2)
+    loop.call_soon_threadsafe(hold.set)
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(model.calls) == 1
+    assert len([r for r in agent._history if isinstance(r, ObservationRecord)]) == 1
+
+    agent.stop()
+
+
+def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
+    # A long window would make a plain trigger wait ~1s; a bypass_coalescing trigger flushes the
+    # window early, carrying along whatever was already batched.
+    world.register("ctx", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "urgent",
+        str,
+        serialize_fn=identity_serialize,
+        triggers_llm_call=True,
+        bypass_coalescing=True,
+    )
+    model = FakeChatModel(respond=text_response("ok"))
+    triggers: list[str] = []
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        coalesce_window=1.0,
+        output_sink=sink,
+        on_trigger=lambda entry: triggers.append(entry.key),
+    )
+    agent.start()
+
+    world.update("ctx", "context")  # opens the (long) window
+    wait_until(lambda: agent._window_timer is not None)  # ctx is now batched, window open
+
+    t_urgent = time.monotonic()
+    world.update("urgent", "stop!")  # bypass → flush now, pulling ctx forward
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert time.monotonic() - t_urgent < 0.5  # far under the 1.0s window → early flush
+
+    assert len(model.calls) == 1
+    assert sorted(triggers) == ["ctx", "urgent"]
+    observation = agent._history[0]
+    assert isinstance(observation, ObservationRecord)
+    assert {e.key for e in observation.entries} == {"ctx", "urgent"}
+
+    agent.stop()
+
+
+def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
+    # bypass_coalescing skips the *wait*, not the single-in-flight *drop*: an urgent trigger landing
+    # while a step is in flight is dropped like any other (barge-in/interruption is deferred).
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "urgent",
+        str,
+        serialize_fn=identity_serialize,
+        triggers_llm_call=True,
+        bypass_coalescing=True,
+    )
+    hold = asyncio.Event()
+    started = threading.Event()
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        started.set()
+        await hold.wait()
+        return AIMessage(content="done")
+
+    model = FakeChatModel(respond=respond)
+    agent = Agent(
+        model,
+        system_prompt="You are terse.",
+        world=world,
+        loop=loop,
+        coalesce_window=0,
+        output_sink=sink,
+    )
+    agent.start()
+
+    world.update("input", "go")
+    assert started.wait(timeout=WAIT_TIMEOUT)  # step in flight → busy
+
+    world.update("urgent", "stop!")  # bypass, but busy → dropped
+    time.sleep(0.2)
+    loop.call_soon_threadsafe(hold.set)
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(model.calls) == 1  # urgent did not start a second step
+    assert len([r for r in agent._history if isinstance(r, ObservationRecord)]) == 1
+
+    agent.stop()

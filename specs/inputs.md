@@ -51,6 +51,7 @@ The `register()` fields ([world.md](world.md), "Registration and WorldEntryConfi
 | `trigger_condition_fn` | Gates *which* perceptions are worth a step. `update()` never auto-skips unchanged values (see [world.md](world.md)), so an Input that should only fire on genuine change encodes it here: `trigger_condition_fn=lambda old, new: old != new`. Conversely, a heartbeat-style Input legitimately re-triggers on an unchanged value |
 | `archival_serialize_fn` | Lets a heavy Input render rich while fresh and light once stale — a camera frame as an inline `ImagePart` on the turn it arrives, a one-line text description on later turns — so multimodal perception isn't re-sent every step (see [agent.md](agent.md), "Freshness policy") |
 | `ttl` | Makes an Input **transient**: a perception that should decay to `None` if not refreshed (a "someone is speaking" flag, a proximity reading). The World resets it via `update(key, None)` after the TTL, which *doesn't* itself trigger a call (see [world.md](world.md)) |
+| `bypass_coalescing` | For an Input that must be acted on *now*, not after the Agent's coalescing window — a barge-in utterance, a stop/panic button. An update to a `bypass_coalescing=True` Input flushes the window early instead of waiting ~200 ms for other triggers to join (see [agent.md](agent.md), "Trigger coalescing"). Defaults to `False`; most Inputs happily ride the window |
 
 Nothing here is Input-specific API — it's the ordinary World config, described from the Input's point of view.
 
@@ -60,7 +61,7 @@ Inputs are the primary reason `Content` is multimodal. An Input's `serialize_fn`
 
 ## Producers and threads
 
-An Input's producer can live anywhere and run on **any thread** — a Gradio callback, a sensor polling loop, a hardware interrupt handler. The World is sync and thread-based specifically so `update()` can be called from these producers without them knowing about the Agent's asyncio loop (see [world.md](world.md) open question #4 and [agent.md](agent.md), "Threading"). The Agent bridges to its own loop; the Input producer just calls `world.update(...)` and moves on.
+An Input's producer can live anywhere and run on **any thread** — a Gradio callback, a sensor polling loop, a hardware interrupt handler. The World is sync and thread-based specifically so `update()` can be called from these producers without them knowing about the Agent's asyncio loop (see [world.md](world.md) open question #3 and [agent.md](agent.md), "Threading"). The Agent bridges to its own loop; the Input producer just calls `world.update(...)` and moves on.
 
 ## Relationship to the other pillars
 
