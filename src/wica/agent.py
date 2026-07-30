@@ -124,6 +124,19 @@ def _content_to_message_blocks(content: Content) -> list[dict[str, Any]]:
 
 _COMMAND_KEY_PREFIX = "agent:command:"
 
+# cancel_command is a WICA-native control Command (not backed by an off-the-shelf tool): the Agent
+# implements it directly and auto-registers it so the model can abort a Command it previously issued
+# that is still running. It targets the command by its call_id — already on screen in the
+# `<entry key="agent:command:<call_id>" …>` envelope — so nothing extra is rendered. See
+# specs/commands.md ("cancel_command") and specs/agent.md ("Commands").
+_CANCEL_COMMAND_NAME = "cancel_command"
+_CANCEL_COMMAND_DESCRIPTION = (
+    "Cancel a command you previously issued that is still running. Pass its call_id — the part "
+    f"after '{_COMMAND_KEY_PREFIX}' in the running command's World entry key (the full key is "
+    "accepted too). Cancelling a command that has already finished or never existed is a harmless "
+    "no-op."
+)
+
 
 def _command_ack(call_id: str) -> str:
     """The stringified outcome carried by a Command's tool_result. It is a fixed *pointer*, not the
@@ -217,6 +230,15 @@ class Agent:
         _logger.debug("registered command %r", wrapped.name)
 
     def start(self) -> None:
+        # WICA-native control Command: let the model abort a Command it previously issued that is
+        # still running. Auto-registered here (no app wiring) since it needs Agent internals;
+        # registering at start (not construction) keeps __init__ inert — it never touches the model.
+        # register_command is idempotent on the name, so a second start() is harmless.
+        self.register_command(
+            self._cancel_command_action,
+            name=_CANCEL_COMMAND_NAME,
+            description=_CANCEL_COMMAND_DESCRIPTION,
+        )
         _logger.info("agent starting (%d command(s) registered)", len(self._commands))
         self._world.set_trigger_handler(self._on_world_trigger)
         if self._loop_thread is not None and not self._loop_thread.is_alive():
@@ -242,12 +264,26 @@ class Agent:
         else:
             self._loop.call_soon_threadsafe(self._cancel_command_on_loop, call_id)
 
-    def _cancel_command_on_loop(self, call_id: str) -> None:
+    def _cancel_command_on_loop(self, call_id: str) -> bool:
+        """Cancel a running command's task on the loop thread. Returns whether a live task was
+        actually cancelled (False if it's unknown or already finished) — an id-guarded no-op,
+        same pattern as the World's TTL `expected_id` guard."""
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         task = self._running_tasks.get(key)
-        if task is not None:
-            _logger.debug("cancelling command call_id=%s", call_id)
-            task.cancel()
+        if task is None or task.done():
+            return False
+        _logger.debug("cancelling command call_id=%s", call_id)
+        task.cancel()
+        return True
+
+    async def _cancel_command_action(self, call_id: str) -> str:
+        """Backing action for the model-issued `cancel_command` Command. Async so it runs on the
+        Agent's loop thread (via `ainvoke`), keeping `_running_tasks` access race-free. Lenient:
+        accepts either the bare call_id or the full `agent:command:<call_id>` entry key."""
+        call_id = call_id.removeprefix(_COMMAND_KEY_PREFIX)
+        if self._cancel_command_on_loop(call_id):
+            return f"cancelling {call_id}"
+        return f"{call_id} is not a running command (it already finished or never existed)"
 
     def _on_world_trigger(self, entry: WorldEntry) -> None:
         asyncio.run_coroutine_threadsafe(self._handle_trigger(entry), self._loop)

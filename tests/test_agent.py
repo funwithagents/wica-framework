@@ -732,3 +732,111 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
 
     wait_until(lambda: world.get_entry(key).current.value.state == "cancelled")
     assert len(model.calls) == 1  # no second call: the trigger handler was already cleared
+
+
+def _prompt_contains(model: FakeChatModel, needle: str) -> bool:
+    return any(
+        needle in str(m.content)
+        for call in model.calls
+        for m in call
+        if isinstance(m, HumanMessage)
+    )
+
+
+def _wait_for_render(model: FakeChatModel, world: World, needle: str) -> None:
+    """Wait until some model prompt has rendered `needle`, nudging the agent with fresh inputs so
+    that a terminal command entry left in the World (e.g. a completion whose own trigger the
+    single-in-flight loop dropped) is guaranteed to be observed by a later step. Once rendered, the
+    snapshot is in the model's call history for good — even after the entry is retired."""
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    i = 0
+    while time.monotonic() < deadline:
+        if _prompt_contains(model, needle):
+            return
+        world.update("input", f"status check {i}")
+        i += 1
+        time.sleep(0.02)
+    raise AssertionError(f"no prompt rendered {needle!r} within {WAIT_TIMEOUT}s")
+
+
+def test_model_can_cancel_a_running_command(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    block = asyncio.Event()
+
+    async def block_forever() -> str:
+        """Blocks until cancelled."""
+        await block.wait()
+        return "unreachable"
+
+    model = FakeChatModel(
+        respond=sequence(
+            tool_call_response([("block_forever", {}, "target")]),
+            tool_call_response([("cancel_command", {"call_id": "target"}, "cancel1")]),
+            text_response("stopped it"),
+        )
+    )
+    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent.register_command(block_forever)
+    agent.start()
+    # cancel_command is a WICA-native Command the Agent auto-registers at start — no app wiring.
+    assert "cancel_command" in agent._commands
+
+    # Step 1: the model dispatches the long-running command, then the agent goes idle.
+    world.update("input", "start working")
+    key = "agent:command:target"
+    wait_until(lambda: world.get_entry(key).current.value.state == "running")
+
+    # Step 2: a fresh input drives a step where the model observes it still running and issues
+    # cancel_command(call_id="target"). The cancellation lands as the command's World entry going
+    # terminal — the causally-correct point — and reaches the model as an observation.
+    world.update("input", "actually, stop")
+    _wait_for_render(model, world, "Called block_forever() → cancelled")
+
+    agent.stop()
+
+
+def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    block = asyncio.Event()
+
+    async def block_forever() -> str:
+        """Blocks until cancelled."""
+        await block.wait()
+        return "unreachable"
+
+    model = FakeChatModel(
+        respond=sequence(
+            tool_call_response([("block_forever", {}, "t2")]),
+            text_response("ok"),
+        )
+    )
+    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent.register_command(block_forever)
+    agent.start()
+
+    world.update("input", "go")
+    key = "agent:command:t2"
+    wait_until(lambda: world.get_entry(key).current.value.state == "running")
+
+    # The model may copy the entry key verbatim; the handler strips the agent:command: prefix and
+    # still finds the running task — the "cancelling t2" result proves the lookup hit (a miss would
+    # read "not a running command").
+    future = asyncio.run_coroutine_threadsafe(
+        agent._cancel_command_action("agent:command:t2"), loop
+    )
+    assert future.result(timeout=WAIT_TIMEOUT) == "cancelling t2"
+    _wait_for_render(model, world, "Called block_forever() → cancelled")
+
+    agent.stop()
+
+
+def test_cancel_command_action_is_a_noop_for_unknown_id(loop, world, sink):
+    model = FakeChatModel(respond=text_response("ok"))
+    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent.start()
+
+    future = asyncio.run_coroutine_threadsafe(agent._cancel_command_action("nope"), loop)
+    result = future.result(timeout=WAIT_TIMEOUT)
+    assert "not a running command" in result
+
+    agent.stop()
