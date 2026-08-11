@@ -11,7 +11,7 @@ Builds on [plans/202607231754_e2e-test-framework.md](202607231754_e2e-test-frame
 Resolved with the user before drafting:
 
 1. **Output = free-text-as-speech** (agent.md Q2). Visible assistant text is the utterance; no `speak()` tool in v1.
-2. **Concurrency = single in-flight call** (agent.md "Concurrency & interruption", Q3). v1 does not implement `agent:activity` entries, `cancel_activity`, or genuine concurrent calls. A trigger arriving while a call is in flight is **dropped and logged**: no step is started for it, no history record is created for it, and a log line records the key/id that was dropped so it's visible rather than silently lost.
+2. **Concurrency = single in-flight call** (agent.md "Concurrency & interruption", Q3). v1 does not implement `agent:reaction` entries, `cancel_reaction`, or genuine concurrent calls. A trigger arriving while a call is in flight is **dropped and logged**: no step is started for it, no history record is created for it, and a log line records the key/id that was dropped so it's visible rather than silently lost.
 3. **Parallel tool calls: N independent World entries.** A response requesting multiple tool calls registers one tool-status entry per call; whichever finishes first re-triggers a step while others keep running (still bounded by "single in-flight" above — only one step runs at a time, but multiple tools can be mid-flight).
 4. **A "step" is exactly one LLM call** (clarified in discussion, not a separate open question). The event-driven World-entry tool lifecycle is the spec's stated *default* for all tools, not an optimization — so v1 never loops within a step. Dispatching a tool call always ends the step; the tool's own completion is what starts the next one. This makes agent.md open question #6 ("step termination") moot for v1: there is no multi-call loop to bound yet. The deferred sync/async optimization (agent.md "Sync vs. async") is what would eventually reintroduce a within-step loop, and stays deferred here.
 5. **Async tool execution is in scope, not deferred.** Per the "Tool lifecycle as a World entry" section, this is core v1 work: dispatch → World tool-status entry (`running`) + history description → step ends → tool runs as a cancellable asyncio task on the Agent's loop → completion updates the entry to terminal → World's trigger fires a new step.
@@ -266,7 +266,7 @@ Both tests poll/await with a generous timeout (e.g. `asyncio.wait_for(..., timeo
 
 ## Out of scope / deferred
 
-- Full concurrency/interruption model — `agent:activity` entries, `cancel_activity`, bounded concurrency, atomic take-over (agent.md "Concurrency & interruption", Q3). v1 is single-in-flight; a trigger arriving while busy is dropped and logged, not queued or coalesced.
+- Full concurrency/interruption model — `agent:reaction` entries, `cancel_reaction`, bounded concurrency, atomic take-over (agent.md "Concurrency & interruption", Q3). v1 is single-in-flight; a trigger arriving while busy is dropped and logged, not queued or coalesced.
 - Sync/async tool optimization — inline fast-path handling for quick tools (agent.md "Sync vs. async (deferred optimization)", part of Q1).
 - Streaming output and live-progress World updates during speech (tied to concurrency, per decision #10 above).
 - `speak()` tool alternative (Q2) — free-text-as-speech only, per decision #1.

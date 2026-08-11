@@ -16,7 +16,7 @@ Even under v1's single-in-flight loop, this is useful: a step can dispatch sever
 - **Lenient argument.** The handler accepts the bare `call_id` *or* the full `agent:command:<call_id>` key (strips the prefix), so a verbatim copy of the envelope key works.
 - **Auto-registered by the Agent**, not app-wired — it needs Agent internals. Always present (WICA-native control action).
 - **Async handler** so it executes on the Agent's loop thread (via `command.ainvoke`), keeping `_running_tasks` access race-free. A sync tool would run in a thread-pool off the loop.
-- **Scope:** `cancel_command` only. The deferred `cancel_activity` (cancelling in-flight *LLM calls*) is a separate topic, unbuildable until the concurrency model lands.
+- **Scope:** `cancel_command` only. The deferred `cancel_reaction` (cancelling in-flight *LLM calls*) is a separate topic, unbuildable until the concurrency model lands.
 
 ## Steps
 

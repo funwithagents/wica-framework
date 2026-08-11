@@ -60,7 +60,7 @@ control flow.
 | `active_tracked_user` | `str` | yes | no | The one tracked user in focus (for `switch`). |
 
 `triggers_llm_call=False` on Command-written entries (`emotion`, tracking) so the agent's own
-actions don't re-trigger it into a loop — matches the `agent:activity` reasoning in agent.md.
+actions don't re-trigger it into a loop — matches the `agent:reaction` reasoning in agent.md.
 `None`-valued entries still render (that's how "no user nearby" / "not tracking" reach the model).
 
 ### Commands registered on the Agent (the fake robot actions)
