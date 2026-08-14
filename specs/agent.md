@@ -8,13 +8,13 @@ tests:
 
 # Agent
 
-**Status:** Draft
+**Status:** Stable
 
 ## Purpose
 
 The Agent is the reasoning loop that observes the World and acts on it. It is triggered by the World (via `set_trigger_handler`), builds an LLM prompt from World state, runs inference against a configurable provider, executes **Commands** (see [commands.md](commands.md)), and streams output to a pluggable sink. It owns the conversation **history**; the World owns current **state**.
 
-This spec is an early draft: the sections under "Settled" reflect decisions already made in design discussion; "Open questions" holds everything still being brainstormed — several are load-bearing and not yet resolved.
+The v1 design is settled and shipped: the sections under "Settled" describe what the Agent does today (single-in-flight loop, trigger coalescing, Command execution as World state, config-driven provider construction). "Open questions" now holds genuine **deferrals** — post-v1 directions (full concurrency/interruption, streaming, error-handling and truncation stories) tracked so they aren't lost — not unresolved blockers to the current implementation.
 
 ## Settled
 
@@ -26,7 +26,7 @@ LangChain is quarantined to the Agent's I/O boundary. Everything upstream (World
 
 ### Provider-agnostic model, from config
 
-The model is selected from configuration (provider + model name + params), via LangChain's `init_chat_model`-style construction. Switching providers is a config change, not a code change. Backed by a small settings object (pydantic-style), source TBD (env / file).
+The model is selected from configuration (provider + model name + params), via LangChain's `init_chat_model`-style construction. Switching providers is a config change, not a code change. Backed by a small settings object (`AgentConfig`), loaded from a JSON framework config — see [config.md](config.md).
 
 **Most providers construct via `init_chat_model`; `huggingface-hub` is the exception.** `anthropic`, `openai`, and other LangChain-supported providers are built by `init_chat_model(model, model_provider=provider, …)`. `huggingface-hub` — the Hugging Face Hub's serverless Inference Providers — takes a dedicated branch in `Agent.from_config` that constructs `ChatHuggingFace(llm=HuggingFaceEndpoint(repo_id=model, provider=<hf_provider>, huggingfacehub_api_token=<resolved api_key>, …))` (config surface — the `hf_provider` field, the extras — in [config.md](config.md), "Providers"). Because this branch builds the model directly instead of going through `init_chat_model`, it also owns the kwarg mapping: the config's resolved `api_key`/`api_key_env` is forwarded as `huggingfacehub_api_token`, not the generic `api_key` the `init_chat_model` providers receive. It must **not** use `init_chat_model`'s builtin `huggingface` provider, which builds a *local `transformers` pipeline*: that path is a blocking, in-process generation call, and running it under `ainvoke` offloads it to a thread pool the Agent's `task.cancel()` cannot stop — so a cancelled or barged-in step would leave a zombie generation burning compute, violating the cancellation guarantee this loop is built on (see "The Agent owns the event loop"). WICA uses the hosted endpoint only. (Even the hosted path's cancellation quality depends on `langchain-huggingface` implementing a truly-async `_agenerate`; that's an implementation verification item, not a design change.)
 
@@ -137,7 +137,7 @@ Complementing the hooks, the World and Agent emit **lifecycle logs** under the s
 
 ## Open questions
 
-These are unresolved and several are central. Do not treat the "Settled" split above as covering them.
+These are deferrals beyond v1, not blockers to what's built — the "Settled" split above covers the current implementation. Several point at the bigger post-v1 concurrency/interruption and error-handling work.
 
 1. **Command execution model — mostly settled (see "Commands" above and [commands.md](commands.md)); residual details** now tracked in commands.md's open questions: the command-execution entry's failure rendering, and — for the deferred sync path — the auto-latency timeout value and how a single turn emitting **multiple** (parallel) Commands of mixed speed is handled.
 
@@ -171,7 +171,6 @@ The v1 implementation ships a reduced slice on purpose. These are already direct
 - **Sync/async Command optimization.** The inline fast-path for quick Commands (auto-by-latency or a registration flag — see [commands.md](commands.md), "Sync vs. async"). v1 always takes the async/event-driven path for every Command, per that spec's "default execution model" framing.
 - **Streaming output + live progress.** Token-level streaming to the output sink, and the sink writing live "currently speaking: …" progress to a World entry as it goes (this only matters once concurrent calls exist, so a competing call has something current to judge against). v1's sink receives one complete string per step.
 - **`speak()` Command.** v1 uses free-text-as-speech (Open question #2, resolved *for v1* in this direction). An explicit `speak(text)` Command remains a live alternative if free-visible-text-is-speech turns out too coarse — e.g. needing internal reasoning text that isn't spoken.
-- **`AgentConfig` from env/file.** v1 constructs `AgentConfig` directly in code; loading it from a config file or environment variables is unbuilt.
 - **History truncation / summarization.** `self._history` is append-only and unbounded in v1 (Open question #8).
 - **Agent-level (non-Command) error handling.** A model call itself raising isn't yet given a World-state/history story — only Command failures are (they land in a terminal `CommandExecution` with the error). Ties into the project's broader logging story (Open question #7).
 - **Multi-agent partitioning.** Still one `Agent` per one World (Open question #10).

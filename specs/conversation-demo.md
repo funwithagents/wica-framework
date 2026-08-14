@@ -3,6 +3,9 @@ code:
   - examples/conversation_demo.py
   - examples/prompts/wica.md
   - examples/agent.config.json
+  - examples/agent.anthropic.config.json
+  - examples/agent.openai.config.json
+  - examples/agent.huggingface-hub.config.json
 ---
 
 # Conversation demo
@@ -112,6 +115,10 @@ the demo wiring the effect deterministically behind the agent's back.
   `WicaConfig.from_json` followed by `Agent.from_config` (see [config.md](config.md)) — provider,
   model, and persona (`system_prompt_file`, pointing at `examples/prompts/wica.md`) all live
   there. Switching providers/models, or editing the persona, is a file edit, not a code change.
+  Committed per-provider variants sit alongside it — `agent.anthropic.config.json`,
+  `agent.openai.config.json`, `agent.huggingface-hub.config.json` — showing the same demo against
+  each supported provider (see [config.md](config.md), "Providers"); copy one over
+  `agent.config.json` to switch backend.
 - **The API key is referenced, not stored.** The committed config uses
   `"api_key_env": "WICA_ANTHROPIC_API_KEY"` — the WICA-namespaced env var (so it never collides
   with a provider key another tool in the environment already uses) that `api_key_env` reads at
