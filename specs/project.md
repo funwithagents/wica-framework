@@ -1,3 +1,10 @@
+---
+code:
+  - pyproject.toml
+tests:
+  - tests/test_project_map.py
+---
+
 # Project
 
 **Status:** Stable

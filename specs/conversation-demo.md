@@ -1,3 +1,10 @@
+---
+code:
+  - examples/conversation_demo.py
+  - examples/prompts/wica.md
+  - examples/agent.config.json
+---
+
 # Conversation demo
 
 **Status:** Stable

@@ -1,3 +1,10 @@
+---
+code:
+  - src/wica/config.py
+tests:
+  - tests/test_config.py
+---
+
 # Config
 
 **Status:** Stable

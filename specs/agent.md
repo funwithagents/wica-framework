@@ -1,3 +1,11 @@
+---
+code:
+  - src/wica/agent.py
+tests:
+  - tests/test_agent.py
+  - tests-e2e/test_agent.py
+---
+
 # Agent
 
 **Status:** Draft

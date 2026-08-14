@@ -1,3 +1,15 @@
+---
+code:
+  - tests/conftest.py
+  - tests-e2e/conftest.py
+  - tests-e2e/support.py
+  - tests-e2e/e2e.anthropic.config.json
+  - tests-e2e/e2e.openai.config.json
+  - tests-e2e/e2e.huggingface-hub.config.json
+tests:
+  - tests-e2e/test_smoke.py
+---
+
 # Testing
 
 **Status:** Stable

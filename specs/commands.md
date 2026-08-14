@@ -1,3 +1,10 @@
+---
+code:
+  - src/wica/agent.py
+tests:
+  - tests/test_agent.py
+---
+
 # Commands
 
 **Status:** Draft

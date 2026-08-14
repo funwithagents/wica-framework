@@ -1,3 +1,10 @@
+---
+code:
+  - src/wica/world.py
+tests:
+  - tests/test_world.py
+---
+
 # Inputs
 
 **Status:** Stable

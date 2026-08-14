@@ -1,3 +1,10 @@
+---
+code:
+  - src/wica/content.py
+tests:
+  - tests/test_content.py
+---
+
 # Content
 
 **Status:** Stable

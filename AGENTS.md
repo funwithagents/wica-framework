@@ -27,7 +27,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
 | [__init__.py](src/wica/__init__.py) | Public API surface — re-exports the names above | — |
 
-**Keep this map current:** when you add, rename, or remove a top-level `src/wica/` module or a root directory, update the map in the same change — same discipline as keeping spec/plan statuses honest (below). A test (`tests/test_project_map.py`) enforces that every `src/wica/*.py` module appears here and vice-versa.
+**Keep this map current:** when you add, rename, or remove a top-level `src/wica/` module or a root directory, update the map in the same change — same discipline as keeping spec/plan statuses honest (below). A test (`tests/test_project_map.py`) enforces that every `src/wica/*.py` module appears here and vice-versa — and that the spec frontmatter (see below) stays honest too.
 
 ## Keeping statuses current
 
@@ -38,6 +38,25 @@ Specs and plans both carry a status, and you are responsible for keeping it hone
   - A purely editorial edit to a `Stable` spec (typos, clarifications, reordering — nothing that changes what the code should do) stays `Stable`; it does **not** need `Updated`.
 - **Plan status** (`**Status:**` line near the top of each plan, and the Status column in [plans/_index.md](plans/_index.md)) tracks *implementation progress*: `Todo` → `In progress` → `Done`. Mark a plan `Done` only once it's implemented and verified (lint, type check, tests all pass — see Verification). Keep the `**Status:**` line and the index row in sync.
 - Whenever you add a spec or plan, add its row to the relevant `_index.md`; whenever you change a status, change it in both the file and the index.
+
+## Spec frontmatter
+
+Every spec opens with a YAML frontmatter block naming the code and tests it governs:
+
+```
+---
+code:
+  - src/wica/world.py
+tests:
+  - tests/test_world.py
+---
+```
+
+This is the **spec → code/tests** mapping — the inverse of the module → spec column in the Project map above. Its job is to give the **spec-drift checks** an explicit, version-controlled scope: the exact files to diff a spec against, so a checker never has to guess which code implements a given spec. `code:` names the implementation the spec specifies; `tests:` names the tests that pin its behavior (may be empty/absent, e.g. the demo spec).
+
+The mapping is **many-to-many**: a file can be governed by several specs — `agent.py` by both [agent.md](specs/agent.md) and [commands.md](specs/commands.md), `world.py` by both [world.md](specs/world.md) and [inputs.md](specs/inputs.md) — so the same path legitimately appears in more than one spec's frontmatter.
+
+**Keep it current** (same discipline as statuses): when you move, rename, or delete a file a spec governs — or add a new `src/wica/` module — update the affected spec's `code:`/`tests:` in the same change. `tests/test_project_map.py` enforces three invariants: every listed path exists, every spec declares a non-empty `code:` list, and every concept module in `src/wica/` is named by at least one spec (`__init__.py` is exempt as package glue).
 
 ## Testing
 
