@@ -156,6 +156,50 @@ async def _noop_output_sink(text: str) -> None:
     return None
 
 
+# WICA's provider value for the Hugging Face Hub's serverless Inference Providers. Deliberately
+# *not* "huggingface" — that's init_chat_model's builtin, which builds a local transformers
+# pipeline (heavy, and non-cancellable). See build_chat_model and specs/config.md ("Providers").
+_HUGGINGFACE_HUB_PROVIDER = "huggingface-hub"
+
+
+def build_chat_model(config: AgentConfig) -> BaseChatModel:
+    """Construct the LangChain chat model for an AgentConfig — the single source of truth for
+    provider construction, shared by Agent.from_config and the e2e helper (so tests exercise the
+    exact model production builds).
+
+    Most providers pass straight through to init_chat_model (switching between them is a config
+    edit). `huggingface-hub` is the exception: it targets the Hugging Face Hub's serverless
+    Inference Providers and is built directly as ChatHuggingFace(llm=HuggingFaceEndpoint(...)) —
+    *not* via init_chat_model, whose builtin `huggingface` provider builds a local transformers
+    pipeline, a blocking generation call the Agent's task.cancel() can't stop. See specs/agent.md
+    ("Provider-agnostic model, from config") and specs/config.md ("Providers").
+
+    Provider integration packages are imported lazily, inside their branch, so core wica needs
+    none of them installed — an unselected provider fails here with a clear ImportError.
+    """
+    if config.provider == _HUGGINGFACE_HUB_PROVIDER:
+        from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+
+        endpoint_kwargs = dict(config.model_kwargs)
+        if config.api_key is not None:
+            # This branch builds the model directly, so it owns the kwarg name: the resolved
+            # api_key/api_key_env is HF's token, not the generic `api_key` the init_chat_model
+            # providers receive.
+            endpoint_kwargs["huggingfacehub_api_token"] = config.api_key
+        endpoint = HuggingFaceEndpoint(
+            repo_id=config.model,
+            provider=config.hf_provider,
+            task="text-generation",
+            **endpoint_kwargs,
+        )
+        return ChatHuggingFace(llm=endpoint)
+
+    model_kwargs = dict(config.model_kwargs)
+    if config.api_key is not None:
+        model_kwargs["api_key"] = config.api_key
+    return init_chat_model(config.model, model_provider=config.provider, **model_kwargs)
+
+
 class Agent:
     def __init__(
         self,
@@ -212,10 +256,7 @@ class Agent:
 
     @classmethod
     def from_config(cls, config: AgentConfig, **kwargs: Any) -> Agent:
-        model_kwargs = dict(config.model_kwargs)
-        if config.api_key is not None:
-            model_kwargs["api_key"] = config.api_key
-        model = init_chat_model(config.model, model_provider=config.provider, **model_kwargs)
+        model = build_chat_model(config)
         return cls(model, system_prompt=config.system_prompt, **kwargs)
 
     def register_command(

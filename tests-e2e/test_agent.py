@@ -4,12 +4,15 @@ import asyncio
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from wica.content import Content, TextPart
 from wica.world import World, WorldEntry, get_world
 
-from support import real_agent
+from support import PROVIDER_CONFIGS, real_agent
 
 WAIT_TIMEOUT = 15.0
 
@@ -47,12 +50,13 @@ class RecordingSink:
         self.event.set()
 
 
-def test_plain_text_round_trip():
+@pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
+def test_plain_text_round_trip(config_path: Path):
     world = get_world()
     world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
 
     sink = RecordingSink()
-    agent = real_agent(world=world, output_sink=sink)
+    agent = real_agent(config_path, world=world, output_sink=sink)
     agent.start()
     try:
         world.update("prompt", "Say hello in one short sentence.")
@@ -63,12 +67,13 @@ def test_plain_text_round_trip():
         agent.stop()
 
 
-def test_real_tool_calling_round_trip():
+@pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
+def test_real_tool_calling_round_trip(config_path: Path):
     world = get_world()
     world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
 
     sink = RecordingSink()
-    agent = real_agent(world=world, output_sink=sink)
+    agent = real_agent(config_path, world=world, output_sink=sink)
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""

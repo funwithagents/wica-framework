@@ -247,3 +247,119 @@ def test_from_json_then_apply_logging_then_from_config_composes(
 
     assert captured["model"] == "claude-sonnet-5"
     assert captured["kwargs"]["api_key"] == "sk-abc"
+
+
+# --- hf_provider field --------------------------------------------------------------------
+
+
+def test_hf_provider_defaults_to_auto():
+    cfg = AgentConfig.from_dict(_agent_dict())
+    assert cfg.hf_provider == "auto"
+
+
+def test_hf_provider_parsed_when_present():
+    cfg = AgentConfig.from_dict(
+        _agent_dict(provider="huggingface-hub", model="meta-llama/x", hf_provider="together")
+    )
+    assert cfg.hf_provider == "together"
+
+
+def test_hf_provider_wrong_type_raises():
+    with pytest.raises(ConfigError, match="hf_provider"):
+        AgentConfig.from_dict(_agent_dict(hf_provider=123))
+
+
+# --- build_chat_model: provider construction branch ---------------------------------------
+
+
+def test_build_chat_model_openai_routes_through_init_chat_model(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
+        captured["model"] = model
+        captured["provider"] = model_provider
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
+
+    config = AgentConfig(provider="openai", model="gpt-4o", system_prompt="hi", api_key="sk-x")
+    agent_module.build_chat_model(config)
+
+    assert captured["model"] == "gpt-4o"
+    assert captured["provider"] == "openai"
+    assert captured["kwargs"]["api_key"] == "sk-x"
+
+
+def test_build_chat_model_huggingface_hub_branch(monkeypatch: pytest.MonkeyPatch):
+    """huggingface-hub is built directly as ChatHuggingFace(llm=HuggingFaceEndpoint(...)), NOT via
+    init_chat_model, and forwards the resolved api_key as huggingfacehub_api_token (its own kwarg
+    name) — see specs/agent.md "Provider-agnostic model, from config"."""
+    import langchain_huggingface
+
+    captured: dict[str, Any] = {}
+
+    class FakeEndpoint:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["endpoint"] = kwargs
+
+    class FakeChat:
+        def __init__(self, *, llm: Any) -> None:
+            captured["llm"] = llm
+
+    # build_chat_model does `from langchain_huggingface import ...` inside its branch, which reads
+    # these attributes off the module at call time, so patching them here takes effect.
+    monkeypatch.setattr(langchain_huggingface, "HuggingFaceEndpoint", FakeEndpoint)
+    monkeypatch.setattr(langchain_huggingface, "ChatHuggingFace", FakeChat)
+    # Guard against the else-branch: if the provider check regressed, init_chat_model must not run.
+    monkeypatch.setattr(
+        agent_module,
+        "init_chat_model",
+        lambda *a, **k: pytest.fail("huggingface-hub must not go through init_chat_model"),
+    )
+
+    config = AgentConfig(
+        provider="huggingface-hub",
+        model="meta-llama/Llama-3.3-70B-Instruct",
+        system_prompt="hi",
+        api_key="hf-token",
+        hf_provider="fireworks-ai",
+        model_kwargs={"temperature": 0.3},
+    )
+    model = agent_module.build_chat_model(config)
+
+    endpoint_kwargs = captured["endpoint"]
+    assert endpoint_kwargs["repo_id"] == "meta-llama/Llama-3.3-70B-Instruct"
+    assert endpoint_kwargs["provider"] == "fireworks-ai"
+    assert endpoint_kwargs["huggingfacehub_api_token"] == "hf-token"
+    assert endpoint_kwargs["task"] == "text-generation"
+    assert endpoint_kwargs["temperature"] == 0.3
+    # HF gets the token kwarg, never the generic api_key the init_chat_model providers receive.
+    assert "api_key" not in endpoint_kwargs
+    assert isinstance(model, FakeChat)
+    assert isinstance(captured["llm"], FakeEndpoint)
+
+
+def test_build_chat_model_huggingface_hub_omits_token_when_no_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import langchain_huggingface
+
+    captured: dict[str, Any] = {}
+
+    class FakeEndpoint:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["endpoint"] = kwargs
+
+    monkeypatch.setattr(langchain_huggingface, "HuggingFaceEndpoint", FakeEndpoint)
+    monkeypatch.setattr(langchain_huggingface, "ChatHuggingFace", lambda *, llm: object())
+
+    config = AgentConfig(
+        provider="huggingface-hub", model="meta-llama/x", system_prompt="hi"
+    )
+    agent_module.build_chat_model(config)
+
+    # No key given: don't pass the token kwarg at all, so HuggingFaceEndpoint reads the standard
+    # env var (mirrors how the init_chat_model providers behave when api_key is unset).
+    assert "huggingfacehub_api_token" not in captured["endpoint"]
+    assert captured["endpoint"]["provider"] == "auto"

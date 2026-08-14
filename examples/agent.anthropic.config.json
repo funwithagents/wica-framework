@@ -1,0 +1,9 @@
+{
+  "logging": "INFO",
+  "agent": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-5",
+    "api_key_env": "WICA_ANTHROPIC_API_KEY",
+    "system_prompt_file": "prompts/wica.md"
+  }
+}

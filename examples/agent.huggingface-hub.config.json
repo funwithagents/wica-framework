@@ -1,0 +1,10 @@
+{
+  "logging": "INFO",
+  "agent": {
+    "provider": "huggingface-hub",
+    "model": "deepseek-ai/DeepSeek-V3.1",
+    "hf_provider": "deepinfra",
+    "api_key_env": "WICA_HF_TOKEN",
+    "system_prompt_file": "prompts/wica.md"
+  }
+}

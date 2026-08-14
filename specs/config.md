@@ -30,13 +30,28 @@ The config is a **top-level framework config** with an `agent` block nested insi
 | Field | Location | Required | Notes |
 |---|---|---|---|
 | `logging` | top level | no (default `"INFO"`) | Level applied to the `wica.*` loggers, mirroring the demo's `WICA_LOG` handling ([conversation_demo.py](../examples/conversation_demo.py)) |
-| `provider` | `agent` | **yes** | LangChain `model_provider` passed to `init_chat_model` (`anthropic`, `openai`, …) |
-| `model` | `agent` | **yes** | Model name passed to `init_chat_model` |
+| `provider` | `agent` | **yes** | Selects the model backend. Most values pass straight through as LangChain's `model_provider` to `init_chat_model` (`anthropic`, `openai`, …); the special value `huggingface-hub` takes WICA's own construction path (see "Providers" below) |
+| `model` | `agent` | **yes** | Model name passed to `init_chat_model` (for `huggingface-hub`, the Hub `repo_id`, e.g. `meta-llama/Llama-3.3-70B-Instruct`) |
 | `api_key` | `agent` | no | Literal key (see "API key"); at most one of `api_key`/`api_key_env` |
 | `api_key_env` | `agent` | no | Name of an env var the key is read from at load time (see "API key"); at most one of `api_key`/`api_key_env` |
 | `system_prompt` | `agent` | **one of** | Inline persona string (see "System prompt") |
 | `system_prompt_file` | `agent` | **one of** | Path to a file holding the persona, resolved relative to the config file (see "System prompt") |
 | `model_kwargs` | `agent` | no (default `{}`) | Extra params forwarded to `init_chat_model` (e.g. `temperature`) |
+| `hf_provider` | `agent` | no (default `"auto"`) | **Only** for `provider: "huggingface-hub"`: the Hub Inference **backend** provider (`auto`/`fireworks-ai`/`together`/…), forwarded to `HuggingFaceEndpoint(provider=…)`. Ignored by other providers (see "Providers") |
+
+### Providers
+
+WICA recognizes a small set of `provider` values, each backed by an optional integration package installed as an **extra** (packaging lives in [project.md](project.md)):
+
+| `provider` | Extra → package |
+|---|---|
+| `anthropic` | `wica[anthropic]` → `langchain-anthropic` |
+| `openai` | `wica[openai]` → `langchain-openai` |
+| `huggingface-hub` | `wica[huggingface-hub]` → `langchain-huggingface` |
+
+Core `wica` bundles **no** provider; selecting one whose extra isn't installed fails at runtime with a clear `ImportError`, never silently.
+
+Two of these are ordinary LangChain providers — `anthropic`, `openai`, and any other LangChain-supported value are passed through as `model_provider` to `init_chat_model`, so switching between them is a pure config edit. **`huggingface-hub` is WICA-specific:** it targets the Hugging Face Hub's serverless Inference Providers and the Agent constructs it on its own path rather than via `init_chat_model`. Config-wise that adds exactly one field — **`hf_provider`**, naming the Hub **backend** (`auto`/`fireworks-ai`/…). *How* that model is built and *why* it bypasses `init_chat_model` (including how the resolved API key is forwarded) is an Agent concern — see [agent.md](agent.md), "Provider-agnostic model, from config".
 
 ### JSON, loaded via plain dataclasses
 
@@ -57,7 +72,7 @@ The key can be given two ways, **at most one** of them:
 - **Literal** — `"api_key": "sk-..."`, the raw key in the file.
 - **Env reference** — `"api_key_env": "WICA_ANTHROPIC_API_KEY"`, the *name* of an environment variable the key is read from at load time.
 
-Both resolve, during loading, to a plain `api_key: str | None` on `AgentConfig`, which `Agent.from_config` passes straight to `init_chat_model(..., api_key=...)` — the same path `tests-e2e/support.py` already uses — when set. When **neither** is given, nothing is passed and `init_chat_model` reads the provider's standard env var (`ANTHROPIC_API_KEY`, …) exactly as the code does today, so existing env-based setups keep working and env stays the zero-config default. Providing **both** is a `ConfigError`. Unlike `system_prompt_file`, env resolution needs no base directory, so **both `from_dict` and `from_json`** honour `api_key_env` (only the file indirection is `from_json`-only).
+Both resolve, during loading, to a plain `api_key: str | None` on `AgentConfig`, which `Agent.from_config` passes straight to `init_chat_model(..., api_key=...)` — the same path `tests-e2e/support.py` already uses — when set. (`huggingface-hub` bypasses `init_chat_model` and forwards this same resolved value under its own token kwarg — an Agent construction detail, see [agent.md](agent.md).) When **neither** is given, nothing is passed and `init_chat_model` reads the provider's standard env var (`ANTHROPIC_API_KEY`, …) exactly as the code does today, so existing env-based setups keep working and env stays the zero-config default. Providing **both** is a `ConfigError`. Unlike `system_prompt_file`, env resolution needs no base directory, so **both `from_dict` and `from_json`** honour `api_key_env` (only the file indirection is `from_json`-only).
 
 **A referenced env var that is unset raises `MissingEnvError`** — a `ConfigError` subclass naming the variable — so a misconfiguration is loud rather than silently keyless. Callers that prefer to degrade catch it: the demo falls back to explore-only, the e2e helper skips. A *structural* problem (typo'd field, missing required key) is a plain `ConfigError`, so the two are distinguishable.
 

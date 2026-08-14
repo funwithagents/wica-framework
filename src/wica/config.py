@@ -27,6 +27,12 @@ class AgentConfig:
     system_prompt: str
     api_key: str | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
+    # Only meaningful for provider "huggingface-hub": the Hub Inference *backend* provider
+    # ("auto"/"fireworks-ai"/...), forwarded to HuggingFaceEndpoint(provider=...). Kept a plain
+    # optional string accepted regardless of provider (only the huggingface-hub construction
+    # branch reads it) — no strict "only with huggingface-hub" coupling. See specs/config.md
+    # ("Providers") and specs/agent.md ("Provider-agnostic model, from config").
+    hf_provider: str = "auto"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
@@ -59,7 +65,7 @@ class WicaConfig:
 
 
 _AGENT_REQUIRED = {"provider", "model"}
-_AGENT_OPTIONAL_COMMON = {"api_key", "api_key_env", "model_kwargs"}
+_AGENT_OPTIONAL_COMMON = {"api_key", "api_key_env", "model_kwargs", "hf_provider"}
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent", "logging"}
 
@@ -134,12 +140,19 @@ def _parse_agent_block(data: dict[str, Any], *, base_dir: Path | None) -> dict[s
     if not isinstance(model_kwargs, dict):
         raise ConfigError(f"{block}: 'model_kwargs' must be an object")
 
+    hf_provider = data["hf_provider"] if "hf_provider" in data else "auto"
+    if not isinstance(hf_provider, str):
+        raise ConfigError(
+            f"{block}: 'hf_provider' must be a string, got {type(hf_provider).__name__}"
+        )
+
     return {
         "provider": provider,
         "model": model,
         "system_prompt": system_prompt,
         "api_key": api_key,
         "model_kwargs": model_kwargs,
+        "hf_provider": hf_provider,
     }
 
 

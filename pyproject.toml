@@ -5,17 +5,31 @@ description = "Agentic framework centered on a World store of multimodal context
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "langchain>=0.3.0",
-    "langchain-core>=0.3.0",
+    "langchain>=1.0",
+    "langchain-core>=1.0",
 ]
+
+# Provider integrations are optional extras: core `wica` ships with no model provider,
+# and a consumer installs only what it wires up (e.g. `wica[openai] @ git+https://...`).
+# Selecting a provider whose extra isn't installed fails at runtime with a clear
+# ImportError. See specs/project.md ("Provider integrations are optional extras").
+[project.optional-dependencies]
+anthropic = ["langchain-anthropic>=1.0"]
+openai = ["langchain-openai>=1.0"]
+huggingface-hub = ["langchain-huggingface>=1.2"]
 
 [build-system]
 requires = ["uv_build>=0.11.29,<0.12.0"]
 build-backend = "uv_build"
 
+# The dev/demo groups list every provider package so this repo's own e2e tests and demo
+# can switch providers by editing config alone (extras serve downstream consumers, groups
+# serve in-repo work — see specs/project.md).
 [dependency-groups]
 dev = [
-    "langchain-anthropic>=0.3.0",
+    "langchain-anthropic>=1.0",
+    "langchain-openai>=1.0",
+    "langchain-huggingface>=1.2",
     "pyright>=1.1.411",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
@@ -24,7 +38,9 @@ dev = [
 # Run with: uv run --group demo python examples/conversation_demo.py
 demo = [
     "gradio>=5.0.0",
-    "langchain-anthropic>=0.3.0",
+    "langchain-anthropic>=1.0",
+    "langchain-openai>=1.0",
+    "langchain-huggingface>=1.2",
 ]
 
 [tool.ruff]

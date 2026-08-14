@@ -47,21 +47,31 @@ Specs and plans both carry a status, and you are responsible for keeping it hone
 
 ### Live/e2e tests
 
-Some tests call a real LLM provider over the network. They live in `tests-e2e/`, a directory separate from `tests/`, so the default `uv run pytest` never runs them — no network access or API key is needed for the normal dev loop. Run them explicitly, and only when you actually want to verify against a live provider:
+Some tests call a real LLM provider over the network. They live in `tests-e2e/`, a directory separate from `tests/`, so the default `uv run pytest` never runs them — no network access or API key is needed for the normal dev loop. Run them explicitly, and only when you actually want to verify against a live provider.
 
-```
-uv run pytest tests-e2e
-```
+**The e2e tier is parametrized over one config per provider.** Each committed config names its `provider`/`model` (and `hf_provider` for the Hub) and points at its own `api_key_env`; they're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every e2e test runs once per config**. A config whose key env var is unset **skips** (it does not fail — see `tests-e2e/support.py`), so you only exercise the providers you have keys for. The provider/config surface is specced in [specs/config.md](specs/config.md) ("Providers").
 
-Each e2e test skips itself (does not fail) if its required API key isn't set in the environment — see `tests-e2e/support.py`.
+| Config | Key env var |
+|---|---|
+| `tests-e2e/e2e.anthropic.config.json` | `WICA_ANTHROPIC_API_KEY` |
+| `tests-e2e/e2e.openai.config.json` | `WICA_OPENAI_API_KEY` |
+| `tests-e2e/e2e.huggingface-hub.config.json` | `WICA_HF_TOKEN` |
 
-**A real key is available via `~/.zshrc`** (`WICA_ANTHROPIC_API_KEY`), but the shell tool runs non-interactive `bash`/`zsh`, which doesn't source it — a plain `uv run pytest tests-e2e` in that shell sees no key and every test skips. To actually run against the live provider, source it explicitly in an interactive `zsh` invocation:
+**All three keys live in `~/.zshrc`**, but the shell tool runs non-interactive `bash`/`zsh`, which doesn't source it — a plain `uv run pytest tests-e2e` in that shell sees no keys and every case skips. Source it explicitly in an interactive `zsh` invocation. Run **all providers** (each whose key is set runs; the rest skip):
 
 ```
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e'
 ```
 
-Never `echo`/print the key itself; when checking whether it's set, redact the value (e.g. `env | grep WICA | sed -E 's/=.*/=<set>/'`).
+Run **one provider** by filtering on its config-filename stem with `-k` (the configs are named symmetrically, so the provider name works directly):
+
+```
+zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k openai'
+zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k huggingface'
+zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k anthropic'
+```
+
+Never `echo`/print a key itself; when checking whether one is set, redact the value (e.g. `env | grep WICA | sed -E 's/=.*/=<set>/'`).
 
 ## Implementation plans
 
