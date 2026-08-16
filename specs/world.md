@@ -7,7 +7,7 @@ tests:
 
 # World
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 

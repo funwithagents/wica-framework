@@ -7,7 +7,7 @@ tests:
 
 # Config
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 

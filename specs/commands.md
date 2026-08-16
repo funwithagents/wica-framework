@@ -7,7 +7,7 @@ tests:
 
 # Commands
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 

@@ -7,7 +7,7 @@ tests:
 
 # Inputs
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 

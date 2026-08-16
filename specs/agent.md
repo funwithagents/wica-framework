@@ -8,7 +8,7 @@ tests:
 
 # Agent
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 

@@ -7,7 +7,7 @@ tests:
 
 # Project
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 

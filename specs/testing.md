@@ -12,7 +12,7 @@ tests:
 
 # Testing
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 

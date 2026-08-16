@@ -10,7 +10,7 @@ code:
 
 # Conversation demo
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 
