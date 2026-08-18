@@ -179,6 +179,8 @@ See [specs/conversation-demo.md](specs/conversation-demo.md).
 
 The design is documented spec-first: each spec in [`specs/`](specs/_index.md) carries a status (`Draft`/`Stable`/…) and declares the code and tests it governs. Read the specs for the full rationale behind every decision above.
 
+**Integrating WICA into your own app?** [INTEGRATING.md](INTEGRATING.md) is the consumer-facing entry point — the public API surface, the wiring recipes, the v1 limits, and a spec-routing table — written to be read by a coding agent.
+
 ## Development
 
 Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).

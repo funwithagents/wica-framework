@@ -74,6 +74,16 @@ When added, the sync/async decision is made **without annotating the Command**, 
 - **(a) Auto by latency (preferred):** `await` the Command inline with a short timeout (~1–2s). Returns in time → handle inline (native pair, sync). Exceeds it → detach: convert to the history-text line, register the running command-execution entry, end the step, resume on completion (async). The Command's *actual speed* decides, per invocation — no declaration.
 - **(b) Optional registration flag:** `register_command(fn, mode="auto" | "sync" | "async")`, default `auto`. A one-word wrapper flag (not a tool change) to pin known cases (`walk_to` always async, `add` always sync).
 
+## Cancellation reaches the task, not always the work
+
+`cancel_command` (and the framework's own `Agent.cancel_command` from `stop()`) cancels the **asyncio task** running the Command — it lands a `CancelledError` at the awaiting coroutine's next suspension point, flips the command-execution entry to `cancelled`, and re-triggers. That is prompt and reliable for the *bookkeeping*. Whether it stops the actual *work* depends on how the backing function is written:
+
+- **Native `async` Command (has real `await` points).** Genuinely cancellable: `CancelledError` lands at an `await`, the coroutine unwinds, `finally` blocks run. This is the case the whole cancellation guarantee is built on.
+- **Sync function.** WICA runs it — LangChain's `ainvoke` offloads a sync tool to a thread-pool executor, so it works and doesn't block the loop. But **Python cannot forcibly kill a thread** (no safe `Thread.kill`; the `PyThreadState_SetAsyncExc` hack can't interrupt a blocking C call — precisely the slow case you'd want to cancel). So on cancel the *awaiting task* unwinds and the entry reads `cancelled` immediately, while the **worker thread keeps running the sync function to completion in the background, its result discarded**. The cancellation is honest for the World, not for the CPU.
+- **Cooperative sync function** (periodically checks a `threading.Event`/flag and returns early) is the way to make a sync Command actually stoppable without going async.
+
+**Guidance:** prefer `async` for any Command that can run long enough to be worth cancelling; if it must be sync and long-running, make it cooperative. The only way to *forcibly* kill uncooperative blocking work is to run it in a **subprocess** (`terminate()`/`SIGKILL`), which trades away cheap in-process World access for serialized args/results — a deliberate escape hatch, not the default. This mirrors the same thread-can't-be-cancelled reasoning that bans `init_chat_model`'s local `huggingface` pipeline in [agent.md](agent.md) ("Provider-agnostic model, from config").
+
 ## Open questions
 
 1. **Failure rendering.** How a *failed* Command renders in its command-execution entry (currently `Called explode() → failed: boom`) — whether that's rich enough, and how it reads alongside the fixed-ack `tool_result` that the reconstruct path pairs with the reconstructed `tool_call`.
