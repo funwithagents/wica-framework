@@ -1,7 +1,7 @@
 {
   "agent": {
     "provider": "huggingface-hub",
-    "model": "deepseek-ai/DeepSeek-V3.1",
+    "model": "Qwen/Qwen2.5-72B-Instruct",
     "hf_provider": "deepinfra",
     "api_key_env": "WICA_HF_TOKEN",
     "system_prompt": "You are a terse test assistant. Use tools when appropriate."
