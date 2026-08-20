@@ -25,6 +25,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | [world.py](src/wica/world.py) | The World state registry: typed entries, register/update/get API, rendering to `Content`, `get_world()` singleton | [world.md](specs/world.md) |
 | [config.py](src/wica/config.py) | Framework config: `AgentConfig`/`WicaConfig` dataclasses, strict JSON loading (`from_dict`/`from_json`), `system_prompt_file`, `api_key`/`api_key_env` resolution | [config.md](specs/config.md) |
 | [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
+| [fake_model.py](src/wica/fake_model.py) | Deterministic, network-free `FakeChatModel` for tests: a scripted `provider: "fake"` model driving the loop over canned responses; test tooling, not re-exported into the runtime `wica` namespace | [fake-provider.md](specs/fake-provider.md) |
 | [__init__.py](src/wica/__init__.py) | Public API surface — re-exports the names above | — |
 
 **Keep this map current:** when you add, rename, or remove a top-level `src/wica/` module or a root directory, update the map in the same change — same discipline as keeping spec/plan statuses honest (below). A test (`tests/test_project_map.py`) enforces that every `src/wica/*.py` module appears here and vice-versa — and that the spec frontmatter (see below) stays honest too.
@@ -93,6 +94,12 @@ zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k anthropic'
 ```
 
 Never `echo`/print a key itself; when checking whether one is set, redact the value (e.g. `env | grep WICA | sed -E 's/=.*/=<set>/'`).
+
+**The `tests-e2e/` tier also holds an always-run, deterministic set: the scripted-fake flows** (`test_fake_flows.py`, over `provider: "fake"` — see [specs/fake-provider.md](specs/fake-provider.md)). These are network-free and key-less, so they sit **outside** `PROVIDER_CONFIGS` and never skip. Run just them — no keys, no `~/.zshrc` sourcing needed — with `-k fake`:
+
+```
+uv run pytest tests-e2e -k fake
+```
 
 ## Implementation plans
 

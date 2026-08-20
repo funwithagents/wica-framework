@@ -22,6 +22,7 @@ The name breaks down as:
 | [commands.md](commands.md) | Commands: WICA's unit of agent action on the World, backed by LangChain tools; execution-as-World-entry lifecycle, generic call description | Implemented |
 | [agent.md](agent.md) | Agent reasoning loop: LangChain-backed inference, snapshot history, fresh/archival rendering, async cancellable Commands, output sink | Implemented |
 | [conversation-demo.md](conversation-demo.md) | Conversation demo product: browser UI to talk to a simulated social robot, with live World state and prompt views; simulated sensor inputs and robot-action Commands | Implemented |
+| [fake-provider.md](fake-provider.md) | Deterministic `provider: "fake"` chat model — a scripted, network-free, key-less double selected via config, for always-run scripted whole-flow tests in the `tests-e2e/` full-loop tier | Implemented |
 
 Each spec also opens with a YAML **frontmatter** block declaring the `code:` and `tests:` files it governs — the spec → code/tests mapping the spec-drift checks use to scope what they compare. Keep it current when files move, and see [AGENTS.md](../AGENTS.md) ("Spec frontmatter") for the full convention.
 

@@ -133,7 +133,7 @@ An Agent is stood up from one JSON file, so switching provider or editing the pe
 
 | Key | Required | Notes |
 |---|---|---|
-| `agent.provider` | yes | `anthropic` \| `openai` \| `huggingface-hub` |
+| `agent.provider` | yes | `anthropic` \| `openai` \| `huggingface-hub` \| `fake` (deterministic test double — see "Testing flows deterministically") |
 | `agent.model` | yes | Model id (or Hub `repo_id` for `huggingface-hub`) |
 | `agent.system_prompt` / `system_prompt_file` | exactly one | Inline, or a path resolved relative to the config file |
 | `agent.api_key` / `api_key_env` | at most one | Literal key, or an env var to read at load time. Neither → provider's standard env var. Prefer `api_key_env` so the config carries no secret and is safe to commit |
@@ -142,6 +142,36 @@ An Agent is stood up from one JSON file, so switching provider or editing the pe
 | `logging` | no | `wica` logger level. Default `INFO` |
 
 Loading is a two-call composition — `WicaConfig.from_json` → `Agent.from_config` — keeping code-only wiring (World instance, event loop, output sink, instrumentation hooks) in `**kwargs`, where JSON can't reach. Selecting a provider whose extra isn't installed fails at runtime with a clear `ImportError`.
+
+## Testing flows deterministically
+
+Your own e2e tests can drive the whole Agent loop against a **scripted** model instead of a live LLM — no key, no network, fully deterministic — by selecting `provider: "fake"`. The model replays `model_kwargs.script` step by step: each reasoning step consumes the next entry, so you assert the *exact* Commands and utterances a real provider could never pin. Once the script is spent it returns `model_kwargs.default` (so an extra step never crashes a test); `delay_s` (default 200 ms) simulates latency and is worth setting to `0` in a test.
+
+```python
+from wica import get_world, WicaConfig
+from wica.agent import Agent
+
+config = WicaConfig.from_dict({          # or a committed *.config.json, same as production
+    "agent": {
+        "provider": "fake",
+        "model": "scripted",
+        "system_prompt": "You are a test double.",
+        "model_kwargs": {
+            "delay_s": 0,
+            "script": [
+                {"tool_calls": [{"name": "walk_to", "args": {"place": "kitchen"}}]},
+                {"text": "On my way."},
+            ],
+        },
+    },
+})
+agent = Agent.from_config(config.agent, output_sink=my_sink)
+agent.register_command(walk_to)
+agent.start()
+# ... update a triggering World entry, then assert the command entry + sink output ...
+```
+
+Each scripted `tool_calls[].name` is validated against your registered Commands (a typo raises, rather than silently emitting an unknown call). For a script that can't live in JSON (a reactive/programmatic double), construct it directly instead: `from wica.fake_model import FakeChatModel` → `Agent(model=FakeChatModel(...), system_prompt=...)`. Full design in [specs/fake-provider.md](specs/fake-provider.md).
 
 ## v1 limits to design around
 
@@ -163,6 +193,7 @@ Route to the spec that governs what you're touching (each carries the full ratio
 | Write Commands (lifecycle, cancellation, `cancel_command`) | [specs/commands.md](specs/commands.md) |
 | Understand the reasoning loop, history rendering, coalescing, hooks | [specs/agent.md](specs/agent.md) |
 | Author config / add a provider | [specs/config.md](specs/config.md) |
+| Write deterministic e2e tests with the scripted `fake` provider | [specs/fake-provider.md](specs/fake-provider.md) |
 | See it all wired in a runnable app | [specs/conversation-demo.md](specs/conversation-demo.md) → [`examples/conversation_demo.py`](examples/conversation_demo.py) |
 
 Spec index with statuses: [specs/_index.md](specs/_index.md).

@@ -27,12 +27,23 @@ Tests split into two directories, and the split is structural — a directory bo
 | Tier | Directory | Network | Deterministic | Runs by default |
 |---|---|---|---|---|
 | Unit / integration | `tests/` | never | yes | **yes** |
-| Live / e2e | `tests-e2e/` | real provider | no | **no** |
+| Full-loop / e2e | `tests-e2e/` | real provider* | no* | **no** |
+
+*The `tests-e2e/` row describes its live-provider tests. The tier also holds the always-run, deterministic, network-free **scripted-fake flows** (see "Always-run scripted-fake flows" below).
 
 - **`tests/` is the normal dev loop.** Fast, deterministic, no real network, no API key. `pyproject.toml`'s `testpaths = ["tests"]` points the default `uv run pytest` here, so this is what runs on every change and what any contributor or CI can run with zero credentials.
-- **`tests-e2e/` is opt-in.** It calls a real LLM provider — network, an API key, non-deterministic output, and it costs money — so it is deliberately *not* collected by the default run. Because `testpaths` already excludes it, no pytest marker or `--run-e2e` flag is needed: the physical separation is the whole mechanism. Run it explicitly (`uv run pytest tests-e2e`).
+- **`tests-e2e/` is opt-in.** It is the **full-loop tier** — tests that exercise the Agent's whole step loop. Its *live-provider* tests call a real LLM (network, an API key, non-deterministic output, and it costs money), so the tier is deliberately *not* collected by the default run. Because `testpaths` already excludes it, no pytest marker or `--run-e2e` flag is needed: the physical separation is the whole mechanism. Run it explicitly (`uv run pytest tests-e2e`). One kind of test here is the exception to "network + non-deterministic": the **always-run scripted-fake flows** (below) need no key and never skip.
 
-The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_config.py`, `test_content.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around live scenarios (`test_smoke.py`, `test_agent.py`) rather than modules.
+The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_config.py`, `test_content.py`, `test_fake_model.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_agent.py`, `test_fake_flows.py`) rather than modules.
+
+## Always-run scripted-fake flows
+
+`tests-e2e/` is the full-loop tier, of which live-provider tests are one kind and **scripted-fake** tests another. The fake set (`test_fake_flows.py`, over `provider: "fake"` — see [fake-provider.md](fake-provider.md)) drives the whole loop over a deterministic, network-free, key-less model, so it:
+
+- **always runs** when you invoke the tier — there's no key to skip on — unlike the live tests, and
+- sits **outside** `PROVIDER_CONFIGS`: it isn't parametrized over providers.
+
+It lives in `tests-e2e/` rather than `tests/` because it's a whole-loop integration test (trigger coalescing, async Command dispatch, history rendering), not a unit test — and it stays excluded from the default `uv run pytest` (that's `testpaths = ["tests"]`) with the rest of the tier. Run just this deterministic suite, no credentials needed, with `uv run pytest tests-e2e -k fake`. The fake model's own mechanics (script consumption, exhaustion, `bind_tools` name-check) are unit-tested separately in the fast tier (`tests/test_fake_model.py`).
 
 ## What a WICA test asserts
 

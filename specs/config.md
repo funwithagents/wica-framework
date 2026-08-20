@@ -55,8 +55,11 @@ WICA recognizes a small set of `provider` values, each backed by an optional int
 | `anthropic` | `wica[anthropic]` → `langchain-anthropic` |
 | `openai` | `wica[openai]` → `langchain-openai` |
 | `huggingface-hub` | `wica[huggingface-hub]` → `langchain-huggingface` |
+| `fake` | none — built in (test-only) |
 
 Core `wica` bundles **no** provider; selecting one whose extra isn't installed fails at runtime with a clear `ImportError`, never silently.
+
+**`fake` is a testing provider**, not a real backend: it builds a deterministic, network-free, key-less scripted model (`FakeChatModel`) whose responses come from `model_kwargs` (`script`/`default`/`loop`/`delay_s`) rather than any API. `api_key`/`api_key_env` are unnecessary and ignored, and `model` is a free-text label. It exists to drive the Agent's whole loop deterministically in tests — see [fake-provider.md](fake-provider.md).
 
 Two of these are ordinary LangChain providers — `anthropic`, `openai`, and any other LangChain-supported value are passed through as `model_provider` to `init_chat_model`, so switching between them is a pure config edit. **`huggingface-hub` is WICA-specific:** it targets the Hugging Face Hub's serverless Inference Providers and the Agent constructs it on its own path rather than via `init_chat_model`. Config-wise that adds exactly one field — **`hf_provider`**, naming the Hub **backend** (`auto`/`fireworks-ai`/…). *How* that model is built and *why* it bypasses `init_chat_model` (including how the resolved API key is forwarded) is an Agent concern — see [agent.md](agent.md), "Provider-agnostic model, from config".
 

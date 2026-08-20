@@ -161,6 +161,12 @@ async def _noop_output_sink(text: str) -> None:
 # pipeline (heavy, and non-cancellable). See build_chat_model and specs/config.md ("Providers").
 _HUGGINGFACE_HUB_PROVIDER = "huggingface-hub"
 
+# WICA's provider value for the deterministic, network-free, key-less scripted test model. Built
+# directly (like huggingface-hub, and before the init_chat_model fallthrough); its `model_kwargs`
+# carry the fake's own config (script/default/loop/delay_s), not provider kwargs. See
+# specs/fake-provider.md and src/wica/fake_model.py.
+_FAKE_PROVIDER = "fake"
+
 
 def build_chat_model(config: AgentConfig) -> BaseChatModel:
     """Construct the LangChain chat model for an AgentConfig — the single source of truth for
@@ -177,6 +183,14 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
     Provider integration packages are imported lazily, inside their branch, so core wica needs
     none of them installed — an unselected provider fails here with a clear ImportError.
     """
+    if config.provider == _FAKE_PROVIDER:
+        # The fake's construction payload lives in model_kwargs (script/default/loop/delay_s), which
+        # is what keeps it JSON-expressible and on the ordinary config path. api_key/model are
+        # ignored (config already resolves api_key to None when absent).
+        from wica.fake_model import FakeChatModel
+
+        return FakeChatModel(**config.model_kwargs)
+
     if config.provider == _HUGGINGFACE_HUB_PROVIDER:
         from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
