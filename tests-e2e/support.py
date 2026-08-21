@@ -13,8 +13,9 @@ E2E_DIR = Path(__file__).parent
 
 # One config per provider, named symmetrically (no privileged default) — the parametrized e2e
 # tests (smoke + tool-calling round trip) run against each. Each uses api_key_env, so a provider
-# whose key env var is unset skips (never fails) via load_agent_config -> MissingEnvError ->
-# pytest.skip. See specs/project.md ("Live/e2e tests").
+# whose key env var is unset skips (never fails): the key resolves at build, so MissingEnvError ->
+# pytest.skip lives in real_chat_model / real_agent (not the inert load). See specs/project.md
+# ("Live/e2e tests") and specs/config.md ("API key").
 PROVIDER_CONFIGS = [
     E2E_DIR / "e2e.anthropic.config.json",
     E2E_DIR / "e2e.openai.config.json",
@@ -23,10 +24,9 @@ PROVIDER_CONFIGS = [
 
 
 def load_agent_config(config_path: Path) -> AgentConfig:
-    try:
-        return WicaConfig.from_json(config_path).agent
-    except MissingEnvError as exc:
-        pytest.skip(f"{exc.env_var} not set — skipping e2e test")
+    """Load the config (inert — validates only, reads no env/files). The api key resolves later, at
+    build; the skip-when-unset lives in the build helpers below."""
+    return WicaConfig.from_json(config_path).agent
 
 
 def real_chat_model(config_path: Path) -> BaseChatModel:
@@ -34,7 +34,10 @@ def real_chat_model(config_path: Path) -> BaseChatModel:
     one `Agent.from_config` uses. Going through the shared builder (rather than a separate
     `init_chat_model` call) means the e2e tier exercises the real provider-branching construction,
     `huggingface-hub` included, instead of a divergent path that would build the wrong model."""
-    return build_chat_model(load_agent_config(config_path))
+    try:
+        return build_chat_model(load_agent_config(config_path))
+    except MissingEnvError as exc:
+        pytest.skip(f"{exc.env_var} not set — skipping e2e test")
 
 
 def real_agent(config_path: Path, **kwargs: Any) -> Agent:
@@ -43,4 +46,7 @@ def real_agent(config_path: Path, **kwargs: Any) -> Agent:
     doesn't call apply_logging: that's already covered deterministically by tests/test_config.py,
     and applying it here would reset the wica logger on every test, fighting any level a developer
     sets by hand while debugging a live e2e run."""
-    return Agent.from_config(load_agent_config(config_path), **kwargs)
+    try:
+        return Agent.from_config(load_agent_config(config_path), **kwargs)
+    except MissingEnvError as exc:
+        pytest.skip(f"{exc.env_var} not set — skipping e2e test")

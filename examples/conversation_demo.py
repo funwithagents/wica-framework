@@ -235,12 +235,12 @@ def on_prompt(messages: list[BaseMessage]) -> None:
 register_world()
 agent: Agent | None = None
 config_error: str | None = None
+# Loading is inert (validates only, reads no env/files), so from_json + apply_logging run
+# unconditionally. The api key resolves at Agent.from_config, so that's what we guard: an unset
+# api_key_env raises MissingEnvError there, and we degrade to explore-only. See specs/config.md.
+wica_config = WicaConfig.from_json(CONFIG_PATH)
+apply_logging(wica_config.logging)
 try:
-    wica_config = WicaConfig.from_json(CONFIG_PATH)
-except MissingEnvError as exc:
-    config_error = f"environment variable {exc.env_var!r} is not set"
-else:
-    apply_logging(wica_config.logging)
     agent = Agent.from_config(
         wica_config.agent,
         output_sink=output_sink,
@@ -248,6 +248,9 @@ else:
         on_trigger=on_trigger,
         on_command=on_command,
     )
+except MissingEnvError as exc:
+    config_error = f"environment variable {exc.env_var!r} is not set"
+else:
     for command in COMMANDS:
         agent.register_command(command)
     agent.start()

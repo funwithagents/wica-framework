@@ -40,9 +40,9 @@ The config is a **top-level framework config** with an `agent` block nested insi
 | `provider` | `agent` | **yes** | Selects the model backend. Most values pass straight through as LangChain's `model_provider` to `init_chat_model` (`anthropic`, `openai`, …); the special value `huggingface-hub` takes WICA's own construction path (see "Providers" below) |
 | `model` | `agent` | **yes** | Model name passed to `init_chat_model` (for `huggingface-hub`, the Hub `repo_id`, e.g. `meta-llama/Llama-3.3-70B-Instruct`) |
 | `api_key` | `agent` | no | Literal key (see "API key"); at most one of `api_key`/`api_key_env` |
-| `api_key_env` | `agent` | no | Name of an env var the key is read from at load time (see "API key"); at most one of `api_key`/`api_key_env` |
+| `api_key_env` | `agent` | no | Name of an env var the key is read from at **Agent build** (see "API key"); at most one of `api_key`/`api_key_env` |
 | `system_prompt` | `agent` | **one of** | Inline persona string (see "System prompt") |
-| `system_prompt_file` | `agent` | **one of** | Path to a file holding the persona, resolved relative to the config file (see "System prompt") |
+| `system_prompt_file` | `agent` | **one of** | Path to the persona file; **located** relative to the config file at load, **read** at Agent build (see "System prompt") |
 | `model_kwargs` | `agent` | no (default `{}`) | Extra params forwarded to `init_chat_model` (e.g. `temperature`) |
 | `hf_provider` | `agent` | no (default `"auto"`) | **Only** for `provider: "huggingface-hub"`: the Hub Inference **backend** provider (`auto`/`fireworks-ai`/`together`/…), forwarded to `HuggingFaceEndpoint(provider=…)`. Ignored by other providers (see "Providers") |
 
@@ -63,34 +63,49 @@ Core `wica` bundles **no** provider; selecting one whose extra isn't installed f
 
 Two of these are ordinary LangChain providers — `anthropic`, `openai`, and any other LangChain-supported value are passed through as `model_provider` to `init_chat_model`, so switching between them is a pure config edit. **`huggingface-hub` is WICA-specific:** it targets the Hugging Face Hub's serverless Inference Providers and the Agent constructs it on its own path rather than via `init_chat_model`. Config-wise that adds exactly one field — **`hf_provider`**, naming the Hub **backend** (`auto`/`fireworks-ai`/…). *How* that model is built and *why* it bypasses `init_chat_model` (including how the resolved API key is forwarded) is an Agent concern — see [agent.md](agent.md), "Provider-agnostic model, from config".
 
+### Config objects mirror the JSON; resolution is deferred to use
+
+The config dataclasses are a **1:1 mirror of the JSON** — plain data, holding exactly the keys the file carries, with **no environment access and no file reads of their own**. Each indirection the file allows keeps *both* of its fields on the object rather than collapsing to one resolved value:
+
+- `api_key` **and** `api_key_env` (the env var *name*) both survive onto `AgentConfig`.
+- `system_prompt` **and** `system_prompt_file` both survive onto `AgentConfig`.
+
+The **resolution** — reading the env var, reading the prompt file — happens **when the config is used**, at Agent build (`Agent.from_config` / `build_chat_model`), not at load. A loaded `AgentConfig` is therefore inert, side-effect-free, and reusable: constructing one never touches the environment or the filesystem, and the same object can be built inline in code (set `system_prompt`/`api_key` directly — the `*_file`/`*_env` fields are simply the file-driven alternatives, absent inline).
+
+The two references are resolved by the same principle, with one asymmetry driven by *what the reference means*:
+
+- **`api_key_env` is context-free.** An env var name means the same thing anywhere, so resolving it needs no base directory. The object holds the name verbatim; the consumer reads `os.environ` at build.
+- **`system_prompt_file` is a path**, meaningful only relative to the file that declared it — and the config file's own directory exists only during `from_json`. So `from_json` **locates** it there — joining the config directory to produce an **absolute** path stored back on the object — but does **not read** it; the read defers to build like the env var. Locating is not resolution: no I/O, deterministic, and it folds the ephemeral base-dir context into the path itself rather than a separate `source_dir` field. `from_dict` (which has no config directory) stores the path as given; a *relative* one there resolves against the process CWD when read — a code-path caller's own responsibility, where `from_json`'s absolutization is the CWD-independent path.
+
 ### JSON, loaded via plain dataclasses
 
 The config objects stay **plain dataclasses** — `AgentConfig` plus `WicaConfig`, both now in [config.py](../src/wica/config.py) (see "Module placement" — `AgentConfig` moved here out of `agent.py`) — with hand-written `from_dict(data)` / `from_json(path)` classmethods. No pydantic dependency is added; agent.md's "pydantic-style" phrasing is treated as intent (a small validated settings object), not a mandate to adopt pydantic.
 
-Loading is **strict**, so a broken file fails loudly at load time rather than silently doing nothing:
+Loading is **validation only** — strict *structural* checks, no environment or file resolution (that's deferred to build, above) — so a broken file fails loudly at load time rather than silently doing nothing:
 
 - **Missing required keys** (`provider`, `model`, and exactly one of `system_prompt`/`system_prompt_file` — see "System prompt") raise a clear error naming the missing key and its block.
 - **Unknown keys are rejected** — a typo like `"modl"` or `"systemprompt"` raises rather than being ignored, which would otherwise leave the real field on its silent default.
 - **Wrong types** (e.g. `model_kwargs` not an object) raise with the offending key named.
+- **Mutually exclusive pairs** — `api_key` with `api_key_env`, or `system_prompt` with `system_prompt_file` — raise; these are structural (about the file's shape, not the values), so they stay eager even though the *values* resolve later.
 
-The errors are WICA's own (not raw `KeyError`/`json.JSONDecodeError` leaking through), so a misconfigured file gives an actionable message.
+The errors are WICA's own (not raw `KeyError`/`json.JSONDecodeError` leaking through), so a misconfigured file gives an actionable message. Errors that depend on the *outside world* — an unset env var, an unreadable prompt file — are not structural and surface later, at build (see "API key", "System prompt").
 
 ### API key: literal or env reference
 
-The key can be given two ways, **at most one** of them:
+The key can be given two ways, **at most one** of them — both stored **verbatim** on `AgentConfig` (`api_key: str | None`, `api_key_env: str | None`), neither read at load:
 
 - **Literal** — `"api_key": "sk-..."`, the raw key in the file.
-- **Env reference** — `"api_key_env": "WICA_ANTHROPIC_API_KEY"`, the *name* of an environment variable the key is read from at load time.
+- **Env reference** — `"api_key_env": "WICA_ANTHROPIC_API_KEY"`, the *name* of an environment variable.
 
-Both resolve, during loading, to a plain `api_key: str | None` on `AgentConfig`, which `Agent.from_config` passes straight to `init_chat_model(..., api_key=...)` — the same path `tests-e2e/support.py` already uses — when set. (`huggingface-hub` bypasses `init_chat_model` and forwards this same resolved value under its own token kwarg — an Agent construction detail, see [agent.md](agent.md).) When **neither** is given, nothing is passed and `init_chat_model` reads the provider's standard env var (`ANTHROPIC_API_KEY`, …) exactly as the code does today, so existing env-based setups keep working and env stays the zero-config default. Providing **both** is a `ConfigError`. Unlike `system_prompt_file`, env resolution needs no base directory, so **both `from_dict` and `from_json`** honour `api_key_env` (only the file indirection is `from_json`-only).
+**The pair resolves at Agent build, inside `build_chat_model`**, to an effective key: literal `api_key` if set; else the value of the named env var; else `None`. A resolved key is passed straight to `init_chat_model(..., api_key=...)` — the same path `tests-e2e/support.py` already uses — when set. (`huggingface-hub` bypasses `init_chat_model` and forwards this same resolved value under its own token kwarg — an Agent construction detail, see [agent.md](agent.md).) When **neither** is given, nothing is passed and `init_chat_model` reads the provider's standard env var (`ANTHROPIC_API_KEY`, …) exactly as the code does today, so existing env-based setups keep working and env stays the zero-config default. Because resolution needs no base directory, `from_dict` and `from_json` store `api_key_env` identically — the field is fully code-path-agnostic.
 
-**A referenced env var that is unset raises `MissingEnvError`** — a `ConfigError` subclass naming the variable — so a misconfiguration is loud rather than silently keyless. Callers that prefer to degrade catch it: the demo falls back to explore-only, the e2e helper skips. A *structural* problem (typo'd field, missing required key) is a plain `ConfigError`, so the two are distinguishable.
+Providing **both** is a `ConfigError` at **load** — a structural mistake in the file, caught eagerly. A referenced env var that is **unset** raises `MissingEnvError` (a `ConfigError` subclass naming the variable) at **build**, when the key is actually read — so callers that prefer to degrade catch it around `Agent.from_config`: the demo falls back to explore-only, the e2e helper skips. A *structural* problem (typo'd field, both-given, missing required key) is a plain `ConfigError` at load, so the two remain distinguishable.
 
 **This is what makes a config committable.** An env-reference config carries no secret, so the conversation-demo and e2e config files are **checked in** using `api_key_env`. A config that uses a **literal** `api_key` is a plaintext secret on disk and should be **git-ignored** (with a committed `*.example.json` placeholder alongside). Literal keys are the convenience for a quick local start; env reference is the path for anything shared or committed — and it reframes the project's WICA-namespaced key (`WICA_<PROVIDER>_API_KEY`) as simply *what `api_key_env` points at*, not a bespoke routing step.
 
 ### System prompt: inline or file
 
-The persona can be given **inline** (`system_prompt`) or **by reference** (`system_prompt_file`), so prompts can live as their own files in a `prompts/` folder instead of being escaped into JSON — personas are long and awkward to embed. **Exactly one** must be present: providing both, or neither, is a load-time error (see strict loading above), so there's never ambiguity about which wins.
+The persona can be given **inline** (`system_prompt`) or **by reference** (`system_prompt_file`), so prompts can live as their own files in a `prompts/` folder instead of being escaped into JSON — personas are long and awkward to embed. Both fields are kept on `AgentConfig`; **exactly one** must be present: providing both, or neither, is a load-time `ConfigError` (structural — see strict loading above), so there's never ambiguity about which wins.
 
 ```json
 {
@@ -102,14 +117,15 @@ The persona can be given **inline** (`system_prompt`) or **by reference** (`syst
 }
 ```
 
-- **Path resolution is relative to the config file's own directory**, not the process CWD. A config at `deploy/agent.config.json` with `"system_prompt_file": "prompts/wica.md"` reads `deploy/prompts/wica.md` regardless of where the process is launched from — so a config-plus-prompts folder is relocatable and CWD-independent. Absolute paths are used as-is.
-- Resolution and file reads happen **at load time**, inside `from_json`: `AgentConfig` still ends up holding a resolved `system_prompt: str`, so nothing downstream (`Agent.from_config`, the Agent loop) knows or cares whether it came from inline text or a file. `from_dict` alone — which has no file location to resolve against — accepts only inline `system_prompt`; the file indirection is a `from_json` concern.
-- A missing or unreadable `system_prompt_file` raises a clear WICA error naming the resolved path.
+- **The path is located relative to the config file's own directory at load, then read at Agent build.** `from_json` joins its own directory to the relative path and stores the resulting **absolute** path back on `AgentConfig` (a *locate*, no file I/O); `Agent.from_config` reads that path when it builds the Agent. A config at `deploy/agent.config.json` with `"system_prompt_file": "prompts/wica.md"` therefore reads `deploy/prompts/wica.md` regardless of where the process is launched from — the path is bound to the config's location, not the process CWD, so a config-plus-prompts folder stays relocatable and CWD-independent — while the file read itself stays deferred like the api key. Absolute paths in the file are stored as-is.
+- **`from_dict` stores `system_prompt_file` verbatim** — it has no config directory to locate against — so a *relative* path given to `from_dict` resolves against the process CWD when read. Inline `system_prompt` is the ordinary code-path choice; a code caller that wants a file gives an absolute path (or uses `from_json`). This drops the old asymmetry where `from_dict` *rejected* `system_prompt_file` outright.
+- `Agent.from_config` resolves the pair to the effective prompt: inline `system_prompt` if set, else the contents of `system_prompt_file`. `AgentConfig` never holds a resolved `system_prompt` merged from the file — the field stays what the JSON carried — so resolution is the consumer's, but nothing downstream (`Agent.__init__`, the Agent loop) knows or cares whether the text came from inline or a file.
+- A missing or unreadable `system_prompt_file` raises a clear WICA `ConfigError` naming the path — at **build**, when it's read.
 
 ### Flow into the Agent
 
-- `WicaConfig.from_json(path)` → a `WicaConfig` holding an `AgentConfig`.
-- `AgentConfig` gains an `api_key: str | None = None` field; `Agent.from_config` forwards it to `init_chat_model` only when set (see "API key").
+- `WicaConfig.from_json(path)` → a `WicaConfig` holding a validated, **unresolved** `AgentConfig` (no env or file read has happened yet).
+- `Agent.from_config(wica_config.agent, **kwargs)` is where **resolution happens**: `build_chat_model` resolves the api key (see "API key") and `Agent.from_config` resolves the system prompt (see "System prompt") before constructing the Agent. This is the point where `MissingEnvError` or an unreadable prompt file surfaces — so a caller that degrades wraps *this* call, not `from_json`.
 - **No `Agent.from_config_file` convenience method.** "Start the agent from a file" is the caller composing two calls itself: `wica_config = WicaConfig.from_json(path)` then `Agent.from_config(wica_config.agent, **kwargs)` — the same `**kwargs` carrying the code-only wiring that doesn't belong in a JSON file (World instance, event loop, output sink, instrumentation hooks). Keeping this as two explicit calls, rather than folding it into one, keeps `Agent`'s API surface from growing a second construction path for what is otherwise a two-line composition; it also makes the `apply_logging` call (below) visible at the call site instead of implicit inside a helper.
 - Applying `logging` is the caller's job at startup (`apply_logging(wica_config.logging)`, typically right after `from_json` and before `Agent.from_config`), not something either config-loading or `Agent.from_config` does implicitly.
 
@@ -117,7 +133,9 @@ The persona can be given **inline** (`system_prompt`) or **by reference** (`syst
 
 A new `src/wica/config.py` module owns **both config dataclasses** — `AgentConfig` (moved out of [agent.py](../src/wica/agent.py)) and the new `WicaConfig` — plus the file-loading layer. Config is one concept and lives in one place.
 
-Direction of dependency: `config.py` holds only **pure data + loading** and imports nothing from `agent.py`; `agent.py` imports `AgentConfig` from `config.py`. This keeps the dependency one-way (no import cycle): model construction (`init_chat_model`) stays in `Agent.from_config` in `agent.py`, so `config.py` never needs to know about `Agent`. `WicaConfig` therefore carries no `build_agent()` method, and `Agent` carries no `from_config_file` — "file → running Agent" is the two-call composition described above ("Flow into the Agent"), not a single convenience method on either side.
+The **resolution helpers** (`resolve_api_key(config)`, `resolve_system_prompt(config)`) live in `config.py` too — the env-read and file-read semantics are config's concern — as **pure functions over an `AgentConfig`**, *called* by the agent-side consumers (`build_chat_model`, `Agent.from_config`) at build. So config owns *how* a field resolves, while the consumer owns *when* — keeping the reads out of load without scattering the resolution logic into `agent.py`.
+
+Direction of dependency: `config.py` holds only **pure data + loading + resolution helpers** and imports nothing from `agent.py`; `agent.py` imports `AgentConfig` and the resolvers from `config.py`. This keeps the dependency one-way (no import cycle): model construction (`init_chat_model`) stays in `build_chat_model`/`Agent.from_config` in `agent.py`, so `config.py` never needs to know about `Agent`. `WicaConfig` therefore carries no `build_agent()` method, and `Agent` carries no `from_config_file` — "file → running Agent" is the two-call composition described above ("Flow into the Agent"), not a single convenience method on either side.
 
 The public API (`__init__.py`) re-exports the config surface a caller composes an Agent from a file with — `AgentConfig`, `WicaConfig`, the `apply_logging` startup helper, and the `ConfigError`/`MissingEnvError` types a caller catches (the demo falls back to explore-only on `MissingEnvError`, the e2e helper skips) — all from `config.py`. Adding a top-level `src/wica/` module means the **Project map in AGENTS.md** and its drift-guard test (`tests/test_project_map.py`) are updated in the same change.
 

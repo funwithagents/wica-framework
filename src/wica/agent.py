@@ -21,7 +21,7 @@ from langchain_core.messages import (
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
 
-from wica.config import AgentConfig
+from wica.config import AgentConfig, resolve_api_key, resolve_system_prompt
 from wica.content import Content, ImagePart, TextPart
 from wica.world import World, WorldEntry, get_world
 
@@ -182,24 +182,30 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
 
     Provider integration packages are imported lazily, inside their branch, so core wica needs
     none of them installed — an unselected provider fails here with a clear ImportError.
+
+    The api key resolves *here*, at build: the config holds `api_key`/`api_key_env` verbatim, and
+    resolve_api_key does the env read (raising MissingEnvError if the referenced var is unset). See
+    specs/config.md ("API key").
     """
     if config.provider == _FAKE_PROVIDER:
         # The fake's construction payload lives in model_kwargs (script/default/loop/delay_s), which
         # is what keeps it JSON-expressible and on the ordinary config path. api_key/model are
-        # ignored (config already resolves api_key to None when absent).
+        # ignored, so we don't resolve the key at all here.
         from wica.fake_model import FakeChatModel
 
         return FakeChatModel(**config.model_kwargs)
+
+    api_key = resolve_api_key(config)
 
     if config.provider == _HUGGINGFACE_HUB_PROVIDER:
         from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
         endpoint_kwargs = dict(config.model_kwargs)
-        if config.api_key is not None:
+        if api_key is not None:
             # This branch builds the model directly, so it owns the kwarg name: the resolved
             # api_key/api_key_env is HF's token, not the generic `api_key` the init_chat_model
             # providers receive.
-            endpoint_kwargs["huggingfacehub_api_token"] = config.api_key
+            endpoint_kwargs["huggingfacehub_api_token"] = api_key
         endpoint = HuggingFaceEndpoint(
             repo_id=config.model,
             provider=config.hf_provider,
@@ -209,8 +215,8 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
         return ChatHuggingFace(llm=endpoint)
 
     model_kwargs = dict(config.model_kwargs)
-    if config.api_key is not None:
-        model_kwargs["api_key"] = config.api_key
+    if api_key is not None:
+        model_kwargs["api_key"] = api_key
     return init_chat_model(config.model, model_provider=config.provider, **model_kwargs)
 
 
@@ -270,8 +276,13 @@ class Agent:
 
     @classmethod
     def from_config(cls, config: AgentConfig, **kwargs: Any) -> Agent:
+        # Resolution happens here, at build: the config holds system_prompt/system_prompt_file (and
+        # api_key/api_key_env, resolved inside build_chat_model) verbatim. resolve_system_prompt
+        # reads the prompt file if that's the form given; an unreadable file or unset key env var
+        # surfaces here, not at config load. See specs/config.md ("Flow into the Agent").
+        system_prompt = resolve_system_prompt(config)
         model = build_chat_model(config)
-        return cls(model, system_prompt=config.system_prompt, **kwargs)
+        return cls(model, system_prompt=system_prompt, **kwargs)
 
     def register_command(
         self,
