@@ -17,6 +17,7 @@ The name breaks down as:
 | [testing.md](testing.md) | Testing strategy: two-tier `tests/`/`tests-e2e/` split, functional-test philosophy, `reset_world` isolation, provider-parametrized live tier | Implemented |
 | [config.md](config.md) | Framework config loaded from JSON: provider/model/api key/system prompt, plain-dataclass `from_json`, strict validation, `api_key`/`api_key_env` | Implemented |
 | [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Implemented |
+| [events.md](events.md) | Generic, project-agnostic `Event[T]` pub/sub primitive: synchronous subscribe/unsubscribe/emit, a standalone dependency leaf | Implemented |
 | [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to LLM-facing `Content` | Implemented |
 | [inputs.md](inputs.md) | Inputs: external multimodal data entering the World, modeled as externally-fed World entries (register + `update`, `triggers_llm_call`) — a role/pattern, not new machinery | Implemented |
 | [commands.md](commands.md) | Commands: WICA's unit of agent action on the World, backed by LangChain tools; execution-as-World-entry lifecycle, generic call description | Implemented |

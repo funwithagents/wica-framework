@@ -7,6 +7,7 @@ from wica.config import (
     apply_logging,
 )
 from wica.content import Content, ContentPart, ImagePart, TextPart
+from wica.events import Event
 from wica.world import World, WorldEntry, WorldEntryConfig, WorldEntryVersion, get_world
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "ConfigError",
     "Content",
     "ContentPart",
+    "Event",
     "ImagePart",
     "MissingEnvError",
     "TextPart",
