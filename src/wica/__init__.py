@@ -1,4 +1,4 @@
-from wica.agent import Agent
+from wica.agent import Agent, CommandIssued
 from wica.config import (
     AgentConfig,
     ConfigError,
@@ -8,11 +8,13 @@ from wica.config import (
 )
 from wica.content import Content, ContentPart, ImagePart, TextPart
 from wica.events import Event
-from wica.world import World, WorldEntry, WorldEntryConfig, WorldEntryVersion, get_world
+from wica.wica import Wica
+from wica.world import World, WorldEntry, WorldEntryConfig, WorldEntryVersion
 
 __all__ = [
     "Agent",
     "AgentConfig",
+    "CommandIssued",
     "ConfigError",
     "Content",
     "ContentPart",
@@ -20,11 +22,11 @@ __all__ = [
     "ImagePart",
     "MissingEnvError",
     "TextPart",
+    "Wica",
     "WicaConfig",
     "World",
     "WorldEntry",
     "WorldEntryConfig",
     "WorldEntryVersion",
     "apply_logging",
-    "get_world",
 ]

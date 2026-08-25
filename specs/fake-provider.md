@@ -19,7 +19,7 @@ A `provider: "fake"` that builds a **deterministic, network-free, key-less** cha
 
 Today the Agent's reasoning loop ([agent.md](agent.md)) can only be exercised end-to-end against a **live** provider, which is both non-deterministic (you can't assert that a run took *exactly* these steps and issued *exactly* these Commands) and network+key gated. So there is no way to write a **deterministic whole-flow test** — "given these inputs, the Agent walks this precise sequence of steps and Commands" — the very assertions a flow test exists to make.
 
-Putting a scripted fake **behind a provider value** fixes this at the framework boundary: the exact same `WicaConfig → AgentConfig → build_chat_model → Agent.from_config` path production ships is exercised, just with `provider: "fake"` and a canned script, so a flow test drives the real loop over a model whose output it fully controls. No downstream app needs test-only construction code — and this generalizes beyond WICA's own suite: a **project that integrates WICA** can select the same `provider: "fake"` in its own e2e configs to script deterministic flows of its WICA-built agent (see "Public module" below).
+Putting a scripted fake **behind a provider value** fixes this at the framework boundary: the exact same `WicaConfig → AgentConfig → build_chat_model → Agent` path production ships is exercised, just with `provider: "fake"` and a canned script, so a flow test drives the real loop over a model whose output it fully controls. No downstream app needs test-only construction code — and this generalizes beyond WICA's own suite: a **project that integrates WICA** can select the same `provider: "fake"` in its own e2e configs to script deterministic flows of its WICA-built agent (see "Public module" below).
 
 ## Settled
 
@@ -68,7 +68,7 @@ The fake is exercised at two levels, mirroring the rest of the repo (a module's 
 
 ### Async & cancellation
 
-- `ainvoke` is a genuine coroutine (no blocking call), so it runs on the Agent's loop like any provider and doesn't interfere with `task.cancel()` (see [agent.md](agent.md), "The Agent owns the event loop").
+- `ainvoke` is a genuine coroutine (no blocking call), so it runs on the shared loop like any provider and doesn't interfere with `task.cancel()` (see [agent.md](agent.md), "The shared event loop").
 - **Simulated latency, on by default.** Each `ainvoke` `await`s `asyncio.sleep(model_kwargs.delay_s)` before returning its scripted step. `delay_s` **defaults to `0.2` (200 ms)** and is overridable (set `0` for instant responses). A non-zero default is deliberate: an instant fake collapses the loop's timing to zero and masks exactly the timing-dependent behavior a flow test needs to exercise — the coalescing window (also 200 ms by default — see [agent.md](agent.md), "Trigger coalescing"), barge-in, and mid-step cancellation. Because the delay is a real `await`, a `task.cancel()` landing during it unwinds cleanly, giving cancellation a realistic point to fire.
 
 ### Example config

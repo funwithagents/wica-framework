@@ -1,14 +1,38 @@
+import asyncio
 import re
 import threading
 import time
+from collections.abc import Iterator
 from datetime import timedelta
 
 import pytest
 
 from wica.content import Content, ImagePart, TextPart
-from wica.world import World, WorldEntry, get_world
+from wica.world import World, WorldEntry
 
 WAIT_TIMEOUT = 2.0
+
+
+@pytest.fixture
+def loop() -> Iterator[asyncio.AbstractEventLoop]:
+    """A real event loop running in a background thread — the World dispatches its reactive
+    callbacks onto it, the same way the Wica facade owns it in production."""
+    event_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=event_loop.run_forever, daemon=True)
+    thread.start()
+    yield event_loop
+    event_loop.call_soon_threadsafe(event_loop.stop)
+    thread.join()
+    event_loop.close()
+
+
+@pytest.fixture
+def world(loop: asyncio.AbstractEventLoop) -> Iterator[World]:
+    """A started World on the running loop. Mutation (update) is only allowed while started."""
+    w = World(loop)
+    w.start()
+    yield w
+    w.stop()
 
 
 def flatten(content: Content) -> str:
@@ -28,7 +52,7 @@ def text_archival_serialize(value: bytes | None, previous_value: bytes | None) -
 
 
 class RecordingCallback:
-    """Test double for a listener/trigger handler: records calls and signals an Event."""
+    """Test double for a sync listener/on_trigger subscriber: records calls and signals an Event."""
 
     def __init__(self):
         self.calls: list[WorldEntry] = []
@@ -39,21 +63,21 @@ class RecordingCallback:
         self.event.set()
 
 
-def test_register_then_get_returns_none():
-    world = World()
+# --- Data model (unguarded; needs no running loop) --------------------------
+
+
+def test_register_then_get_returns_none(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)
     assert world.get("temp") is None
 
 
-def test_update_changes_get_result():
-    world = World()
+def test_update_changes_get_result(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)
     world.update("temp", 42)
     assert world.get("temp") == 42
 
 
-def test_update_type_mismatch_raises_and_leaves_value_untouched():
-    world = World()
+def test_update_type_mismatch_raises_and_leaves_value_untouched(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)
     world.update("temp", 5)
     with pytest.raises(TypeError):
@@ -62,15 +86,13 @@ def test_update_type_mismatch_raises_and_leaves_value_untouched():
     assert '<entry key="temp" id="2">' in flatten(world.render_entry(world.get_entry("temp")))
 
 
-def test_update_none_always_succeeds_regardless_of_type():
-    world = World()
+def test_update_none_always_succeeds_regardless_of_type(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)
     world.update("temp", None)
     assert world.get("temp") is None
 
 
-def test_id_starts_at_one_on_register_and_increments_on_every_update():
-    world = World()
+def test_id_starts_at_one_on_register_and_increments_on_every_update(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     assert '<entry key="temp" id="1">' in flatten(world.render_entry(world.get_entry("temp")))
 
@@ -81,8 +103,7 @@ def test_id_starts_at_one_on_register_and_increments_on_every_update():
     assert '<entry key="temp" id="3">' in flatten(world.render_entry(world.get_entry("temp")))
 
 
-def test_clearing_advances_id_like_any_other_update():
-    world = World()
+def test_clearing_advances_id_like_any_other_update(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     world.update("temp", "a")  # id=2
     world.update("temp", None)  # id=3, clearing still advances id
@@ -94,8 +115,7 @@ def test_clearing_advances_id_like_any_other_update():
     assert '<entry key="temp" id="4">' in flatten(world.render_entry(world.get_entry("temp")))
 
 
-def test_unregister_removes_entry():
-    world = World()
+def test_unregister_removes_entry(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     world.unregister("temp")
     with pytest.raises(KeyError):
@@ -104,15 +124,13 @@ def test_unregister_removes_entry():
         world.update("temp", "x")
 
 
-def test_reregister_without_unregister_raises():
-    world = World()
+def test_reregister_without_unregister_raises(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     with pytest.raises(ValueError):
         world.register("temp", str, serialize_fn=identity_serialize)
 
 
-def test_reregister_after_unregister_continues_id_sequence():
-    world = World()
+def test_reregister_after_unregister_continues_id_sequence(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)  # id=1
     world.update("temp", 5)  # id=2
     world.unregister("temp")
@@ -123,8 +141,7 @@ def test_reregister_after_unregister_continues_id_sequence():
     assert '<entry key="temp" id="4">' in flatten(world.render_entry(world.get_entry("temp")))
 
 
-def test_get_after_reregistration_with_different_type_just_returns_the_new_value():
-    world = World()
+def test_get_after_reregistration_with_different_type_just_returns_the_new_value(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)
     world.update("temp", 5)
     world.unregister("temp")
@@ -136,8 +153,7 @@ def test_get_after_reregistration_with_different_type_just_returns_the_new_value
     assert world.get("temp") == "now a string"
 
 
-def test_get_entry_matches_get_and_registered_type():
-    world = World()
+def test_get_entry_matches_get_and_registered_type(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)
     world.update("temp", 7)
 
@@ -148,21 +164,19 @@ def test_get_entry_matches_get_and_registered_type():
     assert entry.current.value == world.get("temp")
 
 
-def test_get_entry_unregistered_raises():
-    world = World()
+def test_get_entry_unregistered_raises(world: World):
     world.register("temp", int, serialize_fn=identity_serialize)
     world.unregister("temp")
     with pytest.raises(KeyError):
         world.get_entry("temp")
 
 
-def test_bypass_coalescing_defaults_false_and_is_carried_onto_the_entry():
-    world = World()
+def test_bypass_coalescing_defaults_false_and_is_carried_onto_the_entry(world: World):
     world.register("plain", int, serialize_fn=identity_serialize)
     world.register("urgent", int, serialize_fn=identity_serialize, bypass_coalescing=True)
 
-    # Carried onto the initial entry (like `type`) so the trigger-handler snapshot is
-    # self-describing without a config lookup.
+    # Carried onto the initial entry (like `type`) so the on_trigger snapshot is self-describing
+    # without a config lookup.
     assert world.get_entry("plain").bypass_coalescing is False
     assert world.get_entry("urgent").bypass_coalescing is True
 
@@ -173,8 +187,44 @@ def test_bypass_coalescing_defaults_false_and_is_carried_onto_the_entry():
     assert world.get_entry("plain").bypass_coalescing is False
 
 
-def test_listener_fires_on_update_but_not_for_unrelated_keys():
-    world = World()
+# --- Lifecycle guard --------------------------------------------------------
+
+
+def test_update_before_start_raises(loop: asyncio.AbstractEventLoop):
+    world = World(loop)  # not started
+    world.register("temp", int, serialize_fn=identity_serialize)
+    with pytest.raises(RuntimeError, match="World is not running"):
+        world.update("temp", 1)
+
+
+def test_update_after_stop_raises(loop: asyncio.AbstractEventLoop):
+    world = World(loop)
+    world.start()
+    world.register("temp", int, serialize_fn=identity_serialize)
+    world.update("temp", 1)
+    world.stop()
+    with pytest.raises(RuntimeError, match="World is not running"):
+        world.update("temp", 2)
+
+
+def test_register_and_read_work_while_stopped(loop: asyncio.AbstractEventLoop):
+    # Setup-before-start and reads-after-stop: the data model is unguarded, only mutation is gated.
+    world = World(loop)  # never started
+    assert world.is_running is False
+    world.register("temp", str, serialize_fn=identity_serialize)
+    world.start()
+    world.update("temp", "hello")
+    world.stop()
+    # After stop, reads still work and return the last state (a held wica.world stays inspectable).
+    assert world.get("temp") == "hello"
+    assert world.get_entry("temp").current.value == "hello"
+    assert "hello" in flatten(world.render_full_prompt())
+
+
+# --- Listeners (loop-dispatched, sync/async, isolated) ----------------------
+
+
+def test_listener_fires_on_update_but_not_for_unrelated_keys(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     world.register("other", str, serialize_fn=identity_serialize)
     callback = RecordingCallback()
@@ -188,8 +238,23 @@ def test_listener_fires_on_update_but_not_for_unrelated_keys():
     assert callback.calls[-1].current.value == "hello"
 
 
-def test_remove_listener_stops_notifications():
-    world = World()
+def test_async_listener_runs(world: World):
+    received: list[str] = []
+    done = threading.Event()
+
+    async def async_listener(entry: WorldEntry) -> None:
+        received.append(entry.current.value)
+        done.set()
+
+    world.register("temp", str, serialize_fn=identity_serialize)
+    world.add_listener("temp", async_listener)
+
+    world.update("temp", "hi")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert received == ["hi"]
+
+
+def test_remove_listener_stops_notifications(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     callback = RecordingCallback()
     world.add_listener("temp", callback)
@@ -200,79 +265,49 @@ def test_remove_listener_stops_notifications():
     assert callback.calls == []
 
 
-def test_trigger_handler_invoked_without_condition_fn():
-    world = World()
-    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    handler = RecordingCallback()
-    world.set_trigger_handler(handler)
+def test_blocking_sync_listener_does_not_stall_other_dispatch(world: World):
+    # A blocking sync listener is offloaded to the loop's thread pool, so a sibling listener still
+    # fires while it's blocked — the loop is never stalled.
+    world.register("temp", str, serialize_fn=identity_serialize)
+    release = threading.Event()
+    blocked_started = threading.Event()
+    fast_fired = threading.Event()
+
+    def blocking_listener(entry: WorldEntry) -> None:
+        blocked_started.set()
+        release.wait(timeout=WAIT_TIMEOUT)
+
+    def fast_listener(entry: WorldEntry) -> None:
+        fast_fired.set()
+
+    world.add_listener("temp", blocking_listener)
+    world.add_listener("temp", fast_listener)
 
     world.update("temp", "hello")
-    assert handler.event.wait(timeout=WAIT_TIMEOUT)
-    assert handler.calls[-1].current.value == "hello"
+    assert blocked_started.wait(timeout=WAIT_TIMEOUT)
+    assert fast_fired.wait(timeout=WAIT_TIMEOUT)  # fires despite the sibling still blocked
+    release.set()
 
 
-def test_trigger_condition_fn_gates_handler():
-    world = World()
-    world.register(
-        "temp",
-        int,
-        serialize_fn=identity_serialize,
-        triggers_llm_call=True,
-        trigger_condition_fn=lambda old, new: new is not None and new > 10,
-    )
-    handler = RecordingCallback()
-    world.set_trigger_handler(handler)
+def test_raising_listener_is_isolated_from_siblings(world: World):
+    world.register("temp", str, serialize_fn=identity_serialize)
+    fired = threading.Event()
 
-    world.update("temp", 5)
-    assert not handler.event.wait(timeout=0.2)
+    def boom(entry: WorldEntry) -> None:
+        raise RuntimeError("listener failure")
 
-    world.update("temp", 20)
-    assert handler.event.wait(timeout=WAIT_TIMEOUT)
-    assert handler.calls[-1].current.value == 20
+    def survivor(entry: WorldEntry) -> None:
+        fired.set()
+
+    world.add_listener("temp", boom)
+    world.add_listener("temp", survivor)
+
+    world.update("temp", "hello")  # the raising listener must not starve the survivor
+    assert fired.wait(timeout=WAIT_TIMEOUT)
+    assert world.get("temp") == "hello"  # update itself never saw the exception
 
 
-def test_trigger_condition_fn_suppresses_noop_updates():
-    world = World()
-    world.register(
-        "temp",
-        str,
-        serialize_fn=identity_serialize,
-        triggers_llm_call=True,
-        trigger_condition_fn=lambda old, new: old != new,
-    )
-    handler = RecordingCallback()
-    world.set_trigger_handler(handler)
-
-    world.update("temp", "same")
-    assert handler.event.wait(timeout=WAIT_TIMEOUT)
-    handler.event.clear()
-
-    world.update("temp", "same")
-    assert not handler.event.wait(timeout=0.2)
-
-
-def test_unregister_never_invokes_trigger_handler():
-    world = World()
-    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    handler = RecordingCallback()
-    world.set_trigger_handler(handler)
-
-    world.unregister("temp")
-    assert not handler.event.wait(timeout=0.2)
-
-
-def test_update_without_triggers_llm_call_never_invokes_handler():
-    world = World()
-    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=False)
-    handler = RecordingCallback()
-    world.set_trigger_handler(handler)
-
-    world.update("temp", "hello")
-    assert not handler.event.wait(timeout=0.2)
-
-
-def test_update_does_not_block_on_slow_callback():
-    world = World()
+def test_update_does_not_block_on_slow_callback(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     release = threading.Event()
     started = threading.Event()
@@ -290,27 +325,108 @@ def test_update_does_not_block_on_slow_callback():
     release.set()
 
 
-def test_snapshot_handed_to_listener_is_unaffected_by_later_update():
-    world = World()
+def test_snapshot_handed_to_listener_is_unaffected_by_later_update(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
-    callback = RecordingCallback()
-    world.add_listener("temp", callback)
+    seen: list[str] = []
+    got_two = threading.Event()
+    lock = threading.Lock()
+
+    def listener(entry: WorldEntry) -> None:
+        with lock:
+            seen.append(entry.current.value)
+            if len(seen) == 2:
+                got_two.set()
+
+    world.add_listener("temp", listener)
 
     world.update("temp", "first")
     world.update("temp", "second")
 
-    assert callback.event.wait(timeout=WAIT_TIMEOUT)
-    assert callback.calls[0].current.value == "first"
+    assert got_two.wait(timeout=WAIT_TIMEOUT)
+    # Each dispatch carried its own immutable snapshot — neither was mutated in place to the
+    # other's value (which a shared live-entry reference would have caused).
+    assert set(seen) == {"first", "second"}
 
 
-def test_serialize_fn_receives_correct_previous_value():
+# --- Trigger (the on_trigger Event) -----------------------------------------
+
+
+def test_on_trigger_fires_without_condition_fn(world: World):
+    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    subscriber = RecordingCallback()
+    world.on_trigger.subscribe(subscriber)
+
+    world.update("temp", "hello")
+    assert subscriber.event.wait(timeout=WAIT_TIMEOUT)
+    assert subscriber.calls[-1].current.value == "hello"
+
+
+def test_trigger_condition_fn_gates_the_emit(world: World):
+    world.register(
+        "temp",
+        int,
+        serialize_fn=identity_serialize,
+        triggers_llm_call=True,
+        trigger_condition_fn=lambda old, new: new is not None and new > 10,
+    )
+    subscriber = RecordingCallback()
+    world.on_trigger.subscribe(subscriber)
+
+    world.update("temp", 5)
+    assert not subscriber.event.wait(timeout=0.2)
+
+    world.update("temp", 20)
+    assert subscriber.event.wait(timeout=WAIT_TIMEOUT)
+    assert subscriber.calls[-1].current.value == 20
+
+
+def test_trigger_condition_fn_suppresses_noop_updates(world: World):
+    world.register(
+        "temp",
+        str,
+        serialize_fn=identity_serialize,
+        triggers_llm_call=True,
+        trigger_condition_fn=lambda old, new: old != new,
+    )
+    subscriber = RecordingCallback()
+    world.on_trigger.subscribe(subscriber)
+
+    world.update("temp", "same")
+    assert subscriber.event.wait(timeout=WAIT_TIMEOUT)
+    subscriber.event.clear()
+
+    world.update("temp", "same")
+    assert not subscriber.event.wait(timeout=0.2)
+
+
+def test_unregister_never_emits_trigger(world: World):
+    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    subscriber = RecordingCallback()
+    world.on_trigger.subscribe(subscriber)
+
+    world.unregister("temp")
+    assert not subscriber.event.wait(timeout=0.2)
+
+
+def test_update_without_triggers_llm_call_never_emits(world: World):
+    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=False)
+    subscriber = RecordingCallback()
+    world.on_trigger.subscribe(subscriber)
+
+    world.update("temp", "hello")
+    assert not subscriber.event.wait(timeout=0.2)
+
+
+# --- serialize_fn / previous -------------------------------------------------
+
+
+def test_serialize_fn_receives_correct_previous_value(world: World):
     seen = []
 
     def recording_serialize(value, previous_value) -> Content:
         seen.append((value, previous_value))
         return [TextPart(str(value))]
 
-    world = World()
     world.register("temp", str, serialize_fn=recording_serialize)
     world.update("temp", "A")
     world.render_entry(world.get_entry("temp"))
@@ -322,8 +438,10 @@ def test_serialize_fn_receives_correct_previous_value():
     assert seen == [("A", None), ("B", "A"), (None, "B")]
 
 
-def test_ttl_resets_value_to_none_and_advances_id_without_triggering():
-    world = World()
+# --- TTL --------------------------------------------------------------------
+
+
+def test_ttl_resets_value_to_none_and_advances_id_without_triggering(world: World):
     world.register(
         "temp",
         str,
@@ -331,12 +449,12 @@ def test_ttl_resets_value_to_none_and_advances_id_without_triggering():
         triggers_llm_call=True,
         ttl=timedelta(milliseconds=100),
     )
-    handler = RecordingCallback()
-    world.set_trigger_handler(handler)
+    subscriber = RecordingCallback()
+    world.on_trigger.subscribe(subscriber)
 
     world.update("temp", "hello")  # id=2
-    assert handler.event.wait(timeout=WAIT_TIMEOUT)  # the explicit update itself triggers
-    handler.event.clear()
+    assert subscriber.event.wait(timeout=WAIT_TIMEOUT)  # the explicit update itself triggers
+    subscriber.event.clear()
 
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline and world.get("temp") is not None:
@@ -344,11 +462,10 @@ def test_ttl_resets_value_to_none_and_advances_id_without_triggering():
 
     assert world.get("temp") is None
     assert '<entry key="temp" id="3">' in flatten(world.render_entry(world.get_entry("temp")))
-    assert not handler.event.wait(timeout=0.2)  # but the TTL-driven reset does not
+    assert not subscriber.event.wait(timeout=0.2)  # but the TTL-driven reset does not
 
 
-def test_ttl_expiry_for_superseded_version_does_not_clobber_fresh_value():
-    world = World()
+def test_ttl_expiry_for_superseded_version_does_not_clobber_fresh_value(world: World):
     world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(seconds=10))
     world.update("temp", "hello")  # id=2, arms a TTL timer bound to id=2
     world.update("temp", "fresh")  # id=3 (cancels id=2's timer, arms id=3's)
@@ -360,8 +477,7 @@ def test_ttl_expiry_for_superseded_version_does_not_clobber_fresh_value():
     assert world.get("temp") == "fresh"
 
 
-def test_ttl_restart_postpones_reset():
-    world = World()
+def test_ttl_restart_postpones_reset(world: World):
     world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=200))
     world.update("temp", "hello")
 
@@ -377,8 +493,21 @@ def test_ttl_restart_postpones_reset():
     assert world.get("temp") is None
 
 
-def test_render_entry_format():
-    world = World()
+def test_stop_cancels_pending_ttl_timer(loop: asyncio.AbstractEventLoop):
+    world = World(loop)
+    world.start()
+    world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=100))
+    world.update("temp", "hello")
+    world.stop()  # cancels the armed TTL timer
+
+    time.sleep(0.2)  # past the TTL — a live timer would have reset the value
+    assert world.get("temp") == "hello"  # timer was cancelled, value untouched
+
+
+# --- Rendering --------------------------------------------------------------
+
+
+def test_render_entry_format(world: World):
     world.register("user_profile", str, serialize_fn=lambda v, p: [TextPart("Jane is logged in.")])
     world.update("user_profile", "irrelevant raw value")
 
@@ -393,8 +522,7 @@ def test_render_entry_format():
     assert match is not None
 
 
-def test_render_entry_body_parts_are_returned_unwrapped():
-    world = World()
+def test_render_entry_body_parts_are_returned_unwrapped(world: World):
     world.register("photo", bytes, serialize_fn=image_serialize)
     world.update("photo", b"\x89PNG")
 
@@ -406,8 +534,7 @@ def test_render_entry_body_parts_are_returned_unwrapped():
     ]
 
 
-def test_render_entry_uses_archival_serialize_fn_when_requested():
-    world = World()
+def test_render_entry_uses_archival_serialize_fn_when_requested(world: World):
     world.register(
         "photo",
         bytes,
@@ -428,8 +555,7 @@ def test_render_entry_uses_archival_serialize_fn_when_requested():
     ]
 
 
-def test_render_entry_archival_falls_back_to_serialize_fn_when_absent():
-    world = World()
+def test_render_entry_archival_falls_back_to_serialize_fn_when_absent(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     world.update("temp", "value")
     entry = world.get_entry("temp")
@@ -437,8 +563,7 @@ def test_render_entry_archival_falls_back_to_serialize_fn_when_absent():
     assert world.render_entry(entry, archival=True) == world.render_entry(entry, archival=False)
 
 
-def test_render_entry_raises_when_entry_key_no_longer_registered():
-    world = World()
+def test_render_entry_raises_when_entry_key_no_longer_registered(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     stale_entry = world.get_entry("temp")
     world.unregister("temp")
@@ -447,8 +572,7 @@ def test_render_entry_raises_when_entry_key_no_longer_registered():
         world.render_entry(stale_entry)
 
 
-def test_render_entry_serialize_fn_override_used_and_survives_unregister():
-    world = World()
+def test_render_entry_serialize_fn_override_used_and_survives_unregister(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     world.update("temp", "raw value")
     entry = world.get_entry("temp")
@@ -470,15 +594,13 @@ def test_render_entry_serialize_fn_override_used_and_survives_unregister():
     assert "body=raw value" in rendered_after
 
 
-def test_render_entry_ignores_include_in_prompt():
-    world = World()
+def test_render_entry_ignores_include_in_prompt(world: World):
     world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)
     world.update("hidden", "secret")
     assert "secret" in flatten(world.render_entry(world.get_entry("hidden")))
 
 
-def test_get_prompt_entries_omits_excluded_and_orders_by_timestamp():
-    world = World()
+def test_get_prompt_entries_omits_excluded_and_orders_by_timestamp(world: World):
     world.register("first", str, serialize_fn=identity_serialize, include_in_prompt=True)
     world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)
     world.register("second", str, serialize_fn=identity_serialize, include_in_prompt=True)
@@ -495,8 +617,7 @@ def test_get_prompt_entries_omits_excluded_and_orders_by_timestamp():
     assert [e.key for e in entries] == ["second", "first"]
 
 
-def test_render_full_prompt_omits_excluded_entries():
-    world = World()
+def test_render_full_prompt_omits_excluded_entries(world: World):
     world.register("shown", str, serialize_fn=identity_serialize, include_in_prompt=True)
     world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)
     world.update("shown", "visible-value")
@@ -507,8 +628,7 @@ def test_render_full_prompt_omits_excluded_entries():
     assert "secret-value" not in prompt
 
 
-def test_render_full_prompt_orders_by_timestamp():
-    world = World()
+def test_render_full_prompt_orders_by_timestamp(world: World):
     world.register("first", str, serialize_fn=identity_serialize)
     world.register("second", str, serialize_fn=identity_serialize)
     world.update("first", "1")
@@ -522,8 +642,7 @@ def test_render_full_prompt_orders_by_timestamp():
     assert prompt.index('key="second"') < prompt.index('key="first"')
 
 
-def test_render_full_prompt_block_matches_render_entry():
-    world = World()
+def test_render_full_prompt_block_matches_render_entry(world: World):
     world.register("solo", str, serialize_fn=identity_serialize)
     world.update("solo", "value")
 
@@ -532,8 +651,7 @@ def test_render_full_prompt_block_matches_render_entry():
     )
 
 
-def test_render_full_prompt_separates_entries_with_a_single_newline():
-    world = World()
+def test_render_full_prompt_separates_entries_with_a_single_newline(world: World):
     world.register("first", str, serialize_fn=identity_serialize)
     world.register("second", str, serialize_fn=identity_serialize)
     world.update("first", "1")
@@ -547,20 +665,9 @@ def test_render_full_prompt_separates_entries_with_a_single_newline():
     assert "</entry><entry" not in prompt
 
 
-def test_render_full_prompt_places_multimodal_part_between_entries():
-    world = World()
+def test_render_full_prompt_places_multimodal_part_between_entries(world: World):
     world.register("photo", bytes, serialize_fn=image_serialize)
     world.update("photo", b"\x89PNG")
 
     content = world.render_full_prompt()
     assert any(isinstance(part, ImagePart) for part in content)
-
-
-def test_get_world_singleton():
-    a = get_world()
-    b = get_world()
-    assert a is b
-
-    a.register("shared", str, serialize_fn=identity_serialize)
-    a.update("shared", "hello")
-    assert b.get("shared") == "hello"

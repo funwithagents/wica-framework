@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 from langchain_core.language_models import BaseChatModel
 
-from wica.agent import Agent, build_chat_model
+from wica import Wica
+from wica.agent import build_chat_model
 from wica.config import AgentConfig, MissingEnvError, WicaConfig
 
 E2E_DIR = Path(__file__).parent
@@ -30,8 +31,8 @@ def load_agent_config(config_path: Path) -> AgentConfig:
 
 
 def real_chat_model(config_path: Path) -> BaseChatModel:
-    """Build the chat model through WICA's own construction path (`build_chat_model`) — the same
-    one `Agent.from_config` uses. Going through the shared builder (rather than a separate
+    """Build the chat model through WICA's own construction path (`build_chat_model`) — the same one
+    the Agent uses at build. Going through the shared builder (rather than a separate
     `init_chat_model` call) means the e2e tier exercises the real provider-branching construction,
     `huggingface-hub` included, instead of a divergent path that would build the wrong model."""
     try:
@@ -40,13 +41,14 @@ def real_chat_model(config_path: Path) -> BaseChatModel:
         pytest.skip(f"{exc.env_var} not set — skipping e2e test")
 
 
-def real_agent(config_path: Path, **kwargs: Any) -> Agent:
-    """Build an Agent through the full config pipeline (file -> WicaConfig -> Agent), so the e2e
-    tier exercises this pipeline against a live provider, not just a model builder. Deliberately
-    doesn't call apply_logging: that's already covered deterministically by tests/test_config.py,
-    and applying it here would reset the wica logger on every test, fighting any level a developer
-    sets by hand while debugging a live e2e run."""
+def real_wica(config_path: Path, **kwargs: Any) -> Wica:
+    """Stand up a full Wica (its own loop + World + Agent) from a committed config, through the real
+    entrypoint — `Wica.init`. This is what makes the live tier meaningful: it drives the whole
+    system the way production does, exercising the real per-provider construction (including
+    `huggingface-hub`'s dedicated non-`init_chat_model` path). The caller passes code-only wiring
+    (`output_sink`, `coalesce_window`) as kwargs. Skips when the config's api_key_env is unset — the
+    key resolves at build inside `Wica.init`, so `MissingEnvError -> pytest.skip` lives here."""
     try:
-        return Agent.from_config(load_agent_config(config_path), **kwargs)
+        return Wica.init(WicaConfig.from_json(config_path), **kwargs)
     except MissingEnvError as exc:
         pytest.skip(f"{exc.env_var} not set — skipping e2e test")

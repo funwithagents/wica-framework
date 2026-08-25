@@ -10,7 +10,10 @@ subscribers and stores nothing.
 Design in specs/events.md.
 """
 
+import logging
 from collections.abc import Callable
+
+_logger = logging.getLogger(__name__)
 
 
 class Event[T]:
@@ -37,6 +40,15 @@ class Event[T]:
         self._handlers.remove(handler)
 
     def emit(self, value: T) -> None:
-        """Call every subscribed handler with ``value``, in subscription order."""
+        """Call every subscribed handler with ``value``, in subscription order.
+
+        Each handler call is isolated: an exception it raises is caught and logged,
+        and dispatch continues to the remaining handlers, so one bad subscriber can
+        neither abort the ``emit`` nor starve its siblings. ``emit`` itself never
+        propagates a handler's exception.
+        """
         for handler in list(self._handlers):
-            handler(value)
+            try:
+                handler(value)
+            except Exception:
+                _logger.exception("Event subscriber raised; continuing to next subscriber")

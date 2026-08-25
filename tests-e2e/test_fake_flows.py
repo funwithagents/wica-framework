@@ -14,14 +14,17 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
+import pytest
+
+from wica import Wica
 from wica.agent import Agent
-from wica.config import WicaConfig
+from wica.config import AgentConfig, WicaConfig
 from wica.content import Content, TextPart
 from wica.fake_model import FakeChatModel
-from wica.world import World, WorldEntry, get_world
+from wica.world import World, WorldEntry
 
 WAIT_TIMEOUT = 5.0
 
@@ -69,13 +72,21 @@ class RecordingSink:
             self.event.set()
 
 
-def test_scripted_flow_through_config_path():
-    """The whole loop, driven through the exact WicaConfig -> Agent.from_config path production
-    uses: an input triggers a step that issues a scripted Command; its completion re-triggers a
-    step that speaks a scripted line."""
-    world = get_world()
-    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+@pytest.fixture
+def loop() -> Iterator[asyncio.AbstractEventLoop]:
+    event_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=event_loop.run_forever, daemon=True)
+    thread.start()
+    yield event_loop
+    event_loop.call_soon_threadsafe(event_loop.stop)
+    thread.join(timeout=WAIT_TIMEOUT)
+    event_loop.close()
 
+
+def test_scripted_flow_through_wica_init():
+    """The whole loop, driven through the real entrypoint: WicaConfig -> Wica.init. An input
+    triggers a step that issues a scripted Command; its completion re-triggers a step that speaks a
+    scripted line."""
     config = WicaConfig.from_dict(
         {
             "agent": {
@@ -95,17 +106,17 @@ def test_scripted_flow_through_config_path():
     )
 
     sink = RecordingSink()
-    agent = Agent.from_config(
-        config.agent, world=world, output_sink=sink, coalesce_window=0.0
-    )
+    wica = Wica.init(config, output_sink=sink, coalesce_window=0.0)
+    world = wica.world
+    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""
         await asyncio.sleep(0.05)  # gives the poll below a chance to observe "running"
         return a + b
 
-    agent.register_command(add)
-    agent.start()
+    wica.register_command(add)
+    wica.start()
     try:
         world.update("prompt", "Add 2 and 2.")
 
@@ -136,28 +147,29 @@ def test_scripted_flow_through_config_path():
 
         # Introspection: the step-2 prompt observed the completed command (its "4" result rendered
         # into the observation), proving the loop fed the outcome back to the model.
-        model = agent.model
+        model = wica.agent.model
         assert isinstance(model, FakeChatModel)
         assert len(model.calls) >= 2
         assert any("4" in message_text(m) for m in model.calls[-1])
     finally:
-        agent.stop()
+        wica.stop()
 
 
-def test_scripted_flow_direct_construction():
-    """The non-config seam: a FakeChatModel passed straight to Agent(model=...) drives the loop."""
-    world = get_world()
+def test_scripted_flow_direct_construction(loop: asyncio.AbstractEventLoop):
+    """The non-facade seam: an Agent built directly from a provider: "fake" AgentConfig, on a World
+    the test owns, drives the loop."""
+    world = World(loop)
+    world.start()
     world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
 
-    model = FakeChatModel(script=[{"text": "hello there"}], delay_s=0)
-    sink = RecordingSink()
-    agent = Agent(
-        model=model,
+    config = AgentConfig(
+        provider="fake",
+        model="scripted",
         system_prompt="You are a test double.",
-        world=world,
-        output_sink=sink,
-        coalesce_window=0.0,
+        model_kwargs={"script": [{"text": "hello there"}], "delay_s": 0},
     )
+    sink = RecordingSink()
+    agent = Agent(config, world=world, loop=loop, output_sink=sink, coalesce_window=0.0)
 
     agent.start()
     try:
@@ -165,7 +177,10 @@ def test_scripted_flow_direct_construction():
         assert sink.event.wait(timeout=WAIT_TIMEOUT)
         assert sink.texts == ["hello there"]
         # The model saw the rendered input prompt on its single call.
+        model = agent.model
+        assert isinstance(model, FakeChatModel)
         assert len(model.calls) == 1
         assert any("hi" in message_text(m) for m in model.calls[0])
     finally:
         agent.stop()
+        world.stop()

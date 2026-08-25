@@ -20,8 +20,8 @@ a simulated social robot and *watch the framework work*. It exists to make the f
 as a manual smoke-test harness that drives the library through its public API only.
 
 This spec describes the **product** — what the user sees and does, and how the simulated robot
-behaves. The wiring (Gradio, thread bridging, the `on_prompt` hook) is an implementation concern,
-covered by the plan, not here.
+behaves. The wiring (Gradio, the `Wica` facade, the instrumentation `Event`s the panels subscribe
+to) is an implementation concern, covered by the plan, not here.
 
 Scope is deliberately small: it demonstrates the **v1 Agent** (single reasoning call in flight at a
 time; one complete spoken reply per step). It is not meant to show off concurrency/interruption or
@@ -112,7 +112,7 @@ the demo wiring the effect deterministically behind the agent's back.
 ## Configuration
 
 - **The demo loads from a committed JSON config**, `examples/agent.config.json`, via
-  `WicaConfig.from_json` followed by `Agent.from_config` (see [config.md](config.md)) — provider,
+  `WicaConfig.from_json` followed by `Wica.init` (see [config.md](config.md)) — provider,
   model, and persona (`system_prompt_file`, pointing at `examples/prompts/wica.md`) all live
   there. Switching providers/models, or editing the persona, is a file edit, not a code change.
   Committed per-provider variants sit alongside it — `agent.anthropic.config.json`,
@@ -122,12 +122,13 @@ the demo wiring the effect deterministically behind the agent's back.
 - **The API key is referenced, not stored.** The committed config uses
   `"api_key_env": "WICA_ANTHROPIC_API_KEY"` — the WICA-namespaced env var (so it never collides
   with a provider key another tool in the environment already uses) that `api_key_env` reads at
-  load time. No secret lives in the committed file. A literal key (e.g. to try a different
+  Agent build. No secret lives in the committed file. A literal key (e.g. to try a different
   provider without exporting an env var) goes in a local `*.local.json` copy instead, which is
   git-ignored (see config.md, "API key: literal or env reference").
-- **No key, still usable.** With `WICA_ANTHROPIC_API_KEY` unset, loading the config raises
-  `MissingEnvError`; the demo catches it, still opens, and clearly says what to set — it just can't
-  run the robot's reasoning until the variable is present. Nothing contacts a model without
+- **No key, still usable.** With `WICA_ANTHROPIC_API_KEY` unset, `Wica.init` raises
+  `MissingEnvError` when it builds the Agent (the env read is deferred to build, not load — see
+  config.md, "API key"); the demo catches it, still opens, and clearly says what to set — it just
+  can't run the robot's reasoning until the variable is present. Nothing contacts a model without
   credentials.
 
 ## Out of scope (for this demo)

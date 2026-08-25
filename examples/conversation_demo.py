@@ -34,8 +34,8 @@ from typing import Any
 import gradio as gr
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from wica import Content, TextPart, WorldEntry, get_world
-from wica.agent import Agent, CommandExecution
+from wica import CommandIssued, Content, TextPart, Wica, World, WorldEntry
+from wica.agent import CommandExecution
 from wica.config import MissingEnvError, WicaConfig, apply_logging
 
 # Keep third-party logs quiet; the config's "logging" field sets the wica.* level once the Agent
@@ -52,8 +52,11 @@ CONFIG_PATH = Path(__file__).parent / "agent.config.json"
 # All are include_in_prompt=True so they reach the model and show up in the World panel.
 # Sensor inputs (speech, closest user) trigger the agent; the robot's own state (emotion,
 # tracking) does not — otherwise the agent's own actions would re-trigger it in a loop.
-
-world = get_world()
+#
+# `world` is bound once the system is stood up below (from wica.world, or a World-only fallback in
+# explore-only mode). The serialize_fns / commands / UI handlers reference it at call time, which is
+# always after that binding.
+world: World
 
 
 def _speech(value: Any, previous: Any) -> Content:
@@ -117,16 +120,16 @@ COMMANDS = [
 
 # --- Agent ↔ UI bridges --------------------------------------------------------------
 #
-# The Agent owns its own event loop in a daemon thread and the World is thread-safe, so the
-# Gradio side stays fully synchronous: sensor events call world.update(...) directly, and the
-# agent's async callbacks (fired on the loop) push chat events onto one thread-safe queue that a
+# Wica owns the single event loop in a daemon thread and the World is thread-safe, so the Gradio
+# side stays fully synchronous: sensor events call world.update(...) directly, and the Agent's
+# instrumentation Events (emitted on the loop) push chat events onto one thread-safe queue that a
 # timer drains into the transcript. A single ordered queue keeps triggers, the robot's spoken
 # replies, and its command calls interleaved in the exact order they happened.
 #
 # Roles map to the two sides of the conversation:
-#  - "user"      → right side: the World entry that triggered a call (on_trigger).
+#  - "user"      → right side: the World entry the Agent actually observed (wica.on_agent_trigger).
 #  - "assistant" → left side:  the robot's spoken reply (output_sink) and its command calls
-#                              (on_command).
+#                              (wica.on_agent_command).
 
 _events: queue.Queue[dict[str, str]] = queue.Queue()
 
@@ -175,11 +178,11 @@ def on_trigger(entry: WorldEntry) -> None:
     _events.put({"role": "user", "content": label})
 
 
-def on_command(name: str, args: dict[str, Any]) -> None:
+def on_command(command: CommandIssued) -> None:
     """The robot issued a command — show it on the assistant (left) side, italicised to set it
     apart from spoken replies."""
-    rendered = ", ".join(f"{k}={v!r}" for k, v in args.items())
-    _events.put({"role": "assistant", "content": f"_🦾 {name}({rendered})_"})
+    rendered = ", ".join(f"{k}={v!r}" for k, v in command.args.items())
+    _events.put({"role": "assistant", "content": f"_🦾 {command.name}({rendered})_"})
 
 
 def _flatten_content(content: str | list[Any]) -> str:
@@ -230,30 +233,39 @@ def on_prompt(messages: list[BaseMessage]) -> None:
         _prompts.append({"label": label, "text": rendered})
 
 
-# Build the agent from the committed config; fall back to explore-only if its api_key_env isn't
-# set, so the app still opens and is explorable without credentials.
-register_world()
-agent: Agent | None = None
-config_error: str | None = None
-# Loading is inert (validates only, reads no env/files), so from_json + apply_logging run
-# unconditionally. The api key resolves at Agent.from_config, so that's what we guard: an unset
-# api_key_env raises MissingEnvError there, and we degrade to explore-only. See specs/config.md.
+# Stand up the whole system through the single entry point; fall back to explore-only if the
+# config's api_key_env isn't set, so the app still opens and is explorable without credentials.
+#
+# Loading is inert (validates only, reads no env/files). The api key resolves at Agent build inside
+# Wica.init (which also applies logging), so that's what we guard: an unset api_key_env raises
+# MissingEnvError there, and we degrade to a World-only system. See specs/config.md, specs/wica.md.
 wica_config = WicaConfig.from_json(CONFIG_PATH)
-apply_logging(wica_config.logging)
+wica: Wica | None = None
+config_error: str | None = None
 try:
-    agent = Agent.from_config(
-        wica_config.agent,
-        output_sink=output_sink,
-        on_prompt=on_prompt,
-        on_trigger=on_trigger,
-        on_command=on_command,
-    )
+    wica = Wica.init(wica_config, output_sink=output_sink)
 except MissingEnvError as exc:
     config_error = f"environment variable {exc.env_var!r} is not set"
+    apply_logging(wica_config.logging)  # Wica.init didn't reach its own apply — do it for explore mode
+    # Explore-only: a World-only system (no Agent) on its own loop, so the panel and sensor inputs
+    # still work while nothing reasons over them.
+    _explore_loop = asyncio.new_event_loop()
+    threading.Thread(target=_explore_loop.run_forever, daemon=True).start()
+    world = World(_explore_loop)
+    world.start()
+    register_world()
 else:
+    world = wica.world
+    register_world()
     for command in COMMANDS:
-        agent.register_command(command)
-    agent.start()
+        wica.register_command(command)
+    # The demo's panels subscribe to the surfaced instrumentation Events (multi-consumer): the
+    # prompt panel to on_agent_prompt, the input side to on_agent_trigger (what the robot actually
+    # observed), the assistant side to on_agent_command.
+    wica.on_agent_prompt.subscribe(on_prompt)
+    wica.on_agent_trigger.subscribe(on_trigger)
+    wica.on_agent_command.subscribe(on_command)
+    wica.start()
 
 
 # --- UI handlers ---------------------------------------------------------------------
@@ -417,8 +429,8 @@ def main() -> None:
     try:
         build_ui().launch()
     finally:
-        if agent is not None:
-            agent.stop()
+        if wica is not None:
+            wica.stop()
 
 
 if __name__ == "__main__":

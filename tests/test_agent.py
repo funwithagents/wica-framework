@@ -4,7 +4,7 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import pytest
@@ -14,7 +14,14 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
-from wica.agent import Agent, AssistantTextRecord, ObservationRecord, _command_ack
+from wica.agent import (
+    Agent,
+    AssistantTextRecord,
+    CommandIssued,
+    ObservationRecord,
+    _command_ack,
+)
+from wica.config import AgentConfig
 from wica.content import Content, TextPart
 from wica.world import World
 
@@ -37,10 +44,12 @@ def identity_serialize(value: Any, previous: Any) -> Content:
     return [TextPart(str(value))]
 
 
-class FakeChatModel(BaseChatModel):
-    """A hand-written BaseChatModel with fully scripted async responses, for
-    deterministic control over .tool_calls that langchain_core's built-in fakes don't
-    give us."""
+class ProgrammableChatModel(BaseChatModel):
+    """A hand-written BaseChatModel whose responses come from an arbitrary async `respond`
+    callable — for deterministic control over .tool_calls *and blocking model calls* that the
+    data-scripted `provider: "fake"` model (wica.fake_model.FakeChatModel) can't give us: its
+    responses are JSON config, so it can't await a test-controlled event mid-call. Injected via
+    the Agent `model=` override seam. Named to avoid colliding with that library FakeChatModel."""
 
     respond: Callable[[list[BaseMessage]], Awaitable[AIMessage]] | None = None
     calls: list[list[BaseMessage]] = Field(default_factory=list)
@@ -52,13 +61,13 @@ class FakeChatModel(BaseChatModel):
     def _generate(
         self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs: Any
     ) -> ChatResult:
-        raise NotImplementedError("FakeChatModel is async-only")
+        raise NotImplementedError("ProgrammableChatModel is async-only")
 
     async def _agenerate(
         self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs: Any
     ) -> ChatResult:
         self.calls.append(messages)
-        assert self.respond is not None, "FakeChatModel.respond must be set before use"
+        assert self.respond is not None, "ProgrammableChatModel.respond must be set before use"
         message = await self.respond(messages)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
@@ -108,7 +117,7 @@ class RecordingSink:
 
 
 @pytest.fixture
-def loop():
+def loop() -> Iterator[asyncio.AbstractEventLoop]:
     new_loop = asyncio.new_event_loop()
     thread = threading.Thread(target=new_loop.run_forever, daemon=True)
     thread.start()
@@ -119,13 +128,31 @@ def loop():
 
 
 @pytest.fixture
-def world():
-    return World()
+def world(loop: asyncio.AbstractEventLoop) -> Iterator[World]:
+    w = World(loop)
+    w.start()
+    yield w
+    w.stop()
 
 
 @pytest.fixture
-def sink():
+def sink() -> RecordingSink:
     return RecordingSink()
+
+
+def make_agent(
+    model: BaseChatModel,
+    *,
+    world: World,
+    loop: asyncio.AbstractEventLoop,
+    system_prompt: str = "You are terse.",
+    **kwargs: Any,
+) -> Agent:
+    """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
+    and builds its own model from it; the `model=` override lets these tests supply the bespoke
+    ProgrammableChatModel the loop is driven over. The prompt is carried on the config."""
+    config = AgentConfig(provider="fake", model="test", system_prompt=system_prompt)
+    return Agent(config, world=world, loop=loop, model=model, **kwargs)
 
 
 def human_texts(message: BaseMessage) -> str:
@@ -134,8 +161,8 @@ def human_texts(message: BaseMessage) -> str:
 
 def test_text_only_response_updates_sink_and_history(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(respond=text_response("Hello there"))
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    model = ProgrammableChatModel(respond=text_response("Hello there"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
 
     world.update("input", "hi")
@@ -152,13 +179,13 @@ def test_text_only_response_updates_sink_and_history(loop, world, sink):
 
 def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
             text_response("The sum is 3"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -210,13 +237,13 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
     # a "Calling foo(...)…" assistant text block — otherwise the model imitates that prose and
     # emits command descriptions as plain text instead of issuing real tool calls.
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
             text_response("the sum is 3"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -245,13 +272,13 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
 
 def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("explode", {}, "call1")]),
             text_response("Sorry, that failed"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
 
     async def explode() -> str:
         """Always raises."""
@@ -292,13 +319,13 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
         await block.wait()
         return "done dancing"
 
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("dance", {}, "call1")]),
             text_response("hi"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(dance)
     agent.start()
 
@@ -325,6 +352,7 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
     )
     assert world.get_entry(key).current.value.state == "running"
 
+    block.set()  # let dance finish before teardown
     agent.stop()
 
 
@@ -341,13 +369,13 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
         await slow_release.wait()
         return "slow-result"
 
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("fast_tool", {}, "fast"), ("slow_tool", {}, "slow")]),
             text_response("done"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(fast_tool)
     agent.register_command(slow_tool)
     agent.start()
@@ -383,6 +411,7 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
         world.get_entry(fast_key)
     assert world.get_entry(slow_key).current.value.state == "running"
 
+    slow_release.set()  # let slow finish before teardown
     agent.stop()
 
 
@@ -419,14 +448,14 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
         await release_step2.wait()
         return AIMessage(content="done")
 
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("fast", {}, "fast"), ("slow", {}, "slow")]),
             respond2,
             text_response("ack"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(fast)
     agent.register_command(slow)
     agent.start()
@@ -474,8 +503,8 @@ def test_single_in_flight_trigger_dropped_and_logged(loop, world, sink, caplog):
         await hold.wait()
         return AIMessage(content="finally")
 
-    model = FakeChatModel(respond=respond)
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
 
     with caplog.at_level(logging.INFO, logger="wica.agent"):
@@ -500,8 +529,8 @@ def test_single_in_flight_trigger_dropped_and_logged(loop, world, sink, caplog):
 def test_full_bundle_capture_includes_passive_entries(loop, world, sink):
     world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=False)
-    model = FakeChatModel(respond=text_response("ok"))
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
 
     world.update("b", "b-value")
@@ -530,8 +559,8 @@ def test_freshness_flips_at_bundle_boundary(loop, world, sink):
         archival_serialize_fn=archival_serialize,
         triggers_llm_call=True,
     )
-    model = FakeChatModel(respond=sequence(text_response("first"), text_response("second")))
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    model = ProgrammableChatModel(respond=sequence(text_response("first"), text_response("second")))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
 
     world.update("note", "one")
@@ -550,41 +579,29 @@ def test_freshness_flips_at_bundle_boundary(loop, world, sink):
     agent.stop()
 
 
-def test_on_prompt_hook_fires_with_the_messages_the_model_receives(loop, world, sink):
+def test_on_prompt_event_fires_with_the_messages_the_model_receives(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(respond=text_response("hi"))
+    model = ProgrammableChatModel(respond=text_response("hi"))
     captured: list[list[BaseMessage]] = []
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        output_sink=sink,
-        on_prompt=captured.append,
-    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.on_prompt.subscribe(captured.append)
     agent.start()
 
     world.update("input", "hello")
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert len(captured) == 1  # one hook call per step
+    assert len(captured) == 1  # one emit per step
     assert captured[0] == model.calls[0]  # exactly the messages handed to the model
 
     agent.stop()
 
 
-def test_on_trigger_hook_fires_with_the_entry_that_started_the_step(loop, world, sink):
+def test_on_trigger_event_fires_with_the_entry_that_started_the_step(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(respond=text_response("hi"))
+    model = ProgrammableChatModel(respond=text_response("hi"))
     triggers: list[str] = []
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        output_sink=sink,
-        on_trigger=lambda entry: triggers.append(entry.key),
-    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
 
     world.update("input", "hello")
@@ -595,23 +612,17 @@ def test_on_trigger_hook_fires_with_the_entry_that_started_the_step(loop, world,
     agent.stop()
 
 
-def test_on_command_hook_fires_with_name_and_args_at_dispatch(loop, world, sink):
+def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
             text_response("done"),
         )
     )
-    commands: list[tuple[str, dict[str, Any]]] = []
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        output_sink=sink,
-        on_command=lambda name, args: commands.append((name, args)),
-    )
+    commands: list[CommandIssued] = []
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.on_command.subscribe(commands.append)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -623,41 +634,35 @@ def test_on_command_hook_fires_with_name_and_args_at_dispatch(loop, world, sink)
     world.update("input", "add them")
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert commands == [("add", {"a": 1, "b": 2})]
+    assert commands == [CommandIssued("add", {"a": 1, "b": 2})]
 
     agent.stop()
 
 
-def test_on_prompt_hook_raising_does_not_abort_the_step(loop, world, sink):
+def test_raising_on_prompt_subscriber_does_not_abort_the_step(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(respond=text_response("still replied"))
+    model = ProgrammableChatModel(respond=text_response("still replied"))
 
     def boom(messages: list[BaseMessage]) -> None:
-        raise RuntimeError("hook failure")
+        raise RuntimeError("subscriber failure")
 
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        output_sink=sink,
-        on_prompt=boom,
-    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.on_prompt.subscribe(boom)  # Event.emit isolates a raising subscriber
     agent.start()
 
     world.update("input", "hello")
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == ["still replied"]  # the raising hook didn't break the step
+    assert sink.texts == ["still replied"]  # the raising subscriber didn't break the step
     assert len(model.calls) == 1
 
     agent.stop()
 
 
-def test_stop_clears_trigger_handler(loop, world, sink):
+def test_stop_unsubscribes_from_the_world_trigger(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(respond=text_response("hi"))
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    model = ProgrammableChatModel(respond=text_response("hi"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
     agent.stop()
 
@@ -675,13 +680,13 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
         await block.wait()
         return "unreachable"
 
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("block_forever", {}, "call1")]),
             text_response("cancelled that for you"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(block_forever)
     agent.start()
 
@@ -718,8 +723,8 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
         await block.wait()
         return "unreachable"
 
-    model = FakeChatModel(respond=tool_call_response([("block_forever", {}, "call1")]))
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    model = ProgrammableChatModel(respond=tool_call_response([("block_forever", {}, "call1")]))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(block_forever)
     agent.start()
 
@@ -730,11 +735,13 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
 
     agent.stop()
 
+    # The World is still running (only the Agent stopped), so the cancellation's terminal write
+    # lands — this is the agent-before-world teardown order Wica enforces.
     wait_until(lambda: world.get_entry(key).current.value.state == "cancelled")
-    assert len(model.calls) == 1  # no second call: the trigger handler was already cleared
+    assert len(model.calls) == 1  # no second call: the Agent already unsubscribed from on_trigger
 
 
-def _prompt_contains(model: FakeChatModel, needle: str) -> bool:
+def _prompt_contains(model: ProgrammableChatModel, needle: str) -> bool:
     return any(
         needle in str(m.content)
         for call in model.calls
@@ -743,7 +750,7 @@ def _prompt_contains(model: FakeChatModel, needle: str) -> bool:
     )
 
 
-def _wait_for_render(model: FakeChatModel, world: World, needle: str) -> None:
+def _wait_for_render(model: ProgrammableChatModel, world: World, needle: str) -> None:
     """Wait until some model prompt has rendered `needle`, nudging the agent with fresh inputs so
     that a terminal command entry left in the World (e.g. a completion whose own trigger the
     single-in-flight loop dropped) is guaranteed to be observed by a later step. Once rendered, the
@@ -768,14 +775,14 @@ def test_model_can_cancel_a_running_command(loop, world, sink):
         await block.wait()
         return "unreachable"
 
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("block_forever", {}, "target")]),
             tool_call_response([("cancel_command", {"call_id": "target"}, "cancel1")]),
             text_response("stopped it"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(block_forever)
     agent.start()
     # cancel_command is a WICA-native Command the Agent auto-registers at start — no app wiring.
@@ -804,13 +811,13 @@ def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
         await block.wait()
         return "unreachable"
 
-    model = FakeChatModel(
+    model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("block_forever", {}, "t2")]),
             text_response("ok"),
         )
     )
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(block_forever)
     agent.start()
 
@@ -831,8 +838,8 @@ def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
 
 
 def test_cancel_command_action_is_a_noop_for_unknown_id(loop, world, sink):
-    model = FakeChatModel(respond=text_response("ok"))
-    agent = Agent(model, system_prompt="You are terse.", world=world, loop=loop, output_sink=sink)
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
 
     future = asyncio.run_coroutine_threadsafe(agent._cancel_command_action("nope"), loop)
@@ -847,17 +854,10 @@ def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
     # both — but on_trigger still fires once per collected trigger. See specs/agent.md.
     world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-    model = FakeChatModel(respond=text_response("ok"))
+    model = ProgrammableChatModel(respond=text_response("ok"))
     triggers: list[str] = []
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        coalesce_window=0.3,
-        output_sink=sink,
-        on_trigger=lambda entry: triggers.append(entry.key),
-    )
+    agent = make_agent(model, world=world, loop=loop, coalesce_window=0.3, output_sink=sink)
+    agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
 
     world.update("a", "a-value")
@@ -866,7 +866,7 @@ def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
     time.sleep(0.3)  # let any (incorrect) second step have a chance to run
 
     assert len(model.calls) == 1
-    # dispatch order across the World's executor isn't guaranteed, so compare as a set
+    # dispatch order across the loop isn't guaranteed, so compare as a set
     assert sorted(triggers) == ["a", "b"]
     observation = agent._history[0]
     assert isinstance(observation, ObservationRecord)
@@ -887,15 +887,8 @@ def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
         await hold.wait()
         return AIMessage(content="done")
 
-    model = FakeChatModel(respond=respond)
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        coalesce_window=0,
-        output_sink=sink,
-    )
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, coalesce_window=0, output_sink=sink)
     agent.start()
 
     t0 = time.monotonic()
@@ -925,17 +918,10 @@ def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
         triggers_llm_call=True,
         bypass_coalescing=True,
     )
-    model = FakeChatModel(respond=text_response("ok"))
+    model = ProgrammableChatModel(respond=text_response("ok"))
     triggers: list[str] = []
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        coalesce_window=1.0,
-        output_sink=sink,
-        on_trigger=lambda entry: triggers.append(entry.key),
-    )
+    agent = make_agent(model, world=world, loop=loop, coalesce_window=1.0, output_sink=sink)
+    agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
 
     world.update("ctx", "context")  # opens the (long) window
@@ -974,15 +960,8 @@ def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
         await hold.wait()
         return AIMessage(content="done")
 
-    model = FakeChatModel(respond=respond)
-    agent = Agent(
-        model,
-        system_prompt="You are terse.",
-        world=world,
-        loop=loop,
-        coalesce_window=0,
-        output_sink=sink,
-    )
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, coalesce_window=0, output_sink=sink)
     agent.start()
 
     world.update("input", "go")

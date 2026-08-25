@@ -68,7 +68,7 @@ Inputs are the primary reason `Content` is multimodal. An Input's `serialize_fn`
 
 ## Producers and threads
 
-An Input's producer can live anywhere and run on **any thread** — a Gradio callback, a sensor polling loop, a hardware interrupt handler. The World is sync and thread-based specifically so `update()` can be called from these producers without them knowing about the Agent's asyncio loop (see [world.md](world.md) open question #3 and [agent.md](agent.md), "Threading"). The Agent bridges to its own loop; the Input producer just calls `world.update(...)` and moves on.
+An Input's producer can live anywhere and run on **any thread** — a Gradio callback, a sensor polling loop, a hardware interrupt handler. `update()` is callable from any thread: it mutates World state under a lock and then hops to the shared event loop internally (`call_soon_threadsafe`) to dispatch listeners and the trigger, so a producer never has to know about the loop the World and Agent share (see [world.md](world.md), "The shared event loop"). The Input producer just calls `world.update(...)` and moves on.
 
 ## Relationship to the other pillars
 

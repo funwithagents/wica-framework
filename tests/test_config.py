@@ -12,7 +12,6 @@ from wica.config import (
     ConfigError,
     MissingEnvError,
     WicaConfig,
-    apply_logging,
     resolve_api_key,
     resolve_system_prompt,
 )
@@ -248,10 +247,10 @@ def test_missing_agent_block_raises():
         WicaConfig.from_dict({"logging": "INFO"})
 
 
-# --- Agent.from_config: resolution happens at build ------------------------------------
+# --- Resolution happens at build (build_chat_model / resolve_system_prompt) -------------
 
 
-def test_from_config_forwards_api_key_when_set(monkeypatch: pytest.MonkeyPatch):
+def test_build_chat_model_forwards_api_key_when_set(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {}
 
     def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
@@ -265,12 +264,12 @@ def test_from_config_forwards_api_key_when_set(monkeypatch: pytest.MonkeyPatch):
     config = AgentConfig(
         provider="anthropic", model="claude-sonnet-5", system_prompt="hi", api_key="sk-abc"
     )
-    agent_module.Agent.from_config(config)
+    agent_module.build_chat_model(config)
 
     assert captured["kwargs"]["api_key"] == "sk-abc"
 
 
-def test_from_config_omits_api_key_when_unset(monkeypatch: pytest.MonkeyPatch):
+def test_build_chat_model_omits_api_key_when_unset(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {}
 
     def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
@@ -280,39 +279,37 @@ def test_from_config_omits_api_key_when_unset(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
     config = AgentConfig(provider="anthropic", model="claude-sonnet-5", system_prompt="hi")
-    agent_module.Agent.from_config(config)
+    agent_module.build_chat_model(config)
 
     assert "api_key" not in captured["kwargs"]
 
 
-def test_from_config_reads_system_prompt_file_at_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_resolve_system_prompt_reads_file_at_build(tmp_path: Path):
     prompt = tmp_path / "persona.md"
     prompt.write_text("Persona from a file.")
-    monkeypatch.setattr(agent_module, "init_chat_model", lambda *a, **k: object())
 
     config = AgentConfig(provider="anthropic", model="m", system_prompt_file=str(prompt))
-    agent = agent_module.Agent.from_config(config)
-
-    assert agent.system_prompt == "Persona from a file."
+    assert resolve_system_prompt(config) == "Persona from a file."
 
 
-def test_from_config_raises_missing_env_at_build(monkeypatch: pytest.MonkeyPatch):
+def test_build_chat_model_raises_missing_env_at_build(monkeypatch: pytest.MonkeyPatch):
     """The behavior change: an unset api_key_env surfaces at Agent build, not at config load."""
     monkeypatch.delenv("WICA_TEST_KEY_UNSET", raising=False)
     monkeypatch.setattr(agent_module, "init_chat_model", lambda *a, **k: object())
 
     config = AgentConfig.from_dict(_agent_dict(api_key_env="WICA_TEST_KEY_UNSET"))  # loads fine
     with pytest.raises(MissingEnvError):
-        agent_module.Agent.from_config(config)
+        agent_module.build_chat_model(config)
 
 
-def test_from_json_then_apply_logging_then_from_config_composes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """The blessed pattern (no from_config_file convenience): callers load the file, apply
-    logging, then build the Agent themselves — see specs/config.md "Flow into the Agent"."""
+def test_from_json_then_wica_init_composes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The blessed startup shape: load the file, then Wica.init — which applies logging and builds
+    the Agent (resolution at build). See specs/config.md "Flow into the Agent"."""
+    import asyncio
+    import logging
+
+    from wica import Wica
+
     captured: dict[str, Any] = {}
 
     def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
@@ -326,15 +323,14 @@ def test_from_json_then_apply_logging_then_from_config_composes(
     config_path.write_text(json.dumps(_wica_dict(api_key="sk-abc")))
 
     wica_config = WicaConfig.from_json(config_path)
-    apply_logging(wica_config.logging)
-    agent_module.Agent.from_config(wica_config.agent)
-
-    import logging
-
-    assert logging.getLogger("wica").level == logging.DEBUG
-    logging.getLogger("wica").setLevel(logging.WARNING)  # don't leak into other tests
-
-    assert captured["model"] == "claude-sonnet-5"
+    loop = asyncio.new_event_loop()  # injected + owned here, never started (no model call needed)
+    try:
+        Wica.init(wica_config, loop=loop)  # applies logging + builds the model (monkeypatched)
+        assert logging.getLogger("wica").level == logging.DEBUG
+        assert captured["model"] == "claude-sonnet-5"
+    finally:
+        logging.getLogger("wica").setLevel(logging.WARNING)  # don't leak into other tests
+        loop.close()
     assert captured["kwargs"]["api_key"] == "sk-abc"
 
 

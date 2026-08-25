@@ -22,25 +22,27 @@ The name is the model:
 
 ## How it works
 
+### The entry point — `Wica`
+
+You talk to one object. `Wica.init(config)` stands up the whole system from a config — it owns a single event loop and a **World** + **Agent** pair that both run on it — and surfaces everything you need: `wica.world` for state, `wica.register_command(...)` for actions, `wica.start()`/`wica.stop()` for the lifecycle, and four `Event`s to observe the loop. To "reset", discard the `Wica` and `init` a new one.
+
 ### The World — state that becomes a prompt
 
-The World is a singleton registry (`get_world()`). You `register()` a key with a declared type and a `serialize_fn` that turns its value into `Content`, then `update()` it as data changes:
+The World (`wica.world`) is a registry. You `register()` a key with a declared type and a `serialize_fn` that turns its value into `Content`, then `update()` it as data changes:
 
 ```python
-from wica import get_world, TextPart
-
-world = get_world()
+from wica import TextPart
 
 # Register an entry: how it's typed, serialized, and whether it wakes the agent.
-world.register(
+wica.world.register(
     "speech_input",
     str,
     serialize_fn=lambda value, prev: [TextPart(f'The person said: "{value}"')],
     triggers_llm_call=True,   # a new value wakes the Agent
 )
 
-# Later, from anywhere (a UI callback, a sensor thread, a hardware interrupt):
-world.update("speech_input", "hello robot")
+# Later, from anywhere (a UI callback, a sensor thread, a hardware interrupt), while running:
+wica.world.update("speech_input", "hello robot")
 ```
 
 Each entry is versioned (a small incrementing `id`), timestamped, and rendered inside an XML-style `<entry key="..." id="...">…</entry>` block the model can reference precisely. Entries can be marked `include_in_prompt=False` to act as pure internal/shared state that never reaches the model, and given a `ttl` to auto-expire. The World holds a *snapshot* (current + previous), not an event-sourced log — history lives in the Agent.
@@ -48,12 +50,12 @@ Each entry is versioned (a small incrementing `id`), timestamped, and rendered i
 ### Inputs — perception coming in
 
 An **Input** isn't a class; it's a *role a World entry plays* when an external producer feeds it.
-A user utterance, a "closest person detected" event, a camera frame — each is just a `register()`ed entry that some producer `update()`s. Because the World is sync and thread-safe, an Input producer can live on **any thread** (a Gradio callback, a sensor poll loop, a hardware interrupt) and never needs to know about the Agent's event loop.
+A user utterance, a "closest person detected" event, a camera frame — each is just a `register()`ed entry that some producer `update()`s. `update()` is callable from **any thread** (a Gradio callback, a sensor poll loop, a hardware interrupt) — it hops to the shared loop internally — so an Input producer never needs to know about the loop the World and Agent share.
 
 ```python
-world.register("closest_user", str, serialize_fn=_render_user, triggers_llm_call=True)
-world.update("closest_user", "alice")   # someone stepped up
-world.update("closest_user", None)      # ...and walked away
+wica.world.register("closest_user", str, serialize_fn=_render_user, triggers_llm_call=True)
+wica.world.update("closest_user", "alice")   # someone stepped up
+wica.world.update("closest_user", None)      # ...and walked away
 ```
 
 ### Commands — the agent acting out
@@ -66,14 +68,14 @@ async def dance() -> str:
     await asyncio.sleep(10)
     return "Finished the dance."
 
-agent.register_command(dance)
+wica.register_command(dance)
 ```
 
 Off-the-shelf LangChain tools work unmodified — a Command needs no WICA-specific hooks. Every Command runs as a cancellable `asyncio` task and its execution is tracked as a World entry `agent:command:<call_id>`) that renders `running` while in flight and terminal (`result`/`error`) once done — so a later reasoning step can *see* an action still running and decide to cancel it. The Agent auto-registers a native `cancel_command(call_id)` so the model can abort its own in-flight Commands.
 
 ### The Agent — the reasoning loop
 
-The Agent is triggered by the World, builds a prompt from World state, runs inference against a configured provider, dispatches Commands, and streams output to a pluggable sink. It **owns one event loop** (in a daemon thread by default) so Command cancellation is race-free, while the World stays sync and thread-agnostic. It keeps the conversation **history** as re-renderable World snapshots — so the newest observation renders rich (an image inline) and older ones render light, keeping the deep prompt prefix byte-stable and cacheable.
+The Agent is triggered by the World, builds a prompt from World state, runs inference against a configured provider, dispatches Commands, and streams output to a pluggable sink. It runs on the **single event loop** `Wica` owns (a daemon thread by default) — shared with the World — so Command cancellation is race-free while `update()` stays callable from any thread. It keeps the conversation **history** as re-renderable World snapshots — so the newest observation renders rich (an image inline) and older ones render light, keeping the deep prompt prefix byte-stable and cacheable.
 
 Perceptions that arrive in a burst are **coalesced** into a single step (a ~200 ms leading-edge window, configurable via `coalesce_window`); an entry can set `bypass_coalescing=True` to act immediately (a stop button, a barge-in utterance).
 
@@ -92,32 +94,28 @@ uv add "wica[anthropic] @ git+https://github.com/<owner>/wica-framework"
 A minimal agent, wired from a JSON config:
 
 ```python
-import asyncio
-from wica import get_world, TextPart, WicaConfig, apply_logging
-from wica.agent import Agent
+from wica import TextPart, WicaConfig, Wica
 
-world = get_world()
-world.register(
+async def speak(text: str) -> None:
+    print("robot says:", text)
+
+# Load provider/model/persona from a file; wire code-only bits (sink, coalesce window) as kwargs.
+config = WicaConfig.from_json("agent.config.json")
+wica = Wica.init(config, output_sink=speak)   # owns the loop + World + Agent; applies logging
+
+wica.world.register(
     "speech_input",
     str,
     serialize_fn=lambda v, prev: [TextPart(f'The person said: "{v}"')],
     triggers_llm_call=True,
 )
-
-async def speak(text: str) -> None:
-    print("robot says:", text)
-
-# Load provider/model/persona from a file; wire code-only bits (loop, sink, hooks) as kwargs.
-config = WicaConfig.from_json("agent.config.json")
-apply_logging(config.logging)
-agent = Agent.from_config(config.agent, output_sink=speak)
-agent.start()
+wica.start()
 
 # Feed a perception; the Agent wakes, reasons, and replies.
-world.update("speech_input", "hello!")
+wica.world.update("speech_input", "hello!")
 
-# ... keep the process alive while the agent runs on its own loop ...
-agent.stop()
+# ... keep the process alive while the system runs on its own loop ...
+wica.stop()
 ```
 
 ## Configuration
@@ -138,11 +136,11 @@ so switching backends or editing the persona is a file edit, not a code change:
 }
 ```
 
-- **API key** — give a literal `api_key`, or an `api_key_env` naming the env var to read at load time (at most one). With neither, the provider's standard env var is used. An env-referenced config carries no secret and is safe to commit; a literal-key config should be git-ignored.
+- **API key** — give a literal `api_key`, or an `api_key_env` naming the env var to read at **Agent build** (`Wica.init`), at most one. With neither, the provider's standard env var is used. An env-referenced config carries no secret and is safe to commit; a literal-key config should be git-ignored.
 - **System prompt** — inline `system_prompt`, or `system_prompt_file` (resolved relative to the config file, so a config-plus-prompts folder is relocatable). Exactly one is required.
 - **Strict loading** — missing required keys, unknown keys (typos), and wrong types all fail loudly at load time with an actionable WICA error, never a silent default.
 
-Loading is a two-call composition (`WicaConfig.from_json` → `Agent.from_config`), keeping the code-only wiring (World instance, event loop, output sink, instrumentation hooks) in `**kwargs` where JSON can't express it.
+Loading is a two-call composition (`WicaConfig.from_json` → `Wica.init`), keeping the code-only wiring (output sink, `coalesce_window`, an optional pre-existing event loop) in `Wica.init`'s keyword arguments where JSON can't express it. `Wica.init` applies logging itself and is where a referenced-but-unset `api_key_env` raises `MissingEnvError`.
 
 ### Providers
 
@@ -170,7 +168,7 @@ See [specs/conversation-demo.md](specs/conversation-demo.md).
 
 | Path | What's there |
 |---|---|
-| `src/wica/` | The library — one module per concept: [`world.py`](src/wica/world.py), [`content.py`](src/wica/content.py), [`config.py`](src/wica/config.py), [`agent.py`](src/wica/agent.py) (Agent + Commands) |
+| `src/wica/` | The library — one module per concept: [`wica.py`](src/wica/wica.py) (the `Wica` facade), [`world.py`](src/wica/world.py), [`content.py`](src/wica/content.py), [`config.py`](src/wica/config.py), [`agent.py`](src/wica/agent.py) (Agent + Commands) |
 | `specs/` | Pre-implementation design docs, one per concept — start at [specs/_index.md](specs/_index.md) |
 | `plans/` | Implementation plans turning specs into buildable steps — [plans/_index.md](plans/_index.md) |
 | `tests/` | Fast, deterministic, no-network tests (the default `pytest` run) |

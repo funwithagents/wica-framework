@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import threading
 import uuid
 from collections.abc import Awaitable, Callable
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -23,9 +23,15 @@ from langchain_core.tools import BaseTool, tool
 
 from wica.config import AgentConfig, resolve_api_key, resolve_system_prompt
 from wica.content import Content, ImagePart, TextPart
-from wica.world import World, WorldEntry, get_world
+from wica.events import Event
+from wica.world import World, WorldEntry
 
 _logger = logging.getLogger(__name__)
+
+# Max seconds stop() waits for in-flight command tasks to unwind after cancellation. Genuinely
+# async commands settle instantly; the bound guards against an uncooperative one (see
+# specs/commands.md, "Cancellation reaches the task, not always the work").
+_STOP_DRAIN_TIMEOUT = 5.0
 
 
 # A Command is WICA's unit of agent action on the World, backed under the hood by a
@@ -41,6 +47,15 @@ class CommandExecution:
 
     def is_terminal(self) -> bool:
         return self.state != "running"
+
+
+# The payload of the Agent's on_command instrumentation Event: a named, evolvable value for a
+# Command the model issued, preferred over a bare (name, args) tuple. See specs/agent.md
+# ("Instrumentation") and specs/wica.md.
+@dataclass(frozen=True)
+class CommandIssued:
+    name: str
+    args: dict[str, Any]
 
 
 # History records — Observation captures the full include_in_prompt bundle at trigger
@@ -223,44 +238,47 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
 class Agent:
     def __init__(
         self,
-        model: BaseChatModel,
+        config: AgentConfig,
         *,
-        system_prompt: str,
-        world: World | None = None,
-        loop: asyncio.AbstractEventLoop | None = None,
+        world: World,
+        loop: asyncio.AbstractEventLoop,
         coalesce_window: float = 0.2,
         output_sink: Callable[[str], Awaitable[None]] | None = None,
-        on_prompt: Callable[[list[BaseMessage]], None] | None = None,
-        on_trigger: Callable[[WorldEntry], None] | None = None,
-        on_command: Callable[[str, dict[str, Any]], None] | None = None,
+        model: BaseChatModel | None = None,
     ) -> None:
-        self.model = model
-        self.system_prompt = system_prompt
-        self._world = world if world is not None else get_world()
+        # Config-driven construction *is* the constructor — resolution happens here, at build. The
+        # config holds system_prompt/system_prompt_file (and api_key/api_key_env, resolved inside
+        # build_chat_model) verbatim; resolve_system_prompt reads the prompt file if that's the form
+        # given, so an unreadable file or unset key env var surfaces here, not at config load. See
+        # specs/config.md ("Flow into the Agent") and specs/agent.md.
+        #
+        # `model` is an optional override: config builds the model unless a bespoke BaseChatModel is
+        # passed in (the raw-model injection seam — a caller supplying a model no config can express,
+        # and the seam the Agent unit tests use to drive the loop over a fully-scripted fake). The
+        # system prompt is always config-expressed. See specs/agent.md, specs/wica.md (open q. 3).
+        self.system_prompt = resolve_system_prompt(config)
+        self.model = model if model is not None else build_chat_model(config)
+        self._world = world
+        # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
+        # here. The Agent runs its tasks/timers/cancellation on it but never starts or stops it. See
+        # specs/agent.md ("The shared event loop").
+        self._loop = loop
         # Trigger-coalescing window (seconds): a burst of triggers arriving within this window is
         # batched into a single step, rather than starting one step per trigger (and, under the
         # single-in-flight loop, dropping the rest). 0 disables it — each trigger fires immediately,
         # the pre-coalescing behavior. See specs/agent.md "Trigger coalescing".
         self._coalesce_window = coalesce_window
         self._output_sink = output_sink if output_sink is not None else _noop_output_sink
-        # Optional debug/observability hooks — instrumentation only, never control flow: each is
-        # fired via _fire_hook, which swallows+logs a raising hook so it can't abort a step. See
-        # specs/agent.md "Instrumentation".
-        #  - on_prompt(messages): the exact messages just before each model call.
-        #  - on_trigger(entry):   the World entry that started a step (only for steps that run).
-        #  - on_command(name, args): each Command the model issues, at dispatch time.
-        self._on_prompt = on_prompt
-        self._on_trigger = on_trigger
-        self._on_command = on_command
-
-        self._owns_loop = loop is None
-        self._loop_thread: threading.Thread | None
-        if loop is None:
-            self._loop = asyncio.new_event_loop()
-            self._loop_thread = threading.Thread(target=self._loop.run_forever, daemon=True)
-        else:
-            self._loop = loop
-            self._loop_thread = None
+        # Instrumentation Events — observability only, never control flow. The Agent emits on them
+        # at the right points inside the loop; any number of consumers subscribe, and Event.emit's
+        # per-subscriber isolation catches+logs a raising subscriber so it can neither abort a step
+        # nor starve siblings (no _fire_hook guard needed). See specs/agent.md "Instrumentation".
+        #  - on_trigger(entry):    once per trigger a run-to-completion step observes (filtered).
+        #  - on_prompt(messages):  the exact rendered messages just before each model call.
+        #  - on_command(command):  each Command the model issues, at dispatch time.
+        self.on_trigger: Event[WorldEntry] = Event()
+        self.on_prompt: Event[list[BaseMessage]] = Event()
+        self.on_command: Event[CommandIssued] = Event()
 
         # name -> the LangChain tool backing each registered Command (see commands.md)
         self._commands: dict[str, BaseTool] = {}
@@ -273,16 +291,8 @@ class Agent:
         self._window_timer: asyncio.TimerHandle | None = None
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._command_keys: set[str] = set()
-
-    @classmethod
-    def from_config(cls, config: AgentConfig, **kwargs: Any) -> Agent:
-        # Resolution happens here, at build: the config holds system_prompt/system_prompt_file (and
-        # api_key/api_key_env, resolved inside build_chat_model) verbatim. resolve_system_prompt
-        # reads the prompt file if that's the form given; an unreadable file or unset key env var
-        # surfaces here, not at config load. See specs/config.md ("Flow into the Agent").
-        system_prompt = resolve_system_prompt(config)
-        model = build_chat_model(config)
-        return cls(model, system_prompt=system_prompt, **kwargs)
+        # The sync shim subscribed to world.on_trigger while running (set in start()).
+        self._trigger_sub: Callable[[WorldEntry], None] | None = None
 
     def register_command(
         self,
@@ -316,26 +326,56 @@ class Agent:
             description=_CANCEL_COMMAND_DESCRIPTION,
         )
         _logger.info("agent starting (%d command(s) registered)", len(self._commands))
-        self._world.set_trigger_handler(self._on_world_trigger)
-        if self._loop_thread is not None and not self._loop_thread.is_alive():
-            self._loop_thread.start()
+        # Subscribe to the World's raw trigger. The World emits on_trigger on the loop thread
+        # (call_soon_threadsafe — see specs/world.md), so this sync shim runs there and create_task
+        # is safe — no run_coroutine_threadsafe bridge. Wica owns and starts the loop; the Agent
+        # only attaches to it here.
+        def schedule_trigger(entry: WorldEntry) -> None:
+            self._loop.create_task(self._handle_trigger(entry))
+
+        self._trigger_sub = schedule_trigger
+        self._world.on_trigger.subscribe(schedule_trigger)
 
     def stop(self) -> None:
         _logger.info("agent stopping")
-        self._world.set_trigger_handler(None)
-        # Cancel any pending coalescing-window timer on the loop thread (where all window state
-        # lives). Hygiene: for an owned loop it's about to stop anyway, but an injected loop keeps
-        # running, so a stale timer must not fire a step after stop().
+        if self._trigger_sub is not None:
+            self._world.on_trigger.unsubscribe(self._trigger_sub)
+            self._trigger_sub = None
+        # Cancel the pending coalescing window and every in-flight command task, and — while the
+        # World is still running (Wica stops it only after this returns) — wait for the cancellations
+        # to unwind. Draining here means each cancelled command's terminal write lands before the
+        # World stops, and no task is left pending when the loop later stops. The drain runs on the
+        # loop thread; the Agent never tears the loop down (Wica owns it).
         try:
-            self._loop.call_soon_threadsafe(self._cancel_window)
+            running_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
-            pass  # loop already closed
-        for key in list(self._running_tasks):
-            call_id = key.removeprefix(_COMMAND_KEY_PREFIX)
-            self.cancel_command(call_id)
-        if self._owns_loop and self._loop_thread is not None and self._loop_thread.is_alive():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._loop_thread.join()
+            running_loop = None
+        if running_loop is self._loop:
+            # Called from the loop thread itself — can't block on it; cancel without the drain.
+            self._cancel_window()
+            for task in list(self._running_tasks.values()):
+                task.cancel()
+            return
+        if not self._loop.is_running():
+            # Loop never started (or already stopped): nothing was scheduled, so nothing to drain.
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._stop_on_loop(), self._loop)
+            future.result(timeout=_STOP_DRAIN_TIMEOUT)
+        except RuntimeError:
+            pass  # loop not running / already closed — nothing to drain
+        except FuturesTimeoutError:
+            _logger.warning("agent stop: timed out draining in-flight command tasks")
+
+    async def _stop_on_loop(self) -> None:
+        """Cancel the pending window + all in-flight command tasks and await them settling. Runs on
+        the loop thread (scheduled by stop())."""
+        self._cancel_window()
+        tasks = list(self._running_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _cancel_window(self) -> None:
         """Cancel a pending coalescing-window timer and drop its batch (loop thread only)."""
@@ -375,13 +415,11 @@ class Agent:
             return f"cancelling {call_id}"
         return f"{call_id} is not a running command (it already finished or never existed)"
 
-    def _on_world_trigger(self, entry: WorldEntry) -> None:
-        asyncio.run_coroutine_threadsafe(self._handle_trigger(entry), self._loop)
-
     async def _handle_trigger(self, entry: WorldEntry) -> None:
-        # Runs on the loop thread (scheduled by _on_world_trigger). All window state below is
-        # therefore touched single-threaded, so open/join/flush are race-free — the same invariant
-        # that makes cancellation race-free (see specs/agent.md "The Agent owns the event loop").
+        # Runs on the loop thread (the World emits on_trigger there, and the start() shim
+        # create_tasks this coroutine on it). All window state below is therefore touched
+        # single-threaded, so open/join/flush are race-free — the same invariant that makes
+        # cancellation race-free (see specs/agent.md "The shared event loop").
         _logger.debug("trigger received: %s", _describe_entry(entry))
         if self._busy:
             _logger.info(
@@ -429,16 +467,6 @@ class Agent:
         finally:
             self._busy = False
 
-    def _fire_hook(self, hook: Callable[..., None] | None, *args: Any) -> None:
-        """Invoke an optional instrumentation hook, swallowing+logging any exception so a
-        misbehaving hook can never abort a step."""
-        if hook is None:
-            return
-        try:
-            hook(*args)
-        except Exception:
-            _logger.exception("agent instrumentation hook raised; ignoring")
-
     async def _run_step(self, batch: list[WorldEntry]) -> None:
         # A coalesced burst runs a single step, but on_trigger fires once per trigger that joined
         # the window (so a UI still shows every input). The Observation, on_prompt, and the model
@@ -453,10 +481,10 @@ class Agent:
         else:
             _logger.debug("step starting (trigger: %s)", _describe_entry(representative))
         for triggered in batch:
-            self._fire_hook(self._on_trigger, triggered)
+            self.on_trigger.emit(triggered)
         self._append_observation()
         messages = self._render_messages()
-        self._fire_hook(self._on_prompt, messages)
+        self.on_prompt.emit(messages)
         response = await self._bound_model.ainvoke(messages)
 
         text = response.text
@@ -476,7 +504,7 @@ class Agent:
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
 
     def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
-        self._fire_hook(self._on_command, name, args)
+        self.on_command.emit(CommandIssued(name, args))
         _logger.debug("dispatching command %s(%s) call_id=%s", name, _format_args(args), call_id)
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         self._command_keys.add(key)
@@ -499,7 +527,13 @@ class Agent:
             result = await command.ainvoke(args)
         except asyncio.CancelledError:
             _logger.debug("command %s [call_id=%s] cancelled", name, call_id)
-            self._world.update(key, CommandExecution(name=name, args=args, state="cancelled"))
+            try:
+                self._world.update(key, CommandExecution(name=name, args=args, state="cancelled"))
+            except RuntimeError:
+                # World already stopped — this cancel is part of Wica teardown (agent.stop() cancels
+                # in-flight commands just before world.stop()). The terminal write is moot at
+                # shutdown; swallow it so the task still unwinds cleanly. See specs/wica.md.
+                pass
             raise
         except Exception as exc:
             _logger.warning("command %s [call_id=%s] failed: %s", name, call_id, exc)

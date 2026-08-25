@@ -14,14 +14,15 @@ The name breaks down as:
 | Spec | Description | Status |
 |---|---|---|
 | [project.md](project.md) | Project structure and tooling: Python version, packaging with uv, layout conventions | Implemented |
-| [testing.md](testing.md) | Testing strategy: two-tier `tests/`/`tests-e2e/` split, functional-test philosophy, `reset_world` isolation, provider-parametrized live tier | Implemented |
+| [testing.md](testing.md) | Testing strategy: two-tier `tests/`/`tests-e2e/` split, functional-test philosophy, per-test `World` isolation, provider-parametrized live tier | Implemented |
 | [config.md](config.md) | Framework config loaded from JSON: provider/model/api key/system prompt, plain-dataclass `from_json`, strict validation, `api_key`/`api_key_env` | Implemented |
 | [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Implemented |
-| [events.md](events.md) | Generic, project-agnostic `Event[T]` pub/sub primitive: synchronous subscribe/unsubscribe/emit, a standalone dependency leaf | Implemented |
-| [world.md](world.md) | World state registry: typed entries, register/unregister/update API, rendering to LLM-facing `Content` | Implemented |
+| [events.md](events.md) | Generic, project-agnostic `Event[T]` pub/sub primitive: synchronous subscribe/unsubscribe/emit with subscriber isolation, a standalone dependency leaf | Implemented |
+| [world.md](world.md) | World state registry: typed entries, register/unregister/update API, `start`/`stop`/`is_running` lifecycle, shared-loop sync/async callback dispatch, rendering to LLM-facing `Content` | Implemented |
 | [inputs.md](inputs.md) | Inputs: external multimodal data entering the World, modeled as externally-fed World entries (register + `update`, `triggers_llm_call`) — a role/pattern, not new machinery | Implemented |
 | [commands.md](commands.md) | Commands: WICA's unit of agent action on the World, backed by LangChain tools; execution-as-World-entry lifecycle, generic call description | Implemented |
-| [agent.md](agent.md) | Agent reasoning loop: LangChain-backed inference, snapshot history, fresh/archival rendering, async cancellable Commands, output sink | Implemented |
+| [agent.md](agent.md) | Agent reasoning loop: LangChain-backed inference from `AgentConfig`, snapshot history, fresh/archival rendering, async cancellable Commands, output sink, instrumentation `Event`s (`on_trigger`/`on_prompt`/`on_command`) | Implemented |
+| [wica.md](wica.md) | The `Wica` facade — single entry point owning the World+Agent pair and their shared loop, `init`/`start`/`stop` lifecycle, `register_command`, and four surfaced `Event`s (`on_world_trigger`/`on_agent_trigger`/`on_agent_prompt`/`on_agent_command`) | Implemented |
 | [conversation-demo.md](conversation-demo.md) | Conversation demo product: browser UI to talk to a simulated social robot, with live World state and prompt views; simulated sensor inputs and robot-action Commands | Implemented |
 | [fake-provider.md](fake-provider.md) | Deterministic `provider: "fake"` chat model — a scripted, network-free, key-less double selected via config, for always-run scripted whole-flow tests in the `tests-e2e/` full-loop tier | Implemented |
 

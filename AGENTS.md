@@ -23,9 +23,10 @@ Where things live. This is a coarse, module-level map — for the full file inve
 |---|---|---|
 | [content.py](src/wica/content.py) | Provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`), shared everywhere | [content.md](specs/content.md) |
 | [events.py](src/wica/events.py) | Generic, project-agnostic `Event[T]` pub/sub primitive (subscribe/unsubscribe/emit); a standalone leaf with zero project imports, re-exported as public API | [events.md](specs/events.md) |
-| [world.py](src/wica/world.py) | The World state registry: typed entries, register/update/get API, rendering to `Content`, `get_world()` singleton | [world.md](specs/world.md) |
+| [world.py](src/wica/world.py) | The World state registry: typed entries, register/update/get API, `start`/`stop`/`is_running` lifecycle, sync/async listener + `on_trigger` Event dispatch on the shared loop, rendering to `Content` (constructed per `Wica`, no singleton) | [world.md](specs/world.md), [inputs.md](specs/inputs.md) |
 | [config.py](src/wica/config.py) | Framework config: `AgentConfig`/`WicaConfig` dataclasses, strict JSON loading (`from_dict`/`from_json`), `system_prompt_file`, `api_key`/`api_key_env` resolution | [config.md](specs/config.md) |
-| [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
+| [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: built from `AgentConfig` on the injected loop, LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink, `on_trigger`/`on_prompt`/`on_command` Events | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
+| [wica.py](src/wica/wica.py) | The `Wica` facade — single entry point owning the shared loop + a `World`+`Agent` pair, `init`/`start`/`stop` lifecycle, `register_command`, and four surfaced instrumentation `Event`s | [wica.md](specs/wica.md) |
 | [fake_model.py](src/wica/fake_model.py) | Deterministic, network-free `FakeChatModel` for tests: a scripted `provider: "fake"` model driving the loop over canned responses; test tooling, not re-exported into the runtime `wica` namespace | [fake-provider.md](specs/fake-provider.md) |
 | [__init__.py](src/wica/__init__.py) | Public API surface — re-exports the names above | — |
 

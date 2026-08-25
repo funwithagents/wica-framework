@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import threading
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from wica.content import Content, TextPart
+from wica.events import Event
 
 _logger = logging.getLogger(__name__)
+
+# A World listener may be a plain sync function or an async coroutine function; the World
+# detects which and dispatches accordingly on the shared loop (see World.add_listener).
+Listener = Callable[["WorldEntry"], None] | Callable[["WorldEntry"], Awaitable[None]]
 
 
 def _now() -> datetime:
@@ -51,9 +58,9 @@ class WorldEntryVersion:
 class WorldEntry:
     key: str
     type: type
-    # Copied from WorldEntryConfig at register() (like `type`) so the snapshot handed to the
-    # trigger handler is self-describing: the Agent reads this to decide whether an update skips
-    # its coalescing window. The World only carries the bit — it never acts on it. See
+    # Copied from WorldEntryConfig at register() (like `type`) so the snapshot handed to an
+    # on_trigger subscriber is self-describing: the Agent reads this to decide whether an update
+    # skips its coalescing window. The World only carries the bit — it never acts on it. See
     # specs/world.md and specs/agent.md ("Trigger coalescing").
     bypass_coalescing: bool
     current: WorldEntryVersion
@@ -61,15 +68,49 @@ class WorldEntry:
 
 
 class World:
-    def __init__(self) -> None:
+    """The World state registry.
+
+    Constructed with the asyncio event loop it dispatches reactive callbacks on (``World(loop)``)
+    — the *same* loop the Agent runs on, owned and run by the ``Wica`` facade. The World does not
+    own a thread pool of its own; it schedules listeners and the ``on_trigger`` Event onto that
+    shared loop. ``update()`` remains callable from any thread — it reaches the loop via
+    ``call_soon_threadsafe``. See specs/world.md ("The shared event loop", "Lifecycle").
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
         self._configs: dict[str, WorldEntryConfig] = {}
         self._entries: dict[str, WorldEntry] = {}
         self._id_counters: dict[str, int] = {}
-        self._listeners: dict[str, list[Callable[[WorldEntry], None]]] = {}
+        self._listeners: dict[str, list[Listener]] = {}
         self._timers: dict[str, threading.Timer] = {}
-        self._trigger_handler: Callable[[WorldEntry], None] | None = None
         self._lock = threading.RLock()
-        self._executor = ThreadPoolExecutor()
+        self._running = False
+        # The World's single trigger signal, carrying the entry that qualified to wake the agent.
+        # The Agent subscribes to it (via an async-scheduling shim); other observers may subscribe
+        # alongside. Emitted on the loop thread. See specs/world.md ("The trigger — the on_trigger
+        # Event") and specs/events.md.
+        self.on_trigger: Event[WorldEntry] = Event()
+
+    # --- Lifecycle -----------------------------------------------------------
+    #
+    # start()/stop() gate the *reactive dispatch*, not the data model: only update()/_update are
+    # guarded (they dispatch onto the loop). register/get/render_* stay unguarded so setup-before-
+    # start and reads-after-stop keep working. The loop itself is owned by Wica, not the World, so
+    # these are light — stop() just cancels TTL timers. See specs/world.md ("Lifecycle").
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        self._running = True
+        _logger.debug("world started")
+
+    def stop(self) -> None:
+        self._cancel_all_timers()
+        self._running = False
+        _logger.debug("world stopped")
 
     def register[T](
         self,
@@ -149,11 +190,15 @@ class World:
     def _update(
         self, key: str, value: Any, *, ttl_reset: bool, expected_id: int | None = None
     ) -> None:
-        listeners: list[Callable[[WorldEntry], None]] = []
-        trigger_handler: Callable[[WorldEntry], None] | None = None
+        listeners: list[Listener] = []
+        should_trigger = False
         new_entry: WorldEntry
 
         with self._lock:
+            # The reactive path is the sole guarded surface: it dispatches onto the loop, so it must
+            # fail fast rather than touch a torn-down World. register/get/render_* stay unguarded.
+            if not self._running:
+                raise RuntimeError("World is not running")
             if key not in self._configs:
                 raise KeyError(key)
             old_entry = self._entries[key]
@@ -194,17 +239,11 @@ class World:
                 timer.start()
 
             listeners = list(self._listeners.get(key, ()))
-            has_handler = self._trigger_handler is not None
             triggers_configured = config.triggers_llm_call and not ttl_reset
-            if (
-                triggers_configured
-                and has_handler
-                and (
-                    config.trigger_condition_fn is None
-                    or config.trigger_condition_fn(old_entry.current.value, value)
-                )
-            ):
-                trigger_handler = self._trigger_handler
+            should_trigger = triggers_configured and (
+                config.trigger_condition_fn is None
+                or config.trigger_condition_fn(old_entry.current.value, value)
+            )
 
         new_id = new_entry.current.id
         _logger.debug(
@@ -216,17 +255,48 @@ class World:
         )
         if listeners:
             _logger.debug("dispatching %d listener(s) for %r (id=%d)", len(listeners), key, new_id)
-        if trigger_handler is not None:
+        if should_trigger:
             _logger.debug("update to %r (id=%d) triggers an LLM call", key, new_id)
-        elif triggers_configured and has_handler:
+        elif triggers_configured:
             _logger.debug(
                 "update to %r (id=%d) did not trigger an LLM call (condition unmet)", key, new_id
             )
 
+        # Both reactive outputs are fire-and-forget onto the shared loop, so a slow callback never
+        # blocks update()'s (possibly cross-thread) caller. Listeners run sync-on-the-pool or
+        # async-on-the-loop and are individually guarded; the trigger emits on_trigger on the loop
+        # thread so a subscriber may safely create_task. See specs/world.md ("The shared event loop").
         for listener in listeners:
-            self._executor.submit(listener, new_entry)
-        if trigger_handler is not None:
-            self._executor.submit(trigger_handler, new_entry)
+            self._loop.call_soon_threadsafe(self._dispatch, listener, new_entry)
+        if should_trigger:
+            self._loop.call_soon_threadsafe(self.on_trigger.emit, new_entry)
+
+    def _dispatch(self, callback: Listener, entry: WorldEntry) -> None:
+        """Schedule one listener on the loop (runs on the loop thread, via call_soon_threadsafe).
+
+        An async listener becomes a loop task; a sync listener is offloaded to the loop's default
+        thread-pool executor so a blocking callback never stalls the loop. Each is individually
+        guarded so a raising listener is caught-and-logged, isolated from siblings and the loop."""
+        if inspect.iscoroutinefunction(callback):
+            self._loop.create_task(self._run_guarded_async(callback, entry))
+        else:
+            fut = self._loop.run_in_executor(None, callback, entry)  # type: ignore[arg-type]
+            fut.add_done_callback(self._log_if_failed)
+
+    async def _run_guarded_async(
+        self, callback: Callable[[WorldEntry], Awaitable[None]], entry: WorldEntry
+    ) -> None:
+        try:
+            await callback(entry)
+        except Exception:
+            _logger.exception("world listener raised; ignoring")
+
+    def _log_if_failed(self, fut: Future[Any] | asyncio.Future[Any]) -> None:
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            _logger.error("world listener raised; ignoring", exc_info=exc)
 
     def _ttl_expire(self, key: str, expected_id: int) -> None:
         _logger.debug("TTL fired for %r (expected id=%d)", key, expected_id)
@@ -234,24 +304,23 @@ class World:
             self._update(key, None, ttl_reset=True, expected_id=expected_id)
         except KeyError:
             pass
+        except RuntimeError:
+            # World stopped between the timer firing and this reset acquiring the lock — the timer
+            # was about to be cancelled anyway, so the stale reset is a harmless no-op.
+            pass
 
-    def add_listener(self, key: str, callback: Callable[[WorldEntry], None]) -> None:
+    def add_listener(self, key: str, callback: Listener) -> None:
         with self._lock:
             if key not in self._configs:
                 raise KeyError(key)
             self._listeners.setdefault(key, []).append(callback)
         _logger.debug("added listener for %r", key)
 
-    def remove_listener(self, key: str, callback: Callable[[WorldEntry], None]) -> None:
+    def remove_listener(self, key: str, callback: Listener) -> None:
         with self._lock:
             listeners = self._listeners.get(key)
             if listeners is not None and callback in listeners:
                 listeners.remove(callback)
-
-    def set_trigger_handler(self, handler: Callable[[WorldEntry], None] | None) -> None:
-        with self._lock:
-            self._trigger_handler = handler
-        _logger.debug("trigger handler %s", "set" if handler is not None else "cleared")
 
     def get_prompt_entries(self) -> list[WorldEntry]:
         with self._lock:
@@ -305,21 +374,3 @@ class World:
             for timer in self._timers.values():
                 timer.cancel()
             self._timers.clear()
-
-
-_world: World | None = None
-
-
-def get_world() -> World:
-    global _world
-    if _world is None:
-        _world = World()
-    return _world
-
-
-def reset_world() -> None:
-    global _world
-    if _world is not None:
-        _world._cancel_all_timers()
-        _world._executor.shutdown(wait=True)
-    _world = None

@@ -35,7 +35,7 @@ A generic signal carrying a single value of type `T`:
 - **Synchronous, inline dispatch.** `emit` calls each handler directly, in the order they subscribed, and returns once they've all run. There is no queue, no scheduling, no thread of its own — the *caller's* thread runs the handlers. Crossing threads, if a consumer needs it, is the consumer's concern, not this primitive's.
 - **Snapshot iteration.** `emit` iterates a copy of the handler list, so a handler may `subscribe`/`unsubscribe` (itself or another) *during* dispatch without corrupting the in-progress round: the set that fires this round is fixed when `emit` begins; changes take effect next round.
 - **Stateless beyond its handlers.** An `Event` holds only its handler list — it carries a value to subscribers and stores nothing. It does not replay the last value to a late subscriber; a subscriber sees only `emit`s after it subscribed.
-- **No error isolation (deliberate, for now).** A handler that raises propagates out of `emit` (and later handlers in that round don't run). Handlers are expected to be small and non-throwing; swallowing/aggregating handler errors is an [open question](#open-questions), added only if a real consumer needs it.
+- **Subscriber isolation.** A handler that raises is **caught and logged** (via a module logger, `logging.getLogger(__name__)`) and dispatch **continues** to the remaining handlers — one bad subscriber can neither abort the `emit` nor starve its siblings. This is what makes `Event` safe to use as a multi-subscriber fan-out point: the World's trigger and the Agent's instrumentation are `Event`s (surfaced by [wica.md](wica.md)) where several independent consumers subscribe to the same signal, and a bug in one must not silence the rest (matching the Agent's "instrumentation never breaks the loop" guarantee). `logging` is the only dependency this needs — `events.py` stays a pure standard-library leaf with zero project imports, so it's copyable into another project unchanged. A consumer that wants to *know* a handler failed reads the log (aggregating/collecting handler errors is a possible future addition, not built).
 
 ### Why its own module
 
@@ -43,5 +43,5 @@ Keeping `Event[T]` in a standalone `events.py` with **zero project imports** is 
 
 ## Open questions
 
-- **Error isolation.** Whether `emit` should isolate a throwing handler (catch-and-continue, optionally collecting errors) rather than propagating. Deferred until a consumer actually needs one bad handler not to break the others.
+- **Error aggregation.** `emit` isolates a throwing handler (catch-and-log-and-continue — see "Semantics"). What it does **not** do is *collect* handler errors and hand them back to the `emit` caller (e.g. an aggregated exception once all handlers have run). Deferred until a consumer needs the failures programmatically rather than just logged.
 - **Async handlers.** Only sync `Callable[[T], None]` handlers today. If a consumer ever needs to `await` in a handler, an async variant (or scheduling onto a loop) would be a separate, additive design.

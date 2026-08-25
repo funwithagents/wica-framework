@@ -45,6 +45,24 @@ def test_emit_with_no_subscribers_is_a_noop():
     event.emit(1)  # must not raise
 
 
+def test_raising_handler_is_isolated_and_siblings_still_fire():
+    # A subscriber that raises is caught-and-logged; the next subscriber still runs,
+    # and emit does not propagate the exception.
+    event: Event[int] = Event()
+    seen: list[str] = []
+
+    def boom(value: int) -> None:
+        seen.append(f"boom:{value}")
+        raise RuntimeError("subscriber failure")
+
+    event.subscribe(boom)
+    event.subscribe(lambda value: seen.append(f"other:{value}"))
+
+    event.emit(1)  # must not raise
+
+    assert seen == ["boom:1", "other:1"]
+
+
 def test_handler_may_unsubscribe_itself_during_emit():
     # emit iterates a snapshot, so a handler that removes itself mid-dispatch does
     # not perturb the in-progress round: both handlers still fire this round, and

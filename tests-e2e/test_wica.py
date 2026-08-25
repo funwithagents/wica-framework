@@ -10,9 +10,9 @@ from typing import Any
 import pytest
 
 from wica.content import Content, TextPart
-from wica.world import World, WorldEntry, get_world
+from wica.world import World, WorldEntry
 
-from support import PROVIDER_CONFIGS, real_agent
+from support import PROVIDER_CONFIGS, real_wica
 
 WAIT_TIMEOUT = 15.0
 
@@ -52,41 +52,41 @@ class RecordingSink:
 
 @pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
 def test_plain_text_round_trip(config_path: Path):
-    world = get_world()
-    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-
+    """A live provider, driven through the real entrypoint: Wica.init → register an Input → start →
+    an update wakes the Agent, which reasons and speaks to the output sink."""
     sink = RecordingSink()
-    agent = real_agent(config_path, world=world, output_sink=sink)
-    agent.start()
+    wica = real_wica(config_path, output_sink=sink)
+    wica.world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.start()
     try:
-        world.update("prompt", "Say hello in one short sentence.")
+        wica.world.update("prompt", "Say hello in one short sentence.")
         assert sink.event.wait(timeout=WAIT_TIMEOUT)
         assert sink.texts
         assert sink.texts[0].strip()
     finally:
-        agent.stop()
+        wica.stop()
 
 
 @pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
 def test_real_tool_calling_round_trip(config_path: Path):
-    world = get_world()
-    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
-
+    """A live provider issuing a real tool call through Wica: the model calls the registered Command,
+    whose execution is tracked as a World entry that goes running → complete."""
     sink = RecordingSink()
-    agent = real_agent(config_path, world=world, output_sink=sink)
+    wica = real_wica(config_path, output_sink=sink)
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""
         await asyncio.sleep(0.1)  # gives the polling loop below a chance to see "running"
         return a + b
 
-    agent.register_command(add)
-    agent.start()
+    wica.register_command(add)
+    wica.world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.start()
     try:
-        world.update("prompt", "What is 2 + 2? Use the add tool.")
+        wica.world.update("prompt", "What is 2 + 2? Use the add tool.")
 
-        wait_until(lambda: find_command_entry(world) is not None)
-        running_entry = find_command_entry(world)
+        wait_until(lambda: find_command_entry(wica.world) is not None)
+        running_entry = find_command_entry(wica.world)
         assert running_entry is not None
         assert running_entry.current.value.state == "running"
 
@@ -103,7 +103,7 @@ def test_real_tool_calling_round_trip(config_path: Path):
                 terminal.append(entry)
                 done.set()
 
-        world.add_listener(running_entry.key, on_update)
+        wica.world.add_listener(running_entry.key, on_update)
         assert done.wait(timeout=WAIT_TIMEOUT)
         assert terminal[0].current.value.state == "complete"
         assert "4" in (terminal[0].current.value.result or "")
@@ -113,4 +113,4 @@ def test_real_tool_calling_round_trip(config_path: Path):
         # non-determinism unrelated to the tool-calling round trip under test. The sink/output
         # path itself is already covered by test_plain_text_round_trip.
     finally:
-        agent.stop()
+        wica.stop()
