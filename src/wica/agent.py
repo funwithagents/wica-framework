@@ -5,7 +5,7 @@ import base64
 import copy
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -29,8 +29,8 @@ from wica.world import World, WorldEntry
 
 _logger = logging.getLogger(__name__)
 
-# Max seconds stop() waits for in-flight command tasks to unwind after cancellation. Genuinely
-# async commands settle instantly; the bound guards against an uncooperative one (see
+# Max seconds stop() waits for Agent-owned async tasks to unwind after cancellation. Genuinely
+# async work settles instantly; the bound guards against an uncooperative task (see
 # specs/commands.md, "Cancellation reaches the task, not always the work").
 _STOP_DRAIN_TIMEOUT = 5.0
 
@@ -291,9 +291,15 @@ class Agent:
         self._window_batch: list[WorldEntry] = []
         self._window_timer: asyncio.TimerHandle | None = None
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        # Every task the Agent creates, including trigger shims, reasoning batches, and Commands.
+        # stop() cancels this complete set. An off-loop caller also drains cancellation before an
+        # owned loop thread stops; a same-loop caller cannot block and lets cancellation unwind on
+        # subsequent loop turns. _running_tasks remains the call-id lookup used by cancel_command.
+        self._owned_tasks: set[asyncio.Task[Any]] = set()
         self._command_keys: set[str] = set()
         # The sync shim subscribed to world.on_trigger while running (set in start()).
         self._trigger_sub: Callable[[WorldEntry], None] | None = None
+        self._started = False
 
     def register_command(
         self,
@@ -317,6 +323,8 @@ class Agent:
         _logger.debug("registered command %r", wrapped.name)
 
     def start(self) -> None:
+        if self._started:
+            return
         # WICA-native control Command: let the model abort a Command it previously issued that is
         # still running. Auto-registered here (no app wiring) since it needs Agent internals;
         # registering at start (not construction) keeps __init__ inert — it never touches the model.
@@ -332,30 +340,29 @@ class Agent:
         # is safe — no run_coroutine_threadsafe bridge. Wica owns and starts the loop; the Agent
         # only attaches to it here.
         def schedule_trigger(entry: WorldEntry) -> None:
-            self._loop.create_task(self._handle_trigger(entry))
+            self._track_task(self._handle_trigger(entry))
 
         self._trigger_sub = schedule_trigger
         self._world.on_trigger.subscribe(schedule_trigger)
+        self._started = True
 
     def stop(self) -> None:
         _logger.info("agent stopping")
+        self._started = False
         if self._trigger_sub is not None:
             self._world.on_trigger.unsubscribe(self._trigger_sub)
             self._trigger_sub = None
-        # Cancel the pending coalescing window and every in-flight command task, and — while the
-        # World is still running (Wica stops it only after this returns) — wait for the cancellations
-        # to unwind. Draining here means each cancelled command's terminal write lands before the
-        # World stops, and no task is left pending when the loop later stops. The drain runs on the
-        # loop thread; the Agent never tears the loop down (Wica owns it).
+        # Cancel the pending coalescing window and every Agent-owned task. An off-loop caller can
+        # wait for cancellation to unwind while the World is still running; a caller already on the
+        # shared loop cannot block it and returns after requesting cancellation. The Agent never
+        # tears the loop down (Wica owns it).
         try:
             running_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
         if running_loop is self._loop:
             # Called from the loop thread itself — can't block on it; cancel without the drain.
-            self._cancel_window()
-            for task in list(self._running_tasks.values()):
-                task.cancel()
+            self._cancel_all_tasks_on_loop()
             return
         if not self._loop.is_running():
             # Loop never started (or already stopped): nothing was scheduled, so nothing to drain.
@@ -366,17 +373,31 @@ class Agent:
         except RuntimeError:
             pass  # loop not running / already closed — nothing to drain
         except FuturesTimeoutError:
-            _logger.warning("agent stop: timed out draining in-flight command tasks")
+            _logger.warning("agent stop: timed out draining Agent-owned tasks")
 
     async def _stop_on_loop(self) -> None:
-        """Cancel the pending window + all in-flight command tasks and await them settling. Runs on
-        the loop thread (scheduled by stop())."""
-        self._cancel_window()
-        tasks = list(self._running_tasks.values())
-        for task in tasks:
-            task.cancel()
+        """Cancel the pending window and all Agent-owned tasks, then await them settling."""
+        tasks = self._cancel_all_tasks_on_loop()
+        current = asyncio.current_task()
+        tasks = [task for task in tasks if task is not current]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._busy = False
+
+    def _cancel_all_tasks_on_loop(self) -> list[asyncio.Task[Any]]:
+        """Cancel all work belonging to the current running cycle (loop thread only)."""
+        self._cancel_window()
+        tasks = list(self._owned_tasks)
+        for task in tasks:
+            task.cancel()
+        return tasks
+
+    def _track_task[T](self, coroutine: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
+        """Create an Agent-owned loop task and forget it only after it has settled."""
+        task = self._loop.create_task(coroutine)
+        self._owned_tasks.add(task)
+        task.add_done_callback(self._owned_tasks.discard)
+        return task
 
     def _cancel_window(self) -> None:
         """Cancel a pending coalescing-window timer and drop its batch (loop thread only)."""
@@ -460,7 +481,7 @@ class Agent:
         # Set _busy before the step task runs so triggers arriving in the gap are dropped, not
         # folded into a second concurrent step (single-in-flight).
         self._busy = True
-        self._loop.create_task(self._run_batch(batch))
+        self._track_task(self._run_batch(batch))
 
     async def _run_batch(self, batch: list[WorldEntry]) -> None:
         try:
@@ -523,7 +544,7 @@ class Agent:
             trigger_condition_fn=lambda old, new: new is not None and new.is_terminal(),
         )
         self._world.update(key, CommandExecution(name=name, args=args, state="running"))
-        task = self._loop.create_task(self._run_command(key, call_id, name, args))
+        task = self._track_task(self._run_command(key, call_id, name, args))
         self._running_tasks[key] = task
 
     async def _run_command(self, key: str, call_id: str, name: str, args: dict[str, Any]) -> None:

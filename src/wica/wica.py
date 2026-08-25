@@ -21,8 +21,9 @@ class Wica:
 
     A ``Wica`` owns exactly one ``World`` and one ``Agent`` — constructed together from a
     ``WicaConfig`` and wired to each other — plus the single asyncio event loop they both run on.
-    It drives their shared ``start()``/``stop()`` lifecycle and surfaces the World's and Agent's
-    instrumentation ``Event``s as one multi-subscriber surface. See specs/wica.md.
+    It drives their restartable ``start()``/``stop()`` lifecycle, owns terminal ``close()``, and
+    surfaces the World's and Agent's instrumentation ``Event``s as one multi-subscriber surface.
+    See specs/wica.md.
 
     Build one with :meth:`init` (the sole constructor); ``__init__`` is internal wiring.
     """
@@ -37,11 +38,12 @@ class Wica:
     ) -> None:
         self._loop = loop
         self._owns_loop = owns_loop
-        # Only created when Wica owns the loop; None when an existing loop was injected.
-        self._loop_thread: threading.Thread | None = (
-            threading.Thread(target=loop.run_forever, daemon=True) if owns_loop else None
-        )
-        self._stopped = False
+        # A Thread is one-shot, so an owned Wica creates a fresh one for every running cycle while
+        # retaining this one shared loop. Injected-loop Wicas never create a thread.
+        self._loop_thread: threading.Thread | None = None
+        self._running = False
+        self._closed = False
+        self._lifecycle_lock = threading.RLock()
         # Borrowed references, valid only for the life of this Wica (see specs/wica.md).
         self.world = world
         self.agent = agent
@@ -79,44 +81,96 @@ class Wica:
         owns_loop = loop is None
         if loop is None:
             loop = asyncio.new_event_loop()
-        world = World(loop)
-        agent = Agent(
-            config.agent,
-            world=world,
-            loop=loop,
-            output_sink=output_sink,
-            coalesce_window=coalesce_window,
-        )
-        apply_logging(config.logging)
+        try:
+            world = World(loop)
+            agent = Agent(
+                config.agent,
+                world=world,
+                loop=loop,
+                output_sink=output_sink,
+                coalesce_window=coalesce_window,
+            )
+            apply_logging(config.logging)
+        except BaseException:
+            # Construction failed before a Wica could be returned to own this resource.
+            if owns_loop:
+                loop.close()
+            raise
         return cls(loop=loop, owns_loop=owns_loop, world=world, agent=agent)
 
+    @property
+    def is_running(self) -> bool:
+        """Whether this Wica is between a successful ``start()`` and ``stop()``."""
+        with self._lifecycle_lock:
+            return self._running
+
     def start(self) -> None:
-        """Start the whole system: the loop thread (if owned), then the World, then the Agent.
+        """Start or restart the system: owned loop thread, then World, then Agent.
 
         Order matters — the loop must be running before the World dispatches or the Agent attaches
-        its trigger handler. Called once per instance; the instance is not designed to be restarted
-        (see specs/wica.md, "Reset is recreation")."""
-        if self._owns_loop and self._loop_thread is not None and not self._loop_thread.is_alive():
-            self._loop_thread.start()
-        self.world.start()
-        self.agent.start()
+        its trigger handler. Idempotent while already running; raises after terminal ``close()``.
+        See specs/wica.md."""
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("Wica is closed")
+            if self._running:
+                return
+            if self._loop.is_closed():
+                raise RuntimeError("Wica event loop is closed")
+
+            if self._owns_loop:
+                self._loop_thread = threading.Thread(
+                    target=self._loop.run_forever,
+                    name="wica-event-loop",
+                    daemon=True,
+                )
+                self._loop_thread.start()
+            try:
+                self.world.start()
+                self.agent.start()
+            except BaseException:
+                self.agent.stop()
+                self.world.stop()
+                self._stop_owned_loop_thread()
+                raise
+            self._running = True
 
     def stop(self) -> None:
-        """Tear the system down: the Agent, then the World, then (if owned) the loop thread.
+        """Pause the system: the Agent, then World, then the current owned loop thread.
 
         Teardown is the reverse of startup: the Agent must stop *while the World is still running*,
         because cancelling in-flight Commands writes their terminal state back into the World.
-        Stopping the World first would make those final updates raise. Idempotent — a second call is
-        a no-op (the loop is already closed). See specs/wica.md."""
-        if self._stopped:
+        Stopping the World first would make those final updates raise. The loop stays open for a
+        later ``start()``. Idempotent while already stopped. See specs/wica.md."""
+        with self._lifecycle_lock:
+            if not self._running:
+                return
+            self.agent.stop()
+            self.world.stop()
+            self._stop_owned_loop_thread()
+            self._running = False
+
+    def close(self) -> None:
+        """Permanently stop this Wica and close its owned loop.
+
+        An injected loop remains caller-owned and is never closed. Idempotent; ``start()`` after
+        this terminal operation raises ``RuntimeError``.
+        """
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self.stop()
+            if self._owns_loop and not self._loop.is_closed():
+                self._loop.close()
+            self._closed = True
+
+    def _stop_owned_loop_thread(self) -> None:
+        if not self._owns_loop or self._loop_thread is None:
             return
-        self._stopped = True
-        self.agent.stop()
-        self.world.stop()
-        if self._owns_loop and self._loop_thread is not None and self._loop_thread.is_alive():
+        if self._loop_thread.is_alive():
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._loop_thread.join()
-            self._loop.close()
+        self._loop_thread = None
 
     def register_command(
         self,

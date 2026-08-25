@@ -34,7 +34,10 @@ def identity_serialize(value: Any, previous: Any) -> Content:
 
 
 def fake_config(
-    script: list[dict[str, Any]] | None = None, *, logging_level: str = "WARNING"
+    script: list[dict[str, Any]] | None = None,
+    *,
+    logging_level: str = "WARNING",
+    delay_s: float = 0,
 ) -> WicaConfig:
     """A WicaConfig backed by the scripted provider: "fake" model (network-free, key-less)."""
     return WicaConfig(
@@ -42,7 +45,7 @@ def fake_config(
             provider="fake",
             model="test",
             system_prompt="You are terse.",
-            model_kwargs={"script": script or [{"text": "ok"}], "delay_s": 0},
+            model_kwargs={"script": script or [{"text": "ok"}], "delay_s": delay_s},
         ),
         logging=logging_level,
     )
@@ -69,10 +72,7 @@ def wica_factory() -> Iterator[Callable[..., Wica]]:
 
     yield _make
     for w in created:
-        w.stop()
-        # stop() only closes a loop it actually started; close an owned-but-never-started one too.
-        if w._owns_loop and not w._loop.is_closed():
-            w._loop.close()
+        w.close()
 
 
 def test_init_wires_world_and_agent_sharing_one_loop(wica_factory):
@@ -200,7 +200,7 @@ def test_stop_with_an_in_flight_command_tears_down_cleanly(wica_factory):
     # landed before the World stopped — the command reads cancelled, not left dangling.
     assert wica.world.get_entry(key).current.value.state == "cancelled"
     # After stop the loop thread is gone (owned loop) and the World is torn down.
-    assert wica._loop_thread is not None and not wica._loop_thread.is_alive()
+    assert wica._loop_thread is None
     assert wica.world.is_running is False
 
 
@@ -212,3 +212,121 @@ def test_update_after_stop_raises(wica_factory):
 
     with pytest.raises(RuntimeError, match="World is not running"):
         wica.world.update("speech", "too late")
+
+
+def test_owned_wica_can_stop_and_start_again(wica_factory):
+    sink = RecordingSink()
+    wica = wica_factory(
+        fake_config([{"text": "first cycle"}, {"text": "second cycle"}]),
+        output_sink=sink,
+        coalesce_window=0,
+    )
+    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+
+    wica.start()
+    first_thread = wica._loop_thread
+    wica.world.update("speech", "one")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert sink.texts == ["first cycle"]
+
+    wica.stop()
+    assert wica.is_running is False
+    assert wica.world.is_running is False
+    assert not wica._loop.is_closed()
+    assert wica._loop_thread is None
+
+    sink.event.clear()
+    wica.start()
+    second_thread = wica._loop_thread
+    assert second_thread is not None and second_thread is not first_thread
+    wica.world.update("speech", "two")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert sink.texts == ["first cycle", "second cycle"]
+    assert wica.world.get("speech") == "two"
+
+
+def test_start_and_stop_are_idempotent(wica_factory):
+    wica = wica_factory(fake_config())
+    wica.start()
+    thread = wica._loop_thread
+
+    wica.start()
+    assert wica._loop_thread is thread
+
+    wica.stop()
+    wica.stop()
+    assert wica.is_running is False
+
+
+def test_close_is_terminal_and_closes_an_owned_loop(wica_factory):
+    wica = wica_factory(fake_config())
+    wica.start()
+
+    wica.close()
+    wica.close()
+
+    assert wica.is_running is False
+    assert wica._loop.is_closed()
+    with pytest.raises(RuntimeError, match="Wica is closed"):
+        wica.start()
+
+
+def test_close_before_start_closes_the_owned_loop(wica_factory):
+    wica = wica_factory(fake_config())
+
+    wica.close()
+
+    assert wica._loop.is_closed()
+
+
+def test_injected_loop_wica_can_restart_without_owning_the_loop():
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    sink = RecordingSink()
+    wica = Wica.init(
+        fake_config([{"text": "one"}, {"text": "two"}]),
+        output_sink=sink,
+        coalesce_window=0,
+        loop=loop,
+    )
+    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    try:
+        wica.start()
+        wica.world.update("speech", "first")
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        wica.stop()
+
+        sink.event.clear()
+        wica.start()
+        wica.world.update("speech", "second")
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+        assert sink.texts == ["one", "two"]
+        wica.close()
+        assert not loop.is_closed()
+    finally:
+        wica.close()
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=WAIT_TIMEOUT)
+        loop.close()
+
+
+def test_stop_cancels_reasoning_before_a_restart(wica_factory):
+    sink = RecordingSink()
+    wica = wica_factory(
+        fake_config([{"text": "must not escape the stopped cycle"}], delay_s=0.5),
+        output_sink=sink,
+        coalesce_window=0,
+    )
+    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.start()
+    wica.world.update("speech", "begin slow inference")
+    wait_until(lambda: len(wica.agent.model.calls) == 1)
+
+    wica.stop()
+    wica.start()
+    time.sleep(0.6)
+
+    assert sink.texts == []

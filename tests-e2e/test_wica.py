@@ -64,7 +64,7 @@ def test_plain_text_round_trip(config_path: Path):
         assert sink.texts
         assert sink.texts[0].strip()
     finally:
-        wica.stop()
+        wica.close()
 
 
 @pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
@@ -113,4 +113,4 @@ def test_real_tool_calling_round_trip(config_path: Path):
         # non-determinism unrelated to the tool-calling round trip under test. The sink/output
         # path itself is already covered by test_plain_text_round_trip.
     finally:
-        wica.stop()
+        wica.close()

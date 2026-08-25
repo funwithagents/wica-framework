@@ -152,7 +152,7 @@ def test_scripted_flow_through_wica_init():
         assert len(model.calls) >= 2
         assert any("4" in message_text(m) for m in model.calls[-1])
     finally:
-        wica.stop()
+        wica.close()
 
 
 def test_scripted_flow_direct_construction(loop: asyncio.AbstractEventLoop):

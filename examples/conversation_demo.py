@@ -430,7 +430,7 @@ def main() -> None:
         build_ui().launch()
     finally:
         if wica is not None:
-            wica.stop()
+            wica.close()
 
 
 if __name__ == "__main__":

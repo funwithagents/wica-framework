@@ -579,6 +579,28 @@ def test_stop_cancels_pending_ttl_timer(loop: asyncio.AbstractEventLoop):
     time.sleep(0.2)  # past the TTL — a live timer would have reset the value
     assert world.get("temp") == "hello"  # timer was cancelled, value untouched
 
+    world.start()
+    assert world.get("temp") is None  # restart reconciles the elapsed wall-clock deadline
+
+
+def test_restart_restores_remaining_ttl(loop: asyncio.AbstractEventLoop):
+    world = World(loop)
+    world.start()
+    world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=300))
+    world.update("temp", "hello")
+    time.sleep(0.05)
+    world.stop()
+    time.sleep(0.05)
+
+    world.start()
+    assert world.get("temp") == "hello"
+
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while time.monotonic() < deadline and world.get("temp") is not None:
+        time.sleep(0.01)
+    assert world.get("temp") is None
+    world.stop()
+
 
 # --- Rendering --------------------------------------------------------------
 

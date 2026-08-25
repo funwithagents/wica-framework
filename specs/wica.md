@@ -28,7 +28,8 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 | `Wica.init(config, *, output_sink=…, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, apply logging, return the `Wica`. The one construction path. |
 | `wica.world` | attribute (`World`) | The owned World — the home for **all** World-schema work (`register`/`update`/`get`/listeners). Not duplicated onto `Wica`. |
 | `wica.agent` | attribute (`Agent`) | The owned Agent. Directly reachable, but the common paths (command registration, lifecycle, instrumentation) are surfaced on `Wica` so a consumer rarely needs it. |
-| `wica.start()` / `wica.stop()` | methods | The shared lifecycle — start/stop the World and Agent together (see "Lifecycle"). |
+| `wica.start()` / `wica.stop()` | methods | The restartable shared lifecycle — start or pause the World and Agent together (see "Lifecycle"). |
+| `wica.close()` | method | Permanently stop the instance and close its owned event loop. Idempotent; a closed instance cannot be restarted. |
 | `wica.register_command(fn, *, name=…, description=…)` | method | Delegates to `agent.register_command` — the one convenience method that *is* mirrored onto `Wica`, since it's part of the everyday setup flow. |
 | `wica.on_world_trigger` | `Event[WorldEntry]` | The World's **raw** trigger — fires on every qualifying update, pre-coalescing (= `world.on_trigger`). |
 | `wica.on_agent_trigger` | `Event[WorldEntry]` | The Agent's **filtered** trigger — fires once per trigger a run-to-completion step actually observes (= `agent.on_trigger`). |
@@ -41,7 +42,7 @@ The **asymmetry is deliberate**: command registration is mirrored onto `Wica` be
 
 `Wica.init(config: WicaConfig, …)` is the sole constructor. It:
 
-1. Creates the single asyncio event **loop** the whole system runs on (or adopts one passed in — see "The event loop, and symmetric `start()`/`stop()`").
+1. Creates the single asyncio event **loop** the whole system runs on (or adopts one passed in — see "The event loop, restartable `start()`/`stop()`, and terminal `close()`").
 2. Builds a fresh `World(loop)` (no global — see [world.md](world.md)).
 3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, output_sink=…, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`.
 4. Calls `apply_logging(config.logging)` **once**, so the caller no longer does it by hand. Logging is set on the process-global `wica` logger tree, so it survives for the life of the process regardless of later object churn (see [config.md](config.md), "Flow into the Agent").
@@ -58,24 +59,25 @@ wica.register_command(dance)
 wica.start()
 ```
 
-### The event loop, and symmetric `start()`/`stop()`
+### The event loop, restartable `start()`/`stop()`, and terminal `close()`
 
-**`Wica` owns the one event loop and the daemon thread that runs it**, and injects that loop into both the `World` and the `Agent` (see [world.md](world.md), "The shared event loop"; [agent.md](agent.md), "The shared event loop"). This is the symmetry that makes the system easy to reason about: a **single background execution context with a single owner** — not a World-owned thread pool plus a separate Agent-owned loop bridged together. `World` and `Agent` are pure consumers of the injected loop; neither creates or tears down a thread of its own.
+**`Wica` owns the one event loop and, while running, the daemon thread that runs it**, and injects that loop into both the `World` and the `Agent` (see [world.md](world.md), "The shared event loop"; [agent.md](agent.md), "The shared event loop"). This is the symmetry that makes the system easy to reason about: a **single background execution context with a single owner** — not a World-owned thread pool plus a separate Agent-owned loop bridged together. `World` and `Agent` are pure consumers of the injected loop; neither creates or tears down a thread of its own.
 
 `World` and `Agent` share a symmetric `start()`/`stop()` lifecycle, and `Wica` drives both plus the loop thread:
 
-- **`wica.start()`** → start the loop thread (if `Wica` owns it), then `world.start()`, then `agent.start()`.
-- **`wica.stop()`** → `agent.stop()`, then `world.stop()`, then stop + join the loop thread (if `Wica` owns it).
+- **`wica.start()`** → create and start a fresh loop thread for this running cycle (if `Wica` owns the loop), then `world.start()`, then `agent.start()`. Calling it while already running is an idempotent no-op.
+- **`wica.stop()`** → `agent.stop()`, then `world.stop()`, then stop + join the current loop thread (if `Wica` owns it). The loop itself stays open so the same World and Agent can reuse it. Calling it while stopped is an idempotent no-op.
+- **`wica.close()`** → `stop()`, then close the owned loop. It is the terminal resource-release operation; it is idempotent, and a later `start()` raises `RuntimeError("Wica is closed")`. An injected loop remains caller-owned and is never closed.
 
-**Order matters and teardown is the reverse of startup.** The loop must be running before the World dispatches or the Agent attaches its trigger handler; and the Agent must stop *while the World is still running*, because `agent.stop()` cancels in-flight Commands and cancellation writes `CommandExecution(state="cancelled")` back into the World via `world.update` (see [agent.md](agent.md)). Stopping the World first would make those final updates raise. So it's loop→World→Agent to start, Agent→World→loop to stop.
+**Order matters and teardown is the reverse of startup.** The loop must be running before the World dispatches or the Agent attaches its trigger handler; and the Agent receives its cancellation request while the World is still running. When `stop()` is controlled from outside the shared loop (including the owned-loop default), Agent cancellation is drained before the World stops, so Command cancellation can write `CommandExecution(state="cancelled")` back through `world.update`. When `stop()` is invoked on the injected loop itself, it cannot synchronously drain that same loop: cancellation is requested before the World stops and unwinds on subsequent loop turns (see [agent.md](agent.md)). So the ordering remains loop→World→Agent to start, Agent→World→loop to stop, without promising that application work finishes normally.
 
-**Injected loop.** `Wica.init(config, …, loop=…)` accepts an existing loop for an app that already runs one; then `Wica` does not own the thread, and `start()`/`stop()` leave it alone (only attaching/detaching World and Agent). The batteries-included default — no `loop` passed — has `Wica` create the loop and run it in its own daemon thread.
+**Injected loop.** `Wica.init(config, …, loop=…)` accepts an existing loop for an app that already runs one; then `Wica` does not own the thread, and `start()`/`stop()`/`close()` leave the loop itself alone (only attaching/detaching World and Agent). The batteries-included default — no `loop` passed — has `Wica` create the loop and run it in a fresh daemon thread for each running cycle.
 
-**Lifecycle is once per instance, not a reusable pause/resume.** `wica.start()` is called once and `wica.stop()` tears the instance down; the instance is not designed to be restarted. The hard constraint is that `Wica`-owned loop thread: stopping it joins a daemon `threading.Thread`, which cannot be restarted. **To "reset" the whole system, discard the `Wica` and `init` a new one** (re-running the setup) — see "Reset is recreation". This keeps the model simple and matches the reset-by-recreation decision below.
+**Lifecycle is restartable.** `start()` → `stop()` → `start()` is supported on the same instance. A Python `threading.Thread` is one-shot, so an owned Wica creates a new thread object on every `start()`; the shared asyncio loop stays open and keeps the stable World/Agent references valid. Registrations, current World values, instrumentation subscriptions, Commands, and Agent history persist across the pause. `Agent.stop()` requests cancellation of all Agent-owned work; for an owned loop it also drains cancellation before stopping the current loop thread so pending tasks cannot be frozen into the next cycle. `World.stop()` cancels TTL timers; `World.start()` restores them against the retained values and their original update timestamps (an already-expired value resets on restart). Use `close()` only when no later restart is intended.
 
 ### `wica.world` / `wica.agent` are borrowed references
 
-`Wica` **owns** its World and Agent; the public `wica.world`/`wica.agent` attributes are **borrowed references, valid only for the life of the `Wica`**. A consumer uses them while the `Wica` is alive and discards them with it — the same contract as a file object obtained from a context manager. After `wica.stop()`, reactive mutation through `world.update()` raises `RuntimeError("World is not running")` (see [world.md](world.md), "Lifecycle"). Schema operations and reads remain deliberately unguarded for inspection, but the stopped objects should not be reused as a live system. The stated rule: *`wica.world` is borrowed from Wica; after `wica.stop()` inspect if needed, then get a fresh one from a new Wica.*
+`Wica` **owns** its World and Agent; the public `wica.world`/`wica.agent` attributes are **borrowed references, valid only for the life of the `Wica`**. A consumer uses them while the `Wica` is alive and discards them with it — the same contract as a file object obtained from a context manager. While stopped, reactive mutation through `world.update()` raises `RuntimeError("World is not running")` (see [world.md](world.md), "Lifecycle"). Schema operations and reads remain deliberately unguarded for inspection; `start()` makes the same borrowed World and Agent live again. After `wica.close()`, the references are inspection-only and the Wica cannot be restarted.
 
 Because the objects never change identity within one `Wica`'s life (there is no in-place reset that swaps them — see below), plain attributes are correct: a cached `wica.world` reference never goes stale *while the Wica is running*. Accessor methods would only earn their keep if the objects were swapped under the caller, which the recreation model avoids.
 
@@ -100,12 +102,12 @@ The World and the Agent each own their instrumentation as `Event`s (see [world.m
 
 **No `Wica`-level adapters or guards.** Because each signal is already an `Event`, `Wica` holds a reference and nothing more — no `emit` shims, no payload adapters. Subscriber isolation is provided by `Event.emit` itself (catch-log-continue — see [events.md](events.md)), uniformly for every `Event` in the system, so neither `Wica` nor the Agent needs a guard of its own. The prompt Event carrying `list[BaseMessage]` (a LangChain type) lives naturally on the Agent, the framework's LangChain I/O boundary, and does not leak into the `Event` primitive, which stays a pure project-agnostic leaf.
 
-### Reset is recreation, not a method
+### Reset is recreation, not restart
 
-There is **no `wica.reset()` and no `reset_world()`**. "Reset everything" is expressed by disposing the `Wica` and building a new one:
+There is **no `wica.reset()` and no `reset_world()`**. Restarting preserves state; "reset everything" is expressed by closing the `Wica` and building a new one:
 
 ```python
-wica.stop()
+wica.close()
 wica = Wica.init(config, …)   # re-run the setup: register entries, commands, start
 ```
 
@@ -116,7 +118,6 @@ This was a deliberate simplification. An in-place `reset()` had to answer "what 
 These are deferrals, not blockers to what's specified above.
 
 1. **Multiple `Wica` instances.** Because World is not a singleton (see [world.md](world.md)), several `Wica` instances are *structurally* possible — each owns its own World/Agent, with no shared global. Whether multi-instance is a *supported, tested* configuration (e.g. two independent agents in one process) is not yet exercised; today's one-Agent-per-World design still frames the implementation. The facade doesn't prevent multiple instances; it just isn't validated for them yet.
-2. **Restartable lifecycle.** `start()`/`stop()` are once-per-instance because the `Wica`-owned loop thread can't be restarted (a joined `threading.Thread` is spent). Making a `Wica` genuinely restartable (recreate the loop + its thread on a second `start()`) is possible but unbuilt — recreation covers the need for now.
-3. **Raw-model injection — available at the `Agent` layer.** `Agent.__init__` takes an optional `model=` override: config builds the model unless a bespoke `BaseChatModel` is passed (see [agent.md](agent.md), "Provider-agnostic model, from config"). `Wica.init` deliberately does **not** surface it — the facade stays config-only (provider/model/key/prompt from the file); a caller needing a raw model constructs the `Agent` directly. Whether the facade should ever expose it is left open, but no facade-level case has appeared.
-4. **Context-manager sugar.** `Wica` could implement `__enter__`/`__exit__` (calling `start()`/`stop()`) so `with Wica.init(config) as wica:` reads naturally. Deferred as pure ergonomics on top of the explicit `start()`/`stop()` the lifecycle already provides.
-5. **Config-driven World/Command wiring.** World-entry schema and Command registration remain **code**, run against `wica.world`/`wica.register_command` after `init` — a JSON file can't express the callables involved (see [config.md](config.md), open question #3). If a future config ever seeds part of the World, `Wica.init` is where that would be applied.
+2. **Raw-model injection — available at the `Agent` layer.** `Agent.__init__` takes an optional `model=` override: config builds the model unless a bespoke `BaseChatModel` is passed (see [agent.md](agent.md), "Provider-agnostic model, from config"). `Wica.init` deliberately does **not** surface it — the facade stays config-only (provider/model/key/prompt from the file); a caller needing a raw model constructs the `Agent` directly. Whether the facade should ever expose it is left open, but no facade-level case has appeared.
+3. **Context-manager sugar.** `Wica` could implement `__enter__`/`__exit__` (calling `start()`/`close()`) so `with Wica.init(config) as wica:` reads naturally. Deferred as pure ergonomics on top of the explicit lifecycle methods.
+4. **Config-driven World/Command wiring.** World-entry schema and Command registration remain **code**, run against `wica.world`/`wica.register_command` after `init` — a JSON file can't express the callables involved (see [config.md](config.md), open question #3). If a future config ever seeds part of the World, `Wica.init` is where that would be applied.

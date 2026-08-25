@@ -26,7 +26,7 @@ The name is the model:
 
 ### The entry point — `Wica`
 
-You talk to one object. `Wica.init(config)` stands up the whole system from a config — it owns a single event loop and a **World** + **Agent** pair that both run on it — and surfaces everything you need: `wica.world` for state, `wica.register_command(...)` for actions, `wica.start()`/`wica.stop()` for the lifecycle, and four `Event`s to observe the loop. To "reset", discard the `Wica` and `init` a new one.
+You talk to one object. `Wica.init(config)` stands up the whole system from a config — it owns a single event loop and a **World** + **Agent** pair that both run on it — and surfaces everything you need: `wica.world` for state, `wica.register_command(...)` for actions, restartable `wica.start()`/`wica.stop()` cycles, terminal `wica.close()`, and four `Event`s to observe the loop.
 
 ### The World — state that becomes a prompt
 
@@ -117,7 +117,7 @@ wica.start()
 wica.world.update("speech_input", "hello!")
 
 # ... keep the process alive while the system runs on its own loop ...
-wica.stop()
+wica.close()  # terminal teardown; use stop() instead when you intend to start again
 ```
 
 ## Configuration

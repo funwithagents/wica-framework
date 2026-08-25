@@ -102,15 +102,48 @@ class World:
 
     @property
     def is_running(self) -> bool:
-        return self._running
+        with self._lock:
+            return self._running
 
     def start(self) -> None:
-        self._running = True
+        expired: list[tuple[str, int]] = []
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            now = _now()
+            # stop() cancels timers but retains state. Restore each retained value against its
+            # original update deadline so wall-clock TTL continues across the pause.
+            for key, config in self._configs.items():
+                entry = self._entries[key]
+                if config.ttl is None or entry.current.value is None:
+                    continue
+                remaining = (entry.current.timestamp + config.ttl - now).total_seconds()
+                if remaining <= 0:
+                    expired.append((key, entry.current.id))
+                else:
+                    timer = self._make_ttl_timer(key, entry.current.id, remaining)
+                    self._timers[key] = timer
+                    timer.start()
+        for key, expected_id in expired:
+            try:
+                self._update(key, None, ttl_reset=True, expected_id=expected_id)
+            except RuntimeError:
+                # A concurrent stop won the race after the lifecycle lock was released.
+                break
         _logger.debug("world started")
 
     def stop(self) -> None:
-        self._cancel_all_timers()
-        self._running = False
+        with self._lock:
+            if not self._running:
+                return
+            # Change the guard and detach the timers atomically: an update can happen wholly before
+            # this transition or fail wholly after it, but cannot arm a timer into a stopped World.
+            self._running = False
+            timers = list(self._timers.values())
+            self._timers.clear()
+        for timer in timers:
+            timer.cancel()
         _logger.debug("world stopped")
 
     def register[T](
@@ -234,10 +267,7 @@ class World:
             if old_timer is not None:
                 old_timer.cancel()
             if config.ttl is not None and stored_value is not None:
-                timer = threading.Timer(
-                    config.ttl.total_seconds(), self._ttl_expire, args=(key, new_id)
-                )
-                timer.daemon = True
+                timer = self._make_ttl_timer(key, new_id, config.ttl.total_seconds())
                 self._timers[key] = timer
                 timer.start()
 
@@ -314,6 +344,11 @@ class World:
             # was about to be cancelled anyway, so the stale reset is a harmless no-op.
             pass
 
+    def _make_ttl_timer(self, key: str, expected_id: int, delay: float) -> threading.Timer:
+        timer = threading.Timer(delay, self._ttl_expire, args=(key, expected_id))
+        timer.daemon = True
+        return timer
+
     def add_listener(self, key: str, callback: Listener) -> None:
         with self._lock:
             if key not in self._configs:
@@ -376,9 +411,3 @@ class World:
         for entry in entries:
             content.extend(self.render_entry(entry))
         return content
-
-    def _cancel_all_timers(self) -> None:
-        with self._lock:
-            for timer in self._timers.values():
-                timer.cancel()
-            self._timers.clear()
