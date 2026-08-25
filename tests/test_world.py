@@ -92,6 +92,67 @@ def test_update_none_always_succeeds_regardless_of_type(world: World):
     assert world.get("temp") is None
 
 
+def test_world_owns_mutable_values_and_returns_defensive_copies(world: World):
+    world.register("state", dict, serialize_fn=identity_serialize)
+    source = {"nested": [1]}
+
+    world.update("state", source)
+    source["nested"].append(2)
+    fetched = world.get("state")
+    fetched["nested"].append(3)
+    entry = world.get_entry("state")
+    entry.current.value["nested"].append(4)
+    prompt_entry = world.get_prompt_entries()[0]
+    prompt_entry.current.value["nested"].append(5)
+
+    assert world.get("state") == {"nested": [1]}
+
+
+def test_serializers_and_trigger_conditions_cannot_mutate_live_world_state(world: World):
+    def serialize(value: dict | None, previous: dict | None) -> Content:
+        if value is not None:
+            value["changed_by_serializer"] = True
+        if previous is not None:
+            previous["changed_by_serializer"] = True
+        return [TextPart(str(value))]
+
+    def condition(old: dict | None, new: dict | None) -> bool:
+        if old is not None:
+            old["changed_by_condition"] = True
+        if new is not None:
+            new["changed_by_condition"] = True
+        return False
+
+    world.register(
+        "state",
+        dict,
+        serialize_fn=serialize,
+        triggers_llm_call=True,
+        trigger_condition_fn=condition,
+    )
+    world.update("state", {"version": 1})
+    world.update("state", {"version": 2})
+
+    world.render_entry(world.get_entry("state"))
+
+    assert world.get("state") == {"version": 2}
+
+
+def test_listener_receives_value_copy_not_live_world_state(world: World):
+    world.register("state", dict, serialize_fn=identity_serialize)
+    delivered = threading.Event()
+
+    def mutate(entry: WorldEntry) -> None:
+        entry.current.value["changed_by_listener"] = True
+        delivered.set()
+
+    world.add_listener("state", mutate)
+    world.update("state", {"original": True})
+
+    assert delivered.wait(timeout=WAIT_TIMEOUT)
+    assert world.get("state") == {"original": True}
+
+
 def test_id_starts_at_one_on_register_and_increments_on_every_update(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
     assert '<entry key="temp" id="1">' in flatten(world.render_entry(world.get_entry("temp")))
@@ -359,6 +420,21 @@ def test_on_trigger_fires_without_condition_fn(world: World):
     world.update("temp", "hello")
     assert subscriber.event.wait(timeout=WAIT_TIMEOUT)
     assert subscriber.calls[-1].current.value == "hello"
+
+
+def test_on_trigger_subscriber_cannot_mutate_live_world_state(world: World):
+    world.register("state", dict, serialize_fn=identity_serialize, triggers_llm_call=True)
+    delivered = threading.Event()
+
+    def mutate(entry: WorldEntry) -> None:
+        entry.current.value["changed_by_subscriber"] = True
+        delivered.set()
+
+    world.on_trigger.subscribe(mutate)
+    world.update("state", {"original": True})
+
+    assert delivered.wait(timeout=WAIT_TIMEOUT)
+    assert world.get("state") == {"original": True}
 
 
 def test_trigger_condition_fn_gates_the_emit(world: World):

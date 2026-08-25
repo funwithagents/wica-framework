@@ -1,11 +1,14 @@
 ---
 code:
+  - pyproject.toml
   - tests-e2e/support.py
   - tests-e2e/e2e.anthropic.config.json
   - tests-e2e/e2e.openai.config.json
   - tests-e2e/e2e.huggingface-hub.config.json
 tests:
   - tests-e2e/test_smoke.py
+  - tests-e2e/test_wica.py
+  - tests-e2e/test_fake_flows.py
 ---
 
 # Testing
@@ -14,7 +17,7 @@ tests:
 
 ## Purpose
 
-WICA's testing strategy — the two-tier structure, what a good WICA test looks like, and how the live tier fans out across providers. It's a **cross-cutting practice**, not a runtime concept like [World](world.md) or [Agent](agent.md): nothing here ships in the library. It exists as a spec so the decisions have one honest home that stays in sync with the setup, rather than living half in [project.md](project.md) (the tooling choices) and half in [AGENTS.md](../AGENTS.md) (the operational how-to).
+WICA's testing strategy — the two-tier structure, what a good WICA test looks like, how deterministic full-loop flows use the fake provider, and how the live set fans out across providers. It's a **cross-cutting practice**, not a runtime concept like [World](world.md) or [Agent](agent.md): nothing here ships in the library. It exists as a spec so the decisions have one honest home that stays in sync with the setup, rather than living half in [project.md](project.md) (the tooling choices) and half in [AGENTS.md](../AGENTS.md) (the operational how-to).
 
 This spec is the **design/strategy** view. The exact shell invocations to run each tier — including the `zsh -ic 'source ~/.zshrc …'` dance needed to see the API keys — live in [AGENTS.md](../AGENTS.md) "Testing" and are not duplicated here; this spec links to them, the same way [conversation-demo.md](conversation-demo.md) is a spec while its run details live with the example.
 
@@ -22,12 +25,11 @@ This spec is the **design/strategy** view. The exact shell invocations to run ea
 
 Tests split into two directories, and the split is structural — a directory boundary, not a marker or an opt-out flag:
 
-| Tier | Directory | Network | Deterministic | Runs by default |
+| Tier / set | Directory | Network | Deterministic | Runs by default |
 |---|---|---|---|---|
 | Unit / integration | `tests/` | never | yes | **yes** |
-| Full-loop / e2e | `tests-e2e/` | real provider* | no* | **no** |
-
-*The `tests-e2e/` row describes its live-provider tests. The tier also holds the always-run, deterministic, network-free **scripted-fake flows** (see "Always-run scripted-fake flows" below).
+| Full-loop / scripted fake | `tests-e2e/` | never | yes | **no** |
+| Full-loop / live provider | `tests-e2e/` | yes | no | **no** |
 
 - **`tests/` is the normal dev loop.** Fast, deterministic, no real network, no API key. `pyproject.toml`'s `testpaths = ["tests"]` points the default `uv run pytest` here, so this is what runs on every change and what any contributor or CI can run with zero credentials.
 - **`tests-e2e/` is opt-in.** It is the **full-loop tier** — tests that exercise the Agent's whole step loop. Its *live-provider* tests call a real LLM (network, an API key, non-deterministic output, and it costs money), so the tier is deliberately *not* collected by the default run. Because `testpaths` already excludes it, no pytest marker or `--run-e2e` flag is needed: the physical separation is the whole mechanism. Run it explicitly (`uv run pytest tests-e2e`). One kind of test here is the exception to "network + non-deterministic": the **always-run scripted-fake flows** (below) need no key and never skip.
@@ -53,13 +55,13 @@ The house style for both tiers (also stated in [AGENTS.md](../AGENTS.md)):
 
 ## Test isolation: a fresh `World` per test
 
-There is no process-global World: each `Wica` (see [wica.md](wica.md)) owns its own `World`, so isolation is a matter of each test building its own rather than resetting a shared one. A test that exercises the reactive path constructs a `World(loop)` on an event loop it controls and drives its `start()`/`stop()` lifecycle (see [world.md](world.md), "Lifecycle") — `stop()` cancels the World's outstanding TTL timers, so no timer bleeds into the next test. A shared per-tier fixture provides this loop-plus-`World` scaffolding so individual tests don't repeat the setup. Tests that only touch the data model (`register`/`get`/`render_*`) need no running loop at all, since those methods are unguarded.
+There is no process-global World: each `Wica` (see [wica.md](wica.md)) owns its own `World`, so isolation is a matter of each test building its own rather than resetting a shared one. A test that exercises the reactive path constructs a `World(loop)` on an event loop it controls and drives its `start()`/`stop()` lifecycle (see [world.md](world.md), "Lifecycle") — `stop()` cancels the World's outstanding TTL timers, so no timer bleeds into the next test. The World- and Agent-focused modules each provide local loop-plus-`World` fixtures suited to their teardown needs; there is currently no shared repository-wide `conftest.py`. Tests that only touch the data model (`register`/`get`/`render_*`) need no running loop at all, since those methods are unguarded.
 
 ## Live tier: parametrized over every provider
 
-The e2e tier is **parametrized over one committed config per provider**, not a single reference provider — so the live tests verify WICA's real provider-branching construction across the whole supported surface, not just one privileged backend.
+The live e2e set is **parametrized over one committed config per provider**, not a single reference provider — so the live tests verify WICA's real provider-branching construction across the whole supported surface, not just one privileged backend.
 
-- **One config file per provider**, checked in and named symmetrically: `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, and `huggingface-hub`. They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every e2e test runs once per config**.
+- **One config file per provider**, checked in and named symmetrically: `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, and `huggingface-hub`. They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**.
 - **The live tests go through WICA's own entrypoint**, not a divergent `init_chat_model` call: `support.real_chat_model()` builds via `build_chat_model()` (the smoke test), and `support.real_wica()` stands up the whole system via `Wica.init(WicaConfig.from_json(...))` — the real production path, loop + World + Agent and all. This is what makes the tier meaningful: it exercises the actual per-provider construction (including `huggingface-hub`'s dedicated non-`init_chat_model` path — see [agent.md](agent.md), "Provider-agnostic model, from config") end-to-end, so a branch that builds the wrong model is caught here rather than slipping through a test that bypassed it.
 - **Each config uses `api_key_env`**, so it carries no secret and is safe to commit (see [config.md](config.md), "API key"). A provider whose key env var is unset makes that config **skip itself** — never fail — via `MissingEnvError → pytest.skip` (in `support.load_agent_config`). You exercise only the providers you hold keys for; the rest skip cleanly, so a contributor with one key, or CI with none, is never broken by the others' absence.
 - **Filter to one provider with `-k <provider>`.** Because the configs are named symmetrically, the provider name matches its config-filename stem, so `-k openai` runs just that one.

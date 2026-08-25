@@ -596,6 +596,28 @@ def test_on_prompt_event_fires_with_the_messages_the_model_receives(loop, world,
     agent.stop()
 
 
+def test_on_prompt_subscriber_cannot_mutate_messages_sent_to_model(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = ProgrammableChatModel(respond=text_response("hi"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+
+    def mutate(messages: list[BaseMessage]) -> None:
+        for message in messages:
+            if isinstance(message, HumanMessage) and isinstance(message.content, list):
+                message.content.clear()
+
+    agent.on_prompt.subscribe(mutate)
+    agent.start()
+
+    world.update("input", "hello")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert model.calls[0]
+    assert any("hello" in human_texts(message) for message in model.calls[0])
+
+    agent.stop()
+
+
 def test_on_trigger_event_fires_with_the_entry_that_started_the_step(loop, world, sink):
     world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     model = ProgrammableChatModel(respond=text_response("hi"))
@@ -635,6 +657,38 @@ def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, s
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
     assert commands == [CommandIssued("add", {"a": 1, "b": 2})]
+
+    agent.stop()
+
+
+def test_on_command_subscriber_cannot_mutate_dispatched_arguments(loop, world, sink):
+    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("read_payload", {"payload": {"value": 1}}, "call1")]),
+            text_response("done"),
+        )
+    )
+    invoked: list[int] = []
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+
+    def mutate(command: CommandIssued) -> None:
+        command.args["payload"]["value"] = 99
+
+    agent.on_command.subscribe(mutate)
+
+    async def read_payload(payload: dict[str, int]) -> int:
+        """Read a nested payload."""
+        invoked.append(payload["value"])
+        return payload["value"]
+
+    agent.register_command(read_payload)
+    agent.start()
+
+    world.update("input", "add them")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert invoked == [1]
 
     agent.stop()
 

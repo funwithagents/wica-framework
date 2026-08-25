@@ -3,6 +3,8 @@
 **WICA is an agentic framework for agents that take multimodal inputs and produce multimodal outputs.**
 Its state is centered on a single **World** — a store of the current interaction context that serializes to an LLM-facing prompt. Perceptions flow *in* as **Inputs**, the agent acts *out* through **Commands**, and an **Agent** reasoning loop sits in the middle, observing the World and deciding what to do.
 
+Here, multimodal output includes Command-mediated action in the physical or digital world: speech, movement, a display change, an API action, and so on. WICA represents those capabilities as tools and serializes their state/results back into the World for reasoning. The v1 conversational output sink is intentionally narrower—it receives one complete text response per step—while Commands carry the broader output modalities.
+
 The name is the model:
 
 | Letter | Pillar | What it is |
@@ -15,8 +17,8 @@ The name is the model:
 ## Why WICA
 
 - **State-first, not chat-first.** Instead of threading a conversation, you maintain a **World** of named entries — what the agent heard, who's nearby, how it feels, what it's doing. Every reasoning step renders the relevant World state into the prompt. The prompt is a *view of state*, not a transcript you append to.
-- **Multimodal in, multimodal out.** Inputs and outputs are expressed in a neutral [`Content`](specs/content.md) model (`TextPart`, `ImagePart`, more to come) that stays completely provider-agnostic. A camera Input becomes an inline image on the turn it arrives and a light text description afterwards — so heavy multimodal data is sent once, not on every turn.
-- **Actions are async and cancellable.** Commands run as `asyncio` tasks on the Agent's event loop, so a long-running action (walk to the kitchen, do a 10-second dance) can be **cancelled** —  by the framework, or by the model itself issuing `cancel_command(call_id)`.
+- **Multimodal in, multimodal out.** Inputs serialize through the neutral [`Content`](specs/content.md) model (`TextPart`, `ImagePart`, more to come), while output modalities are Commands acting on the physical or digital world and reporting their state/results back through the World. A camera Input can be inline while fresh and a light text description afterwards; Commands can speak, move, display, or call external systems without making those effects `Content` return values.
+- **Actions are async and cancellable.** Commands run as `asyncio` tasks on the Agent's event loop, so a long-running action (walk to the kitchen, do a 10-second dance) can be **cancelled** — by the framework, or by the model itself issuing `cancel_command(call_id)`.
 - **Reactive by construction.** Marking an Input `triggers_llm_call=True` is all it takes to wake the Agent when a new perception arrives. Bursts of perceptions are coalesced into a single step.
 - **Provider-agnostic.** Switching between Anthropic, OpenAI, or Hugging Face Hub is a config edit, not a code change. LangChain is used only as a low-level primitive (model + tool schemas), quarantined to the Agent's I/O boundary — everything upstream stays SDK-free.
 
@@ -45,7 +47,7 @@ wica.world.register(
 wica.world.update("speech_input", "hello robot")
 ```
 
-Each entry is versioned (a small incrementing `id`), timestamped, and rendered inside an XML-style `<entry key="..." id="...">…</entry>` block the model can reference precisely. Entries can be marked `include_in_prompt=False` to act as pure internal/shared state that never reaches the model, and given a `ttl` to auto-expire. The World holds a *snapshot* (current + previous), not an event-sourced log — history lives in the Agent.
+Each entry is versioned (a small incrementing `id`), timestamped, and rendered inside an XML-style `<entry key="..." id="...">…</entry>` block the model can reference precisely. Values are deep-copied on update and when exposed through getters/callbacks, so versioned state cannot be changed silently without another `update()`. Entries can be marked `include_in_prompt=False` to act as pure internal/shared state that never reaches the model, and given a `ttl` to auto-expire. The World holds a *snapshot* (current + previous), not an event-sourced log — history lives in the Agent.
 
 ### Inputs — perception coming in
 
@@ -71,11 +73,11 @@ async def dance() -> str:
 wica.register_command(dance)
 ```
 
-Off-the-shelf LangChain tools work unmodified — a Command needs no WICA-specific hooks. Every Command runs as a cancellable `asyncio` task and its execution is tracked as a World entry `agent:command:<call_id>`) that renders `running` while in flight and terminal (`result`/`error`) once done — so a later reasoning step can *see* an action still running and decide to cancel it. The Agent auto-registers a native `cancel_command(call_id)` so the model can abort its own in-flight Commands.
+Off-the-shelf LangChain tools work unmodified — a Command needs no WICA-specific hooks. Every Command runs as a cancellable `asyncio` task and its execution is tracked as a World entry `agent:command:<call_id>` that renders `running` while in flight and terminal (`result`/`error`) once done — so a later reasoning step can *see* an action still running and decide to cancel it. The Agent auto-registers a native `cancel_command(call_id)` so the model can abort its own in-flight Commands.
 
 ### The Agent — the reasoning loop
 
-The Agent is triggered by the World, builds a prompt from World state, runs inference against a configured provider, dispatches Commands, and streams output to a pluggable sink. It runs on the **single event loop** `Wica` owns (a daemon thread by default) — shared with the World — so Command cancellation is race-free while `update()` stays callable from any thread. It keeps the conversation **history** as re-renderable World snapshots — so the newest observation renders rich (an image inline) and older ones render light, keeping the deep prompt prefix byte-stable and cacheable.
+The Agent is triggered by the World, builds a prompt from World state, runs inference against a configured provider, dispatches Commands, and delivers each complete text response to a pluggable sink. It runs on the **single event loop** `Wica` owns (a daemon thread by default) — shared with the World — so Command cancellation is race-free while `update()` stays callable from any thread. It keeps the conversation **history** as re-renderable World snapshots — so the newest observation renders rich (an image inline) and older ones render light, keeping the deep prompt prefix byte-stable and cacheable.
 
 Perceptions that arrive in a burst are **coalesced** into a single step (a ~200 ms leading-edge window, configurable via `coalesce_window`); an entry can set `bypass_coalescing=True` to act immediately (a stop button, a barge-in utterance).
 
@@ -151,6 +153,7 @@ Core `wica` bundles no provider; install the extra for the one you use. Selectin
 | `anthropic` | `wica[anthropic]` | `langchain-anthropic` |
 | `openai` | `wica[openai]` | `langchain-openai` |
 | `huggingface-hub` | `wica[huggingface-hub]` | `langchain-huggingface` (serverless Inference Providers) |
+| `fake` | none | built-in deterministic test double; no network or key |
 
 ## The conversation demo
 
@@ -168,11 +171,11 @@ See [specs/conversation-demo.md](specs/conversation-demo.md).
 
 | Path | What's there |
 |---|---|
-| `src/wica/` | The library — one module per concept: [`wica.py`](src/wica/wica.py) (the `Wica` facade), [`world.py`](src/wica/world.py), [`content.py`](src/wica/content.py), [`config.py`](src/wica/config.py), [`agent.py`](src/wica/agent.py) (Agent + Commands) |
+| `src/wica/` | The library — facade, World, Content, config, Agent/Commands, Events, and the scripted fake model; see the complete module map in [`AGENTS.md`](AGENTS.md) |
 | `specs/` | Pre-implementation design docs, one per concept — start at [specs/_index.md](specs/_index.md) |
 | `plans/` | Implementation plans turning specs into buildable steps — [plans/_index.md](plans/_index.md) |
 | `tests/` | Fast, deterministic, no-network tests (the default `pytest` run) |
-| `tests-e2e/` | Opt-in live tests against real providers, one config per provider |
+| `tests-e2e/` | Opt-in full-loop tests: deterministic fake flows plus live provider cases |
 | `examples/` | Runnable examples (the Gradio conversation demo) |
 
 The design is documented spec-first: each spec in [`specs/`](specs/_index.md) carries a status (`Draft`/`Stable`/…) and declares the code and tests it governs. Read the specs for the full rationale behind every decision above.
@@ -190,7 +193,13 @@ uv run pyright         # type check
 uv run pytest          # fast test tier (no network)
 ```
 
-The live tier calls real providers and is opt-in (needs a provider API key), run separately:
+The deterministic full-loop flows are also opt-in because `tests-e2e/` is outside the default test path:
+
+```bash
+uv run pytest tests-e2e -k fake
+```
+
+The live set calls real providers and needs a provider API key:
 
 ```bash
 uv run pytest tests-e2e            # each provider whose key is set runs; the rest skip

@@ -42,8 +42,8 @@ Four surfaces, side by side:
    step shows on the **input (right) side** — a typed utterance or a sensor event like a user being
    detected. The robot's **spoken replies and its command calls** show on the **assistant (left)
    side**, in the order they happen, so a turn reads as "input → the robot says X → the robot does
-   Y". An input that's *dropped* by the single-in-flight loop (robot busy) doesn't appear and gets
-   no reply — faithful to what actually happened.
+   Y". An input that's *dropped* because a reasoning call is already in flight doesn't appear and
+   gets no reply — faithful to what actually happened.
 2. **World state.** A live view of the current World — every entry the demo tracks, shown as raw
    values (key, version id, value, when it last changed). This is the robot's whole mind laid bare:
    what it heard, who's nearby, how it feels, who it's tracking, and any command currently running.
@@ -66,16 +66,20 @@ Four surfaces, side by side:
   prompt the robot to react on their own — the robot may say something in response to *who walked
   up*, not only to what was said.
 - **Speech out.** The robot's reply is one complete utterance per turn. (No token streaming in v1.)
-- **Acting.** Between hearing and replying, the robot may perform robot actions (Commands, below).
-  Their effects show up in the World state view, and a longer action is visible while it runs.
+- **Acting.** The robot may perform robot actions (Commands, below) alongside a spoken reply.
+  Their effects show up in the World state view, and a longer action remains visible while it runs.
 
-### Single-track attention (a visible v1 trait)
+### One reasoning call at a time (a visible v1 trait)
 
-The robot handles **one thought at a time**: while it's thinking, replying, or in the middle of a
-long action, a new input that arrives is **dropped rather than queued**. This is a real v1 Agent
-limitation, and the demo makes it observable on purpose — e.g. talking to the robot mid-dance does
-nothing. The UI should hint at this so it reads as designed behaviour, not a bug. (A later Agent
-version adds concurrent, interruptible attention; this demo is not that.)
+The robot handles **one LLM reasoning call at a time**. An input that arrives while the model is
+currently thinking is **dropped rather than queued**. This is a real v1 Agent limitation, and the
+demo makes it observable on purpose so it reads as designed behaviour, not a bug.
+
+A long-running Command is different: the reasoning step ends once the Command is dispatched, so
+the Command may continue in the background while a later input starts a new reasoning step. For
+example, talking to the robot mid-dance does reach the Agent; the next prompt shows the dance as
+still running, and the model may continue talking or issue `cancel_command` for it. The demo thus
+makes the distinction between a busy reasoning call and an in-flight physical action visible.
 
 ## Sensor inputs (the buttons)
 
@@ -94,7 +98,7 @@ and the point is to watch the model choose them in context.
 
 | Action | What it does | Notable |
 |---|---|---|
-| **Dance** | Performs a ~10-second dance. | Long-running: visibly "in progress" in the World state for its whole duration, and (per single-track attention) the robot ignores new input until it finishes. Best illustration of a long physical action. |
+| **Dance** | Performs a ~10-second dance. | Long-running: visibly "in progress" in the World state for its whole duration. New inputs may start reasoning while it runs, letting the model observe or cancel the action. |
 | **Set emotion `<emotion>`** | Sets the robot's current emotional state. | Reflected in World state and in the robot's subsequent prompt/behaviour. |
 | **Switch tracking to user `<id>` (or nobody)** | Follows one specific person, or stops tracking when called with no user. | The robot follows **at most one** person at a time — a single `tracked_user` entry, not a set. Passing no user (null) clears it. |
 

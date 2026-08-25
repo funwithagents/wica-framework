@@ -365,10 +365,10 @@ def build_ui() -> gr.Blocks:
                 "update the World, but nothing will reason over it yet."
             )
         gr.Markdown(
-            "The robot handles **one thought at a time** (v1): while it's thinking or in the "
-            "middle of a long action (like a 10s dance), a new input is *dropped*, not queued — "
-            "so it won't appear in the transcript and gets no reply. That's expected, not a bug. "
-            "Inputs (right) and the robot's replies + 🦾 command calls (left) appear as they "
+            "The robot handles **one reasoning call at a time** (v1): while the model is thinking, "
+            "a new input is *dropped*, not queued. Long actions are different: a 10s dance keeps "
+            "running in the background, so a later input can start a new step that sees or cancels "
+            "it. Inputs (right) and the robot's replies + 🦾 command calls (left) appear as they "
             "actually happen."
         )
 

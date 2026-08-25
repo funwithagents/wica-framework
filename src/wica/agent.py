@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -185,8 +186,8 @@ _FAKE_PROVIDER = "fake"
 
 def build_chat_model(config: AgentConfig) -> BaseChatModel:
     """Construct the LangChain chat model for an AgentConfig — the single source of truth for
-    provider construction, shared by Agent.from_config and the e2e helper (so tests exercise the
-    exact model production builds).
+    provider construction, shared by the Agent constructor and the e2e helper (so tests exercise
+    the exact model production builds).
 
     Most providers pass straight through to init_chat_model (switching between them is a config
     edit). `huggingface-hub` is the exception: it targets the Hugging Face Hub's serverless
@@ -484,7 +485,9 @@ class Agent:
             self.on_trigger.emit(triggered)
         self._append_observation()
         messages = self._render_messages()
-        self.on_prompt.emit(messages)
+        # Instrumentation is observation-only: subscribers receive a defensive copy, never the
+        # message list subsequently handed to the model.
+        self.on_prompt.emit(copy.deepcopy(messages))
         response = await self._bound_model.ainvoke(messages)
 
         text = response.text
@@ -499,12 +502,15 @@ class Agent:
 
         for call in response.tool_calls:
             call_id = call["id"] or uuid.uuid4().hex
-            self._history.append(CommandRecord(call_id, call["name"], call["args"]))
-            self._dispatch_command(call_id, call["name"], call["args"])
+            args = copy.deepcopy(call["args"])
+            self._history.append(CommandRecord(call_id, call["name"], copy.deepcopy(args)))
+            self._dispatch_command(call_id, call["name"], args)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
 
     def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
-        self.on_command.emit(CommandIssued(name, args))
+        # A subscriber may annotate or otherwise mutate what it receives without changing the
+        # arguments stored in history, shown in the World, or passed to the Command itself.
+        self.on_command.emit(CommandIssued(name, copy.deepcopy(args)))
         _logger.debug("dispatching command %s(%s) call_id=%s", name, _format_args(args), call_id)
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         self._command_keys.add(key)
@@ -632,7 +638,11 @@ class Agent:
                 pending_text.append(record.text)
             elif isinstance(record, CommandRecord):
                 pending_calls.append(
-                    {"name": record.name, "args": record.args, "id": record.call_id}
+                    {
+                        "name": record.name,
+                        "args": copy.deepcopy(record.args),
+                        "id": record.call_id,
+                    }
                 )
 
         flush_assistant()

@@ -1,6 +1,6 @@
 # WICA
 
-WICA is an agentic framework for agents that take multimodal inputs and return multimodal outputs. Its state is centered on a single **World** object — a store of the current context that can be serialized to text (an LLM-facing prompt).
+WICA is an agentic framework for agents that take multimodal inputs and produce multimodal outputs. Its state is centered on a single **World** object — a store of current context rendered into an LLM-facing prompt. “Multimodal output” includes Command-mediated action in the physical or digital world; the v1 conversational output sink itself receives one complete text response per step.
 
 The name breaks down as:
 
@@ -14,7 +14,7 @@ The name breaks down as:
 | Spec | Description | Status |
 |---|---|---|
 | [project.md](project.md) | Project structure and tooling: Python version, packaging with uv, layout conventions | Implemented |
-| [testing.md](testing.md) | Testing strategy: two-tier `tests/`/`tests-e2e/` split, functional-test philosophy, per-test `World` isolation, provider-parametrized live tier | Implemented |
+| [testing.md](testing.md) | Testing strategy: deterministic default tier plus opt-in full-loop fake/live e2e tier, functional-test philosophy, per-test `World` isolation, provider-parametrized live set | Implemented |
 | [config.md](config.md) | Framework config loaded from JSON: provider/model/api key/system prompt, plain-dataclass `from_json`, strict validation, `api_key`/`api_key_env` | Implemented |
 | [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Implemented |
 | [events.md](events.md) | Generic, project-agnostic `Event[T]` pub/sub primitive: synchronous subscribe/unsubscribe/emit with subscriber isolation, a standalone dependency leaf | Implemented |

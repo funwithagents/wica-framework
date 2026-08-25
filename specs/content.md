@@ -15,9 +15,11 @@ tests:
 
 - The **World** returns `Content` from entry serialization (`serialize_fn` / `archival_serialize_fn`, `render_entry`, `render_full_prompt` — see [world.md](world.md)).
 - The **Agent** converts `Content` into a concrete provider's message blocks at its I/O boundary — the *only* place a specific model SDK (LangChain) is imported (see [agent.md](agent.md)).
-- **Inputs** and **Commands** are expected to lean on it too as they get specced.
+- **Inputs** use it to present multimodal perception. Commands report their state/results through
+  World serialization, although the real-world effect of a Command (speech, movement, display,
+  API action) is not itself required to be a `Content` return value.
 
-The whole point is decoupling: everything upstream of the Agent speaks `Content` and stays ignorant of LangChain or any model provider. Swapping the SDK, or supporting a second one, touches only the Agent's adapter — never the World, Inputs, or a registrant's `serialize_fn`.
+The whole point is decoupling: everything that enters the model-facing prompt speaks `Content` and stays ignorant of LangChain or any model provider. Swapping the SDK, or supporting a second one, touches only the Agent's adapter — never the World, Inputs, Commands' World serialization, or a registrant's `serialize_fn`. WICA's broader “multimodal output” claim refers to Command-mediated action in the physical or digital world; the v1 output sink itself remains complete text.
 
 `Content` lives in a neutral `wica/content` module that depends on **nothing** LLM- or provider-specific.
 
@@ -53,4 +55,3 @@ Flattening a whole `Content` to text — for logging, debugging, or a text-only 
 
 1. **Ergonomic construction.** For now, building text content is explicit — `[TextPart("...")]`. A convenience (a `text("...") -> Content` helper, or accepting a bare `str` and normalizing) is deferred until the verbosity actually bites.
 2. **Part set growth.** Only `TextPart` and `ImagePart` exist initially. `AudioPart` (robot mic input), `FilePart`/document parts, and possibly a structured/JSON part will be added as concrete needs appear; each must ship with a sensible `to_string()`.
-3. **Provider-block mapping.** The exact shape of the Agent-side `Content -> provider message blocks` adapter (base64 encoding, `image` vs. `image_url` forms, merging adjacent `TextPart`s) is an Agent concern, tracked in [agent.md](agent.md), not here.

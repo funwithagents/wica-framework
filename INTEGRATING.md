@@ -12,11 +12,13 @@
 
 You talk to **one object — `Wica`** — the single entry point. `Wica.init(config)` stands up the whole system from a config: it owns one event loop and a **World** + **Agent** pair that both run on it, and surfaces everything you need behind one surface. State lives in the World — a registry of named, typed entries that renders to the LLM prompt. You don't thread a conversation; you maintain state, and every reasoning step renders the relevant World into the prompt (a *view of state*, not a transcript).
 
+“Multimodal” spans both sides differently: Inputs serialize perception into provider-neutral `Content`, while Commands produce speech, movement, display changes, API effects, and other physical or digital outputs. The conversational sink is one complete text response per reasoning step; it is not the full output surface.
+
 - **Wica**: the entry point. `Wica.init(config, *, output_sink=…)` builds and wires everything; `wica.start()` / `wica.stop()` run the shared lifecycle. `wica.world` is the World; `wica.register_command(...)` adds Commands; four `Event`s surface what the loop is doing.
-- **W — World** (`wica.world`): you `register()` a key with a type + a `serialize_fn` (value → [`Content`](specs/content.md)), then `update()` it as data changes. `update()` is callable from any thread, but only **while the system is running** (between `start()` and `stop()`); `register`/`get` work any time.
+- **W — World** (`wica.world`): you `register()` a key with a type + a `serialize_fn` (value → [`Content`](specs/content.md)), then `update()` it as data changes. Values must be deep-copyable: the World copies on ingress and on outward getters/callbacks so only `update()` can change versioned state. `update()` is callable from any thread, but only **while the system is running** (between `start()` and `stop()`); `register`/`get` work any time.
 - **I — Inputs**: not a class — a *role* a World entry plays when an external producer feeds it. A registered entry marked `triggers_llm_call=True` wakes the Agent when updated. The producer can run on any thread.
 - **C — Commands**: the agent's unit of action. Register a plain function (or an off-the-shelf LangChain tool) with `wica.register_command`; the Agent binds it as a native model tool. Each runs as a cancellable `asyncio` task, tracked as a World entry.
-- **A — Agent** (`wica.agent`): the reasoning loop. Built from config, runs on the shared loop, builds the prompt from World state, runs inference, dispatches Commands, streams text to your output sink. Rarely touched directly — the everyday paths are surfaced on `Wica`.
+- **A — Agent** (`wica.agent`): the reasoning loop. Built from config, runs on the shared loop, builds the prompt from World state, runs inference, dispatches Commands, and delivers one complete text response per step to your output sink. Rarely touched directly — the everyday paths are surfaced on `Wica`.
 
 ## Public API — what you import
 
@@ -63,7 +65,7 @@ world.register(key: str, type: type[T], *,
                ttl=None,                         # timedelta → auto-expire the entry to None
                bypass_coalescing=False)          # True → fire immediately, skip the batch window
 world.update(key, value)     # from any thread — but only while the system is running
-world.get(key)               # current value (works any time)
+world.get(key)               # defensive copy of current value (works any time)
 world.unregister(key)
 
 # The direct seam (advanced / tests): construct an Agent yourself instead of via Wica.
@@ -130,7 +132,7 @@ wica.world.update("speech_input", "hello!")   # Agent wakes, reasons, calls spea
 wica.stop()
 ```
 
-`wica.world` / `wica.agent` are **borrowed references** — valid for the life of the `Wica`. After `wica.stop()` the World is inert (a mutating call raises `RuntimeError("World is not running")`); to "reset", discard the `Wica` and `init` a new one.
+`wica.world` / `wica.agent` are **borrowed references** — valid for the life of the `Wica`. After `wica.stop()`, reactive mutation through `world.update()` raises `RuntimeError("World is not running")`; schema operations and reads remain available for inspection, but the stopped objects should be discarded rather than reused. To "reset", initialize a new `Wica`.
 
 ## Config schema
 
@@ -197,7 +199,7 @@ Each scripted `tool_calls[].name` is validated against your registered Commands 
 - **One reasoning call at a time.** A trigger arriving while a step is in flight is **dropped, not queued**. Concurrency/interruption (`cancel_reaction`, barge-in) is designed but deferred — see [specs/agent.md](specs/agent.md).
 - **Trigger coalescing.** A burst of triggers within `coalesce_window` (default 200 ms) is batched into a single step. Set an entry's `bypass_coalescing=True` for something that must act at once (a stop button); `coalesce_window=0` disables batching.
 - **Lifecycle is once per instance.** `wica.start()`/`wica.stop()` run once; the owned loop thread can't be restarted. To reset, discard the `Wica` and `init` a new one.
-- **Output is text via one sink.** `output_sink(text)` is `async` and receives the model's assistant text per step. Streaming output is deferred.
+- **The conversational sink is complete text.** `output_sink(text)` is `async` and receives the model's assistant text per step; broader output modalities are Commands. Streaming sink output is deferred.
 - **The World is a snapshot, not a log.** It holds current + previous per entry; conversation history lives in the Agent (as re-renderable snapshots). Heavy multimodal data (an image) renders inline on the turn it arrives and light thereafter.
 - **Distributed via git, not PyPI**, and ships with no provider bundled (install an extra).
 

@@ -14,7 +14,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | `specs/` | Pre-implementation design docs, one per concept, each with a `**Status:**` — indexed by [specs/_index.md](specs/_index.md) |
 | `plans/` | Implementation plans turning settled specs into buildable steps — indexed by [plans/_index.md](plans/_index.md) |
 | `tests/` | Fast, deterministic, no-network tests; mirrors the `src/wica/` module structure |
-| `tests-e2e/` | Opt-in live tests that call a real LLM provider (not collected by default `pytest`) |
+| `tests-e2e/` | Opt-in full-loop tests: deterministic scripted-fake flows plus live provider cases (not collected by default `pytest`) |
 | `examples/` | Runnable example apps demonstrating the framework — e.g. the Gradio conversation demo ([specs/conversation-demo.md](specs/conversation-demo.md)); deps live in the `demo` uv group, not core |
 
 ### `src/wica/` modules
@@ -73,7 +73,7 @@ The mapping is **many-to-many**: a file can be governed by several specs — `ag
 
 Some tests call a real LLM provider over the network. They live in `tests-e2e/`, a directory separate from `tests/`, so the default `uv run pytest` never runs them — no network access or API key is needed for the normal dev loop. Run them explicitly, and only when you actually want to verify against a live provider.
 
-**The e2e tier is parametrized over one config per provider.** Each committed config names its `provider`/`model` (and `hf_provider` for the Hub) and points at its own `api_key_env`; they're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every e2e test runs once per config**. A config whose key env var is unset **skips** (it does not fail — see `tests-e2e/support.py`), so you only exercise the providers you have keys for. The provider/config surface is specced in [specs/config.md](specs/config.md) ("Providers").
+**The live e2e set is parametrized over one config per provider.** Each committed config names its `provider`/`model` (and `hf_provider` for the Hub) and points at its own `api_key_env`; they're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**. A config whose key env var is unset **skips** (it does not fail — see `tests-e2e/support.py`), so you only exercise the providers you have keys for. The provider/config surface is specced in [specs/config.md](specs/config.md) ("Providers").
 
 | Config | Key env var |
 |---|---|

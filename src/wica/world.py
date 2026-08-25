@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import logging
 import threading
@@ -175,14 +176,14 @@ class World:
             entry = self._entries.get(key)
         if entry is None:
             raise KeyError(key)
-        return entry.current.value
+        return copy.deepcopy(entry.current.value)
 
     def get_entry(self, key: str) -> WorldEntry:
         with self._lock:
             entry = self._entries.get(key)
         if entry is None:
             raise KeyError(key)
-        return entry
+        return copy.deepcopy(entry)
 
     def update(self, key: str, value: Any) -> None:
         self._update(key, value, ttl_reset=False)
@@ -214,15 +215,17 @@ class World:
                     f"got {type(value).__name__!r}"
                 )
 
+            # The World owns the value once it is updated. Copy on ingress so a producer retaining
+            # and mutating its original object cannot change versioned state without another
+            # update() (and therefore without a new id/timestamp/trigger).
+            stored_value = copy.deepcopy(value)
             new_id = self._id_counters[key] + 1
             self._id_counters[key] = new_id
-
-            new_version = WorldEntryVersion(id=new_id, value=value, timestamp=_now())
             new_entry = WorldEntry(
                 key=key,
                 type=old_entry.type,
                 bypass_coalescing=old_entry.bypass_coalescing,
-                current=new_version,
+                current=WorldEntryVersion(id=new_id, value=stored_value, timestamp=_now()),
                 previous=old_entry.current,
             )
             self._entries[key] = new_entry
@@ -230,7 +233,7 @@ class World:
             old_timer = self._timers.pop(key, None)
             if old_timer is not None:
                 old_timer.cancel()
-            if config.ttl is not None and value is not None:
+            if config.ttl is not None and stored_value is not None:
                 timer = threading.Timer(
                     config.ttl.total_seconds(), self._ttl_expire, args=(key, new_id)
                 )
@@ -242,7 +245,9 @@ class World:
             triggers_configured = config.triggers_llm_call and not ttl_reset
             should_trigger = triggers_configured and (
                 config.trigger_condition_fn is None
-                or config.trigger_condition_fn(old_entry.current.value, value)
+                or config.trigger_condition_fn(
+                    copy.deepcopy(old_entry.current.value), copy.deepcopy(stored_value)
+                )
             )
 
         new_id = new_entry.current.id
@@ -267,9 +272,9 @@ class World:
         # async-on-the-loop and are individually guarded; the trigger emits on_trigger on the loop
         # thread so a subscriber may safely create_task. See specs/world.md ("The shared event loop").
         for listener in listeners:
-            self._loop.call_soon_threadsafe(self._dispatch, listener, new_entry)
+            self._loop.call_soon_threadsafe(self._dispatch, listener, copy.deepcopy(new_entry))
         if should_trigger:
-            self._loop.call_soon_threadsafe(self.on_trigger.emit, new_entry)
+            self._loop.call_soon_threadsafe(self.on_trigger.emit, copy.deepcopy(new_entry))
 
     def _dispatch(self, callback: Listener, entry: WorldEntry) -> None:
         """Schedule one listener on the loop (runs on the loop thread, via call_soon_threadsafe).
@@ -330,7 +335,7 @@ class World:
                 if self._configs[key].include_in_prompt
             ]
             entries.sort(key=lambda e: e.current.timestamp)
-        return entries
+        return copy.deepcopy(entries)
 
     def render_entry(
         self,
@@ -353,7 +358,10 @@ class World:
                 serialize_fn = config.archival_serialize_fn
 
         previous_value = entry.previous.value if entry.previous is not None else None
-        body = serialize_fn(entry.current.value, previous_value)
+        body = serialize_fn(
+            copy.deepcopy(entry.current.value),
+            copy.deepcopy(previous_value),
+        )
         opening = TextPart(f'<entry key="{entry.key}" id="{entry.current.id}">\n')
         # The closing part ends with a trailing newline so that, when entries are concatenated
         # (the way adjacent parts merge — see content.md), each `</entry>` sits on its own line
