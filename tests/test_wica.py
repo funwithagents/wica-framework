@@ -147,7 +147,9 @@ def test_input_drives_world_and_agent_triggers_and_a_command_event(wica_factory)
     assert CommandIssued("wave", {}) in commands
 
 
-def test_multiple_subscribers_fire_and_a_raising_one_does_not_block_others(wica_factory):
+def test_multiple_subscribers_fire_and_a_raising_one_does_not_block_others(
+    wica_factory,
+):
     wica = wica_factory(fake_config())
 
     seen: list[str] = []
@@ -163,11 +165,15 @@ def test_multiple_subscribers_fire_and_a_raising_one_does_not_block_others(wica_
     wica.on_world_trigger.subscribe(boom)
     wica.on_world_trigger.subscribe(recorder)
 
-    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     wica.start()
 
     wica.world.update("speech", "hi")
-    assert fired.wait(timeout=WAIT_TIMEOUT)  # the raising sibling didn't starve the recorder
+    assert fired.wait(
+        timeout=WAIT_TIMEOUT
+    )  # the raising sibling didn't starve the recorder
     assert seen == ["speech"]
 
 
@@ -186,7 +192,9 @@ def test_stop_with_an_in_flight_command_tears_down_cleanly(wica_factory):
         await block.wait()
         return "unreachable"
 
-    wica.world.register("go", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "go", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     wica.register_command(block_forever)
     wica.start()
 
@@ -206,7 +214,9 @@ def test_stop_with_an_in_flight_command_tears_down_cleanly(wica_factory):
 
 def test_update_after_stop_raises(wica_factory):
     wica = wica_factory(fake_config())
-    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     wica.start()
     wica.stop()
 
@@ -221,7 +231,9 @@ def test_owned_wica_can_stop_and_start_again(wica_factory):
         output_sink=sink,
         coalesce_window=0,
     )
-    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
 
     wica.start()
     first_thread = wica._loop_thread
@@ -291,7 +303,9 @@ def test_injected_loop_wica_can_restart_without_owning_the_loop():
         coalesce_window=0,
         loop=loop,
     )
-    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     try:
         wica.start()
         wica.world.update("speech", "first")
@@ -320,7 +334,9 @@ def test_stop_cancels_reasoning_before_a_restart(wica_factory):
         output_sink=sink,
         coalesce_window=0,
     )
-    wica.world.register("speech", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     wica.start()
     wica.world.update("speech", "begin slow inference")
     wait_until(lambda: len(wica.agent.model.calls) == 1)

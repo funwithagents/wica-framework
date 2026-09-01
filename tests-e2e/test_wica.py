@@ -56,7 +56,9 @@ def test_plain_text_round_trip(config_path: Path):
     an update wakes the Agent, which reasons and speaks to the output sink."""
     sink = RecordingSink()
     wica = real_wica(config_path, output_sink=sink)
-    wica.world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     wica.start()
     try:
         wica.world.update("prompt", "Say hello in one short sentence.")
@@ -76,11 +78,15 @@ def test_real_tool_calling_round_trip(config_path: Path):
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""
-        await asyncio.sleep(0.1)  # gives the polling loop below a chance to see "running"
+        await asyncio.sleep(
+            0.1
+        )  # gives the polling loop below a chance to see "running"
         return a + b
 
     wica.register_command(add)
-    wica.world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    wica.world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     wica.start()
     try:
         wica.world.update("prompt", "What is 2 + 2? Use the add tool.")

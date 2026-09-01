@@ -34,7 +34,10 @@ def test_text_and_tool_calls_mapping():
             {
                 "text": "doing it",
                 "tool_calls": [
-                    {"name": "add", "args": {"a": 1, "b": 2}},  # id omitted -> generated
+                    {
+                        "name": "add",
+                        "args": {"a": 1, "b": 2},
+                    },  # id omitted -> generated
                     {"name": "greet", "args": {"name": "sam"}, "id": "supplied-id"},
                 ],
             }

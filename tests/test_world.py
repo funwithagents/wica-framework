@@ -47,7 +47,9 @@ def image_serialize(value: bytes | None, previous_value: bytes | None) -> Conten
     return [ImagePart(value, "image/png")] if value is not None else []
 
 
-def text_archival_serialize(value: bytes | None, previous_value: bytes | None) -> Content:
+def text_archival_serialize(
+    value: bytes | None, previous_value: bytes | None
+) -> Content:
     return [TextPart("a photo")]
 
 
@@ -83,7 +85,9 @@ def test_update_type_mismatch_raises_and_leaves_value_untouched(world: World):
     with pytest.raises(TypeError):
         world.update("temp", "not an int")
     assert world.get("temp") == 5
-    assert '<entry key="temp" id="2">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="2">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
 
 
 def test_update_none_always_succeeds_regardless_of_type(world: World):
@@ -108,7 +112,9 @@ def test_world_owns_mutable_values_and_returns_defensive_copies(world: World):
     assert world.get("state") == {"nested": [1]}
 
 
-def test_serializers_and_trigger_conditions_cannot_mutate_live_world_state(world: World):
+def test_serializers_and_trigger_conditions_cannot_mutate_live_world_state(
+    world: World,
+):
     def serialize(value: dict | None, previous: dict | None) -> Content:
         if value is not None:
             value["changed_by_serializer"] = True
@@ -155,13 +161,19 @@ def test_listener_receives_value_copy_not_live_world_state(world: World):
 
 def test_id_starts_at_one_on_register_and_increments_on_every_update(world: World):
     world.register("temp", str, serialize_fn=identity_serialize)
-    assert '<entry key="temp" id="1">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="1">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
 
     world.update("temp", "a")
-    assert '<entry key="temp" id="2">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="2">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
 
     world.update("temp", "b")
-    assert '<entry key="temp" id="3">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="3">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
 
 
 def test_clearing_advances_id_like_any_other_update(world: World):
@@ -169,11 +181,15 @@ def test_clearing_advances_id_like_any_other_update(world: World):
     world.update("temp", "a")  # id=2
     world.update("temp", None)  # id=3, clearing still advances id
     assert world.get("temp") is None
-    assert '<entry key="temp" id="3">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="3">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
 
     world.update("temp", "c")  # id=4
     assert world.get("temp") == "c"
-    assert '<entry key="temp" id="4">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="4">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
 
 
 def test_unregister_removes_entry(world: World):
@@ -197,12 +213,18 @@ def test_reregister_after_unregister_continues_id_sequence(world: World):
     world.unregister("temp")
 
     world.register("temp", int, serialize_fn=identity_serialize)  # id=3
-    assert '<entry key="temp" id="3">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="3">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
     world.update("temp", 7)  # id=4
-    assert '<entry key="temp" id="4">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="4">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
 
 
-def test_get_after_reregistration_with_different_type_just_returns_the_new_value(world: World):
+def test_get_after_reregistration_with_different_type_just_returns_the_new_value(
+    world: World,
+):
     world.register("temp", int, serialize_fn=identity_serialize)
     world.update("temp", 5)
     world.unregister("temp")
@@ -234,7 +256,9 @@ def test_get_entry_unregistered_raises(world: World):
 
 def test_bypass_coalescing_defaults_false_and_is_carried_onto_the_entry(world: World):
     world.register("plain", int, serialize_fn=identity_serialize)
-    world.register("urgent", int, serialize_fn=identity_serialize, bypass_coalescing=True)
+    world.register(
+        "urgent", int, serialize_fn=identity_serialize, bypass_coalescing=True
+    )
 
     # Carried onto the initial entry (like `type`) so the on_trigger snapshot is self-describing
     # without a config lookup.
@@ -346,7 +370,9 @@ def test_blocking_sync_listener_does_not_stall_other_dispatch(world: World):
 
     world.update("temp", "hello")
     assert blocked_started.wait(timeout=WAIT_TIMEOUT)
-    assert fast_fired.wait(timeout=WAIT_TIMEOUT)  # fires despite the sibling still blocked
+    assert fast_fired.wait(
+        timeout=WAIT_TIMEOUT
+    )  # fires despite the sibling still blocked
     release.set()
 
 
@@ -423,7 +449,9 @@ def test_on_trigger_fires_without_condition_fn(world: World):
 
 
 def test_on_trigger_subscriber_cannot_mutate_live_world_state(world: World):
-    world.register("state", dict, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "state", dict, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     delivered = threading.Event()
 
     def mutate(entry: WorldEntry) -> None:
@@ -485,7 +513,9 @@ def test_unregister_never_emits_trigger(world: World):
 
 
 def test_update_without_triggers_llm_call_never_emits(world: World):
-    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=False)
+    world.register(
+        "temp", str, serialize_fn=identity_serialize, triggers_llm_call=False
+    )
     subscriber = RecordingCallback()
     world.on_trigger.subscribe(subscriber)
 
@@ -529,7 +559,9 @@ def test_ttl_resets_value_to_none_and_advances_id_without_triggering(world: Worl
     world.on_trigger.subscribe(subscriber)
 
     world.update("temp", "hello")  # id=2
-    assert subscriber.event.wait(timeout=WAIT_TIMEOUT)  # the explicit update itself triggers
+    assert subscriber.event.wait(
+        timeout=WAIT_TIMEOUT
+    )  # the explicit update itself triggers
     subscriber.event.clear()
 
     deadline = time.monotonic() + WAIT_TIMEOUT
@@ -537,12 +569,16 @@ def test_ttl_resets_value_to_none_and_advances_id_without_triggering(world: Worl
         time.sleep(0.01)
 
     assert world.get("temp") is None
-    assert '<entry key="temp" id="3">' in flatten(world.render_entry(world.get_entry("temp")))
+    assert '<entry key="temp" id="3">' in flatten(
+        world.render_entry(world.get_entry("temp"))
+    )
     assert not subscriber.event.wait(timeout=0.2)  # but the TTL-driven reset does not
 
 
 def test_ttl_expiry_for_superseded_version_does_not_clobber_fresh_value(world: World):
-    world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(seconds=10))
+    world.register(
+        "temp", str, serialize_fn=identity_serialize, ttl=timedelta(seconds=10)
+    )
     world.update("temp", "hello")  # id=2, arms a TTL timer bound to id=2
     world.update("temp", "fresh")  # id=3 (cancels id=2's timer, arms id=3's)
 
@@ -554,14 +590,18 @@ def test_ttl_expiry_for_superseded_version_does_not_clobber_fresh_value(world: W
 
 
 def test_ttl_restart_postpones_reset(world: World):
-    world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=200))
+    world.register(
+        "temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=200)
+    )
     world.update("temp", "hello")
 
     time.sleep(0.12)
     world.update("temp", "hello-again")  # restarts the TTL window
 
     time.sleep(0.12)
-    assert world.get("temp") == "hello-again"  # original 200ms window would've expired by now
+    assert (
+        world.get("temp") == "hello-again"
+    )  # original 200ms window would've expired by now
 
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline and world.get("temp") is not None:
@@ -572,7 +612,9 @@ def test_ttl_restart_postpones_reset(world: World):
 def test_stop_cancels_pending_ttl_timer(loop: asyncio.AbstractEventLoop):
     world = World(loop)
     world.start()
-    world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=100))
+    world.register(
+        "temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=100)
+    )
     world.update("temp", "hello")
     world.stop()  # cancels the armed TTL timer
 
@@ -580,13 +622,17 @@ def test_stop_cancels_pending_ttl_timer(loop: asyncio.AbstractEventLoop):
     assert world.get("temp") == "hello"  # timer was cancelled, value untouched
 
     world.start()
-    assert world.get("temp") is None  # restart reconciles the elapsed wall-clock deadline
+    assert (
+        world.get("temp") is None
+    )  # restart reconciles the elapsed wall-clock deadline
 
 
 def test_restart_restores_remaining_ttl(loop: asyncio.AbstractEventLoop):
     world = World(loop)
     world.start()
-    world.register("temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=300))
+    world.register(
+        "temp", str, serialize_fn=identity_serialize, ttl=timedelta(milliseconds=300)
+    )
     world.update("temp", "hello")
     time.sleep(0.05)
     world.stop()
@@ -606,7 +652,9 @@ def test_restart_restores_remaining_ttl(loop: asyncio.AbstractEventLoop):
 
 
 def test_render_entry_format(world: World):
-    world.register("user_profile", str, serialize_fn=lambda v, p: [TextPart("Jane is logged in.")])
+    world.register(
+        "user_profile", str, serialize_fn=lambda v, p: [TextPart("Jane is logged in.")]
+    )
     world.update("user_profile", "irrelevant raw value")
 
     rendered = flatten(world.render_entry(world.get_entry("user_profile")))
@@ -628,7 +676,9 @@ def test_render_entry_body_parts_are_returned_unwrapped(world: World):
     assert content == [
         TextPart('<entry key="photo" id="2">\n'),
         ImagePart(b"\x89PNG", "image/png"),
-        TextPart(f"\nUpdated: {world.get_entry('photo').current.timestamp.isoformat()}\n</entry>\n"),
+        TextPart(
+            f"\nUpdated: {world.get_entry('photo').current.timestamp.isoformat()}\n</entry>\n"
+        ),
     ]
 
 
@@ -658,7 +708,9 @@ def test_render_entry_archival_falls_back_to_serialize_fn_when_absent(world: Wor
     world.update("temp", "value")
     entry = world.get_entry("temp")
 
-    assert world.render_entry(entry, archival=True) == world.render_entry(entry, archival=False)
+    assert world.render_entry(entry, archival=True) == world.render_entry(
+        entry, archival=False
+    )
 
 
 def test_render_entry_raises_when_entry_key_no_longer_registered(world: World):
@@ -693,15 +745,23 @@ def test_render_entry_serialize_fn_override_used_and_survives_unregister(world: 
 
 
 def test_render_entry_ignores_include_in_prompt(world: World):
-    world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)
+    world.register(
+        "hidden", str, serialize_fn=identity_serialize, include_in_prompt=False
+    )
     world.update("hidden", "secret")
     assert "secret" in flatten(world.render_entry(world.get_entry("hidden")))
 
 
 def test_get_prompt_entries_omits_excluded_and_orders_by_timestamp(world: World):
-    world.register("first", str, serialize_fn=identity_serialize, include_in_prompt=True)
-    world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)
-    world.register("second", str, serialize_fn=identity_serialize, include_in_prompt=True)
+    world.register(
+        "first", str, serialize_fn=identity_serialize, include_in_prompt=True
+    )
+    world.register(
+        "hidden", str, serialize_fn=identity_serialize, include_in_prompt=False
+    )
+    world.register(
+        "second", str, serialize_fn=identity_serialize, include_in_prompt=True
+    )
     world.update("first", "1")
     world.update("hidden", "secret")
     world.update("second", "2")
@@ -716,8 +776,12 @@ def test_get_prompt_entries_omits_excluded_and_orders_by_timestamp(world: World)
 
 
 def test_render_full_prompt_omits_excluded_entries(world: World):
-    world.register("shown", str, serialize_fn=identity_serialize, include_in_prompt=True)
-    world.register("hidden", str, serialize_fn=identity_serialize, include_in_prompt=False)
+    world.register(
+        "shown", str, serialize_fn=identity_serialize, include_in_prompt=True
+    )
+    world.register(
+        "hidden", str, serialize_fn=identity_serialize, include_in_prompt=False
+    )
     world.update("shown", "visible-value")
     world.update("hidden", "secret-value")
 

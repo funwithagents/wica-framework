@@ -107,7 +107,9 @@ def test_from_json_locates_system_prompt_file_relative_to_config_but_defers_read
     cfg = WicaConfig.from_json(config_path)
     # Located (absolutized against the config dir), inline slot stays empty, file not read yet.
     assert cfg.agent.system_prompt is None
-    assert cfg.agent.system_prompt_file == str((tmp_path / "prompts" / "persona.md").resolve())
+    assert cfg.agent.system_prompt_file == str(
+        (tmp_path / "prompts" / "persona.md").resolve()
+    )
     # The read is deferred to build:
     assert resolve_system_prompt(cfg.agent) == "You are Wica, a friendly robot."
 
@@ -186,7 +188,9 @@ def test_resolve_api_key_reads_env_when_set(monkeypatch: pytest.MonkeyPatch):
     assert resolve_api_key(cfg) == "sk-from-env"
 
 
-def test_resolve_api_key_unset_env_raises_missing_env_error(monkeypatch: pytest.MonkeyPatch):
+def test_resolve_api_key_unset_env_raises_missing_env_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
     monkeypatch.delenv("WICA_TEST_KEY_UNSET", raising=False)
     # Loads fine (verbatim) — the error is deferred to resolution.
     cfg = AgentConfig.from_dict(_agent_dict(api_key_env="WICA_TEST_KEY_UNSET"))
@@ -253,7 +257,9 @@ def test_missing_agent_block_raises():
 def test_build_chat_model_forwards_api_key_when_set(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {}
 
-    def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
+    def fake_init_chat_model(
+        model: str, *, model_provider: str, **kwargs: Any
+    ) -> object:
         captured["model"] = model
         captured["model_provider"] = model_provider
         captured["kwargs"] = kwargs
@@ -262,7 +268,10 @@ def test_build_chat_model_forwards_api_key_when_set(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
     config = AgentConfig(
-        provider="anthropic", model="claude-sonnet-5", system_prompt="hi", api_key="sk-abc"
+        provider="anthropic",
+        model="claude-sonnet-5",
+        system_prompt="hi",
+        api_key="sk-abc",
     )
     agent_module.build_chat_model(config)
 
@@ -272,13 +281,17 @@ def test_build_chat_model_forwards_api_key_when_set(monkeypatch: pytest.MonkeyPa
 def test_build_chat_model_omits_api_key_when_unset(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {}
 
-    def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
+    def fake_init_chat_model(
+        model: str, *, model_provider: str, **kwargs: Any
+    ) -> object:
         captured["kwargs"] = kwargs
         return object()
 
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
-    config = AgentConfig(provider="anthropic", model="claude-sonnet-5", system_prompt="hi")
+    config = AgentConfig(
+        provider="anthropic", model="claude-sonnet-5", system_prompt="hi"
+    )
     agent_module.build_chat_model(config)
 
     assert "api_key" not in captured["kwargs"]
@@ -288,7 +301,9 @@ def test_resolve_system_prompt_reads_file_at_build(tmp_path: Path):
     prompt = tmp_path / "persona.md"
     prompt.write_text("Persona from a file.")
 
-    config = AgentConfig(provider="anthropic", model="m", system_prompt_file=str(prompt))
+    config = AgentConfig(
+        provider="anthropic", model="m", system_prompt_file=str(prompt)
+    )
     assert resolve_system_prompt(config) == "Persona from a file."
 
 
@@ -297,12 +312,16 @@ def test_build_chat_model_raises_missing_env_at_build(monkeypatch: pytest.Monkey
     monkeypatch.delenv("WICA_TEST_KEY_UNSET", raising=False)
     monkeypatch.setattr(agent_module, "init_chat_model", lambda *a, **k: object())
 
-    config = AgentConfig.from_dict(_agent_dict(api_key_env="WICA_TEST_KEY_UNSET"))  # loads fine
+    config = AgentConfig.from_dict(
+        _agent_dict(api_key_env="WICA_TEST_KEY_UNSET")
+    )  # loads fine
     with pytest.raises(MissingEnvError):
         agent_module.build_chat_model(config)
 
 
-def test_from_json_then_wica_init_composes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_from_json_then_wica_init_composes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The blessed startup shape: load the file, then Wica.init — which applies logging and builds
     the Agent (resolution at build). See specs/config.md "Flow into the Agent"."""
     import asyncio
@@ -312,7 +331,9 @@ def test_from_json_then_wica_init_composes(tmp_path: Path, monkeypatch: pytest.M
 
     captured: dict[str, Any] = {}
 
-    def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
+    def fake_init_chat_model(
+        model: str, *, model_provider: str, **kwargs: Any
+    ) -> object:
         captured["model"] = model
         captured["kwargs"] = kwargs
         return object()
@@ -323,13 +344,19 @@ def test_from_json_then_wica_init_composes(tmp_path: Path, monkeypatch: pytest.M
     config_path.write_text(json.dumps(_wica_dict(api_key="sk-abc")))
 
     wica_config = WicaConfig.from_json(config_path)
-    loop = asyncio.new_event_loop()  # injected + owned here, never started (no model call needed)
+    loop = (
+        asyncio.new_event_loop()
+    )  # injected + owned here, never started (no model call needed)
     try:
-        Wica.init(wica_config, loop=loop)  # applies logging + builds the model (monkeypatched)
+        Wica.init(
+            wica_config, loop=loop
+        )  # applies logging + builds the model (monkeypatched)
         assert logging.getLogger("wica").level == logging.DEBUG
         assert captured["model"] == "claude-sonnet-5"
     finally:
-        logging.getLogger("wica").setLevel(logging.WARNING)  # don't leak into other tests
+        logging.getLogger("wica").setLevel(
+            logging.WARNING
+        )  # don't leak into other tests
         loop.close()
     assert captured["kwargs"]["api_key"] == "sk-abc"
 
@@ -344,7 +371,9 @@ def test_hf_provider_defaults_to_auto():
 
 def test_hf_provider_parsed_when_present():
     cfg = AgentConfig.from_dict(
-        _agent_dict(provider="huggingface-hub", model="meta-llama/x", hf_provider="together")
+        _agent_dict(
+            provider="huggingface-hub", model="meta-llama/x", hf_provider="together"
+        )
     )
     assert cfg.hf_provider == "together"
 
@@ -357,10 +386,14 @@ def test_hf_provider_wrong_type_raises():
 # --- build_chat_model: provider construction branch ---------------------------------------
 
 
-def test_build_chat_model_openai_routes_through_init_chat_model(monkeypatch: pytest.MonkeyPatch):
+def test_build_chat_model_openai_routes_through_init_chat_model(
+    monkeypatch: pytest.MonkeyPatch,
+):
     captured: dict[str, Any] = {}
 
-    def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
+    def fake_init_chat_model(
+        model: str, *, model_provider: str, **kwargs: Any
+    ) -> object:
         captured["model"] = model
         captured["provider"] = model_provider
         captured["kwargs"] = kwargs
@@ -368,7 +401,9 @@ def test_build_chat_model_openai_routes_through_init_chat_model(monkeypatch: pyt
 
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
-    config = AgentConfig(provider="openai", model="gpt-4o", system_prompt="hi", api_key="sk-x")
+    config = AgentConfig(
+        provider="openai", model="gpt-4o", system_prompt="hi", api_key="sk-x"
+    )
     agent_module.build_chat_model(config)
 
     assert captured["model"] == "gpt-4o"
@@ -381,14 +416,18 @@ def test_build_chat_model_resolves_api_key_env(monkeypatch: pytest.MonkeyPatch):
     api_key_env config resolves to the env value here, at build."""
     captured: dict[str, Any] = {}
 
-    def fake_init_chat_model(model: str, *, model_provider: str, **kwargs: Any) -> object:
+    def fake_init_chat_model(
+        model: str, *, model_provider: str, **kwargs: Any
+    ) -> object:
         captured["kwargs"] = kwargs
         return object()
 
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
     monkeypatch.setenv("WICA_TEST_KEY", "sk-resolved")
 
-    config = AgentConfig.from_dict(_agent_dict(provider="openai", api_key_env="WICA_TEST_KEY"))
+    config = AgentConfig.from_dict(
+        _agent_dict(provider="openai", api_key_env="WICA_TEST_KEY")
+    )
     agent_module.build_chat_model(config)
 
     assert captured["kwargs"]["api_key"] == "sk-resolved"
@@ -418,7 +457,9 @@ def test_build_chat_model_huggingface_hub_branch(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         agent_module,
         "init_chat_model",
-        lambda *a, **k: pytest.fail("huggingface-hub must not go through init_chat_model"),
+        lambda *a, **k: pytest.fail(
+            "huggingface-hub must not go through init_chat_model"
+        ),
     )
 
     config = AgentConfig(
@@ -455,7 +496,9 @@ def test_build_chat_model_huggingface_hub_omits_token_when_no_api_key(
             captured["endpoint"] = kwargs
 
     monkeypatch.setattr(langchain_huggingface, "HuggingFaceEndpoint", FakeEndpoint)
-    monkeypatch.setattr(langchain_huggingface, "ChatHuggingFace", lambda *, llm: object())
+    monkeypatch.setattr(
+        langchain_huggingface, "ChatHuggingFace", lambda *, llm: object()
+    )
 
     config = AgentConfig(
         provider="huggingface-hub", model="meta-llama/x", system_prompt="hi"

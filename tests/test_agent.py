@@ -67,11 +67,15 @@ class ProgrammableChatModel(BaseChatModel):
         self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs: Any
     ) -> ChatResult:
         self.calls.append(messages)
-        assert self.respond is not None, "ProgrammableChatModel.respond must be set before use"
+        assert self.respond is not None, (
+            "ProgrammableChatModel.respond must be set before use"
+        )
         message = await self.respond(messages)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
-    def bind_tools(self, tools, *, tool_choice=None, **kwargs: Any) -> Runnable[Any, AIMessage]:
+    def bind_tools(
+        self, tools, *, tool_choice=None, **kwargs: Any
+    ) -> Runnable[Any, AIMessage]:
         return self
 
 
@@ -88,7 +92,10 @@ def tool_call_response(
     async def respond(messages: list[BaseMessage]) -> AIMessage:
         return AIMessage(
             content="",
-            tool_calls=[{"name": name, "args": args, "id": call_id} for name, args, call_id in calls],
+            tool_calls=[
+                {"name": name, "args": args, "id": call_id}
+                for name, args, call_id in calls
+            ],
         )
 
     return respond
@@ -160,7 +167,9 @@ def human_texts(message: BaseMessage) -> str:
 
 
 def test_text_only_response_updates_sink_and_history(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(respond=text_response("Hello there"))
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
@@ -178,7 +187,9 @@ def test_text_only_response_updates_sink_and_history(loop, world, sink):
 
 
 def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
@@ -218,7 +229,8 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
     # its tool_result is a fixed ack pointing at the command entry, never the outcome
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        for m in tool_messages
     )
     # the outcome (3) is delivered by the command's World entry, rendered into the observation
     observation = "".join(
@@ -236,7 +248,9 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
     # Regression: past commands must be re-rendered as the model's own native tool_calls, not as
     # a "Calling foo(...)…" assistant text block — otherwise the model imitates that prose and
     # emits command descriptions as plain text instead of issuing real tool calls.
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
@@ -260,18 +274,24 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
     tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
 
     assert any(c["name"] == "add" for m in ai_messages for c in m.tool_calls)
-    assert any(m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages)
+    assert any(
+        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        for m in tool_messages
+    )
     # no *assistant* message renders the call as prose (the outcome lives in the observation, a
     # user-role HumanMessage, so there is nothing for the model to imitate as its own output)
     assert not any(
-        "Calling add" in str(m.content) or "Called add" in str(m.content) for m in ai_messages
+        "Calling add" in str(m.content) or "Called add" in str(m.content)
+        for m in ai_messages
     )
 
     agent.stop()
 
 
 def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("explode", {}, "call1")]),
@@ -296,7 +316,8 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
     # the tool_result is the fixed ack; the failure is delivered by the command's World entry
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        for m in tool_messages
     )
     observation = "".join(
         str(m.content) for m in second_call_messages if isinstance(m, HumanMessage)
@@ -311,7 +332,9 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
     # running, a new input starts a fresh step; that step must be told the command is NOT finished.
     # The running command renders as an in-progress observation entry, and its tool_result is a
     # fixed ack — not a completed result that would read as "the call returned".
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     block = asyncio.Event()
 
     async def dance() -> str:
@@ -332,7 +355,9 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
     world.update("input", "dance for me")
     key = "agent:command:call1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
-    wait_until(lambda: agent._busy is False)  # step 1 finished; dance still running in background
+    wait_until(
+        lambda: agent._busy is False
+    )  # step 1 finished; dance still running in background
 
     # A new input arrives while dance is still running -> a concurrent step runs.
     world.update("input", "say hi")
@@ -348,7 +373,8 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
     # its tool_result is the fixed ack, never a completed result
     tool_messages = [m for m in step2 if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        for m in tool_messages
     )
     assert world.get_entry(key).current.value.state == "running"
 
@@ -357,7 +383,9 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
 
 
 def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     slow_release = asyncio.Event()
 
     async def fast_tool() -> str:
@@ -391,11 +419,16 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
 
     second_call_messages = model.calls[1]
     call_names = {
-        c["name"] for m in second_call_messages if isinstance(m, AIMessage) for c in m.tool_calls
+        c["name"]
+        for m in second_call_messages
+        if isinstance(m, AIMessage)
+        for c in m.tool_calls
     }
     assert {"fast_tool", "slow_tool"} <= call_names
     tool_contents = {
-        m.tool_call_id: m.content for m in second_call_messages if isinstance(m, ToolMessage)
+        m.tool_call_id: m.content
+        for m in second_call_messages
+        if isinstance(m, ToolMessage)
     }
     assert tool_contents.get("fast") == _command_ack("fast")
     assert tool_contents.get("slow") == _command_ack("slow")
@@ -429,7 +462,9 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
     # loop. The dropped completion is NOT eagerly retired: it stays as current World state and is
     # rendered into history (then retired) by the next step that observes it, so the completed
     # Command is never silently lost — the invariant "always in history or current state".
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     release_slow = asyncio.Event()
     release_step2 = asyncio.Event()
     step2_running = threading.Event()
@@ -467,7 +502,9 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
 
     # Let slow finish: its completion trigger arrives while busy and is dropped (no step runs).
     loop.call_soon_threadsafe(release_slow.set)
-    wait_until(lambda: world.get_entry("agent:command:slow").current.value.state == "complete")
+    wait_until(
+        lambda: world.get_entry("agent:command:slow").current.value.state == "complete"
+    )
 
     # Finish step 2. fast was observed and retired by it; slow's completion was dropped, so no
     # third step ran for it — and it must persist as current terminal state, not be lost.
@@ -494,7 +531,9 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
 
 
 def test_single_in_flight_trigger_dropped_and_logged(loop, world, sink, caplog):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     hold = asyncio.Event()
     started = threading.Event()
 
@@ -559,7 +598,9 @@ def test_freshness_flips_at_bundle_boundary(loop, world, sink):
         archival_serialize_fn=archival_serialize,
         triggers_llm_call=True,
     )
-    model = ProgrammableChatModel(respond=sequence(text_response("first"), text_response("second")))
+    model = ProgrammableChatModel(
+        respond=sequence(text_response("first"), text_response("second"))
+    )
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
 
@@ -580,7 +621,9 @@ def test_freshness_flips_at_bundle_boundary(loop, world, sink):
 
 
 def test_on_prompt_event_fires_with_the_messages_the_model_receives(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(respond=text_response("hi"))
     captured: list[list[BaseMessage]] = []
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
@@ -597,7 +640,9 @@ def test_on_prompt_event_fires_with_the_messages_the_model_receives(loop, world,
 
 
 def test_on_prompt_subscriber_cannot_mutate_messages_sent_to_model(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(respond=text_response("hi"))
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
 
@@ -619,7 +664,9 @@ def test_on_prompt_subscriber_cannot_mutate_messages_sent_to_model(loop, world, 
 
 
 def test_on_trigger_event_fires_with_the_entry_that_started_the_step(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(respond=text_response("hi"))
     triggers: list[str] = []
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
@@ -635,7 +682,9 @@ def test_on_trigger_event_fires_with_the_entry_that_started_the_step(loop, world
 
 
 def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
@@ -662,7 +711,9 @@ def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, s
 
 
 def test_on_command_subscriber_cannot_mutate_dispatched_arguments(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("read_payload", {"payload": {"value": 1}}, "call1")]),
@@ -694,7 +745,9 @@ def test_on_command_subscriber_cannot_mutate_dispatched_arguments(loop, world, s
 
 
 def test_raising_on_prompt_subscriber_does_not_abort_the_step(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(respond=text_response("still replied"))
 
     def boom(messages: list[BaseMessage]) -> None:
@@ -707,14 +760,18 @@ def test_raising_on_prompt_subscriber_does_not_abort_the_step(loop, world, sink)
     world.update("input", "hello")
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == ["still replied"]  # the raising subscriber didn't break the step
+    assert sink.texts == [
+        "still replied"
+    ]  # the raising subscriber didn't break the step
     assert len(model.calls) == 1
 
     agent.stop()
 
 
 def test_stop_unsubscribes_from_the_world_trigger(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     model = ProgrammableChatModel(respond=text_response("hi"))
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
@@ -726,7 +783,9 @@ def test_stop_unsubscribes_from_the_world_trigger(loop, world, sink):
 
 
 def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     block = asyncio.Event()
 
     async def block_forever() -> str:
@@ -756,7 +815,8 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
     # the tool_result is the fixed ack; the cancellation is delivered by the command's World entry
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1") for m in tool_messages
+        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        for m in tool_messages
     )
     observation = "".join(
         str(m.content) for m in second_call_messages if isinstance(m, HumanMessage)
@@ -769,7 +829,9 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
 
 
 def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     block = asyncio.Event()
 
     async def block_forever() -> str:
@@ -777,7 +839,9 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
         await block.wait()
         return "unreachable"
 
-    model = ProgrammableChatModel(respond=tool_call_response([("block_forever", {}, "call1")]))
+    model = ProgrammableChatModel(
+        respond=tool_call_response([("block_forever", {}, "call1")])
+    )
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.register_command(block_forever)
     agent.start()
@@ -792,7 +856,9 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
     # The World is still running (only the Agent stopped), so the cancellation's terminal write
     # lands — this is the agent-before-world teardown order Wica enforces.
     wait_until(lambda: world.get_entry(key).current.value.state == "cancelled")
-    assert len(model.calls) == 1  # no second call: the Agent already unsubscribed from on_trigger
+    assert (
+        len(model.calls) == 1
+    )  # no second call: the Agent already unsubscribed from on_trigger
 
 
 def _prompt_contains(model: ProgrammableChatModel, needle: str) -> bool:
@@ -821,7 +887,9 @@ def _wait_for_render(model: ProgrammableChatModel, world: World, needle: str) ->
 
 
 def test_model_can_cancel_a_running_command(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     block = asyncio.Event()
 
     async def block_forever() -> str:
@@ -857,7 +925,9 @@ def test_model_can_cancel_a_running_command(loop, world, sink):
 
 
 def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     block = asyncio.Event()
 
     async def block_forever() -> str:
@@ -896,7 +966,9 @@ def test_cancel_command_action_is_a_noop_for_unknown_id(loop, world, sink):
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
 
-    future = asyncio.run_coroutine_threadsafe(agent._cancel_command_action("nope"), loop)
+    future = asyncio.run_coroutine_threadsafe(
+        agent._cancel_command_action("nope"), loop
+    )
     result = future.result(timeout=WAIT_TIMEOUT)
     assert "not a running command" in result
 
@@ -910,7 +982,9 @@ def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
     world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     model = ProgrammableChatModel(respond=text_response("ok"))
     triggers: list[str] = []
-    agent = make_agent(model, world=world, loop=loop, coalesce_window=0.3, output_sink=sink)
+    agent = make_agent(
+        model, world=world, loop=loop, coalesce_window=0.3, output_sink=sink
+    )
     agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
 
@@ -932,7 +1006,9 @@ def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
 def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
     # coalesce_window=0 is the pre-coalescing behavior: each trigger fires at once (no wait), and a
     # trigger arriving while a step is in flight is dropped, not coalesced.
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     hold = asyncio.Event()
     started = threading.Event()
 
@@ -942,7 +1018,9 @@ def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
         return AIMessage(content="done")
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, coalesce_window=0, output_sink=sink)
+    agent = make_agent(
+        model, world=world, loop=loop, coalesce_window=0, output_sink=sink
+    )
     agent.start()
 
     t0 = time.monotonic()
@@ -974,12 +1052,16 @@ def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
     )
     model = ProgrammableChatModel(respond=text_response("ok"))
     triggers: list[str] = []
-    agent = make_agent(model, world=world, loop=loop, coalesce_window=1.0, output_sink=sink)
+    agent = make_agent(
+        model, world=world, loop=loop, coalesce_window=1.0, output_sink=sink
+    )
     agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
 
     world.update("ctx", "context")  # opens the (long) window
-    wait_until(lambda: agent._window_timer is not None)  # ctx is now batched, window open
+    wait_until(
+        lambda: agent._window_timer is not None
+    )  # ctx is now batched, window open
 
     t_urgent = time.monotonic()
     world.update("urgent", "stop!")  # bypass → flush now, pulling ctx forward
@@ -998,7 +1080,9 @@ def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
 def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
     # bypass_coalescing skips the *wait*, not the single-in-flight *drop*: an urgent trigger landing
     # while a step is in flight is dropped like any other (barge-in/interruption is deferred).
-    world.register("input", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
     world.register(
         "urgent",
         str,
@@ -1015,7 +1099,9 @@ def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
         return AIMessage(content="done")
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, coalesce_window=0, output_sink=sink)
+    agent = make_agent(
+        model, world=world, loop=loop, coalesce_window=0, output_sink=sink
+    )
     agent.start()
 
     world.update("input", "go")

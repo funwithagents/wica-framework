@@ -119,6 +119,7 @@ After any code change, run linting, type checking, and tests, and fix any failur
 ```
 uv sync --dev
 uv run ruff check .
+uv run ruff format .
 uv run pyright
 uv run pytest
 ```

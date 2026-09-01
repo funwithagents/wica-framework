@@ -51,4 +51,6 @@ class Event[T]:
             try:
                 handler(value)
             except Exception:
-                _logger.exception("Event subscriber raised; continuing to next subscriber")
+                _logger.exception(
+                    "Event subscriber raised; continuing to next subscriber"
+                )

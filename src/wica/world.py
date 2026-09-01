@@ -258,7 +258,9 @@ class World:
                 key=key,
                 type=old_entry.type,
                 bypass_coalescing=old_entry.bypass_coalescing,
-                current=WorldEntryVersion(id=new_id, value=stored_value, timestamp=_now()),
+                current=WorldEntryVersion(
+                    id=new_id, value=stored_value, timestamp=_now()
+                ),
                 previous=old_entry.current,
             )
             self._entries[key] = new_entry
@@ -289,12 +291,16 @@ class World:
             " [ttl reset]" if ttl_reset else "",
         )
         if listeners:
-            _logger.debug("dispatching %d listener(s) for %r (id=%d)", len(listeners), key, new_id)
+            _logger.debug(
+                "dispatching %d listener(s) for %r (id=%d)", len(listeners), key, new_id
+            )
         if should_trigger:
             _logger.debug("update to %r (id=%d) triggers an LLM call", key, new_id)
         elif triggers_configured:
             _logger.debug(
-                "update to %r (id=%d) did not trigger an LLM call (condition unmet)", key, new_id
+                "update to %r (id=%d) did not trigger an LLM call (condition unmet)",
+                key,
+                new_id,
             )
 
         # Both reactive outputs are fire-and-forget onto the shared loop, so a slow callback never
@@ -302,9 +308,13 @@ class World:
         # async-on-the-loop and are individually guarded; the trigger emits on_trigger on the loop
         # thread so a subscriber may safely create_task. See specs/world.md ("The shared event loop").
         for listener in listeners:
-            self._loop.call_soon_threadsafe(self._dispatch, listener, copy.deepcopy(new_entry))
+            self._loop.call_soon_threadsafe(
+                self._dispatch, listener, copy.deepcopy(new_entry)
+            )
         if should_trigger:
-            self._loop.call_soon_threadsafe(self.on_trigger.emit, copy.deepcopy(new_entry))
+            self._loop.call_soon_threadsafe(
+                self.on_trigger.emit, copy.deepcopy(new_entry)
+            )
 
     def _dispatch(self, callback: Listener, entry: WorldEntry) -> None:
         """Schedule one listener on the loop (runs on the loop thread, via call_soon_threadsafe).
@@ -344,7 +354,9 @@ class World:
             # was about to be cancelled anyway, so the stale reset is a harmless no-op.
             pass
 
-    def _make_ttl_timer(self, key: str, expected_id: int, delay: float) -> threading.Timer:
+    def _make_ttl_timer(
+        self, key: str, expected_id: int, delay: float
+    ) -> threading.Timer:
         timer = threading.Timer(delay, self._ttl_expire, args=(key, expected_id))
         timer.daemon = True
         return timer
@@ -401,7 +413,9 @@ class World:
         # The closing part ends with a trailing newline so that, when entries are concatenated
         # (the way adjacent parts merge — see content.md), each `</entry>` sits on its own line
         # and the next `<entry ...>` starts on the following one, rather than gluing together.
-        closing = TextPart(f"\nUpdated: {entry.current.timestamp.isoformat()}\n</entry>\n")
+        closing = TextPart(
+            f"\nUpdated: {entry.current.timestamp.isoformat()}\n</entry>\n"
+        )
         return [opening, *body, closing]
 
     def render_full_prompt(self) -> Content:

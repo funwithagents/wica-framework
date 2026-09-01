@@ -85,7 +85,9 @@ def _tracked_user(value: Any, previous: Any) -> Content:
 
 def register_world() -> None:
     world.register("speech_input", str, serialize_fn=_speech, triggers_llm_call=True)
-    world.register("closest_user", str, serialize_fn=_closest_user, triggers_llm_call=True)
+    world.register(
+        "closest_user", str, serialize_fn=_closest_user, triggers_llm_call=True
+    )
     world.register("emotion", str, serialize_fn=_emotion)
     world.register("tracked_user", str, serialize_fn=_tracked_user)
 
@@ -159,7 +161,11 @@ def _describe_trigger(entry: WorldEntry) -> str:
     if key == "speech_input":
         return f'🗣️ "{value}"'
     if key == "closest_user":
-        return "👤 Closest user gone" if value is None else f"👤 Closest user detected: {value}"
+        return (
+            "👤 Closest user gone"
+            if value is None
+            else f"👤 Closest user detected: {value}"
+        )
     if key.startswith("agent:command:"):
         name = value.name if isinstance(value, CommandExecution) else key
         return f"⚡ command finished: {name}"
@@ -211,7 +217,9 @@ def _render_message(m: BaseMessage) -> str:
     we render those (and the tool_call id on a tool result) explicitly, or the AI block looks blank."""
     lines = [f"### {m.type.upper()}"]
     if isinstance(m, ToolMessage):
-        lines.append(f"🔧 result for [id={m.tool_call_id}] => {_flatten_content(m.content)}")
+        lines.append(
+            f"🔧 result for [id={m.tool_call_id}] => {_flatten_content(m.content)}"
+        )
         return "\n".join(lines)
     body = _flatten_content(m.content)
     if body:
@@ -246,7 +254,9 @@ try:
     wica = Wica.init(wica_config, output_sink=output_sink)
 except MissingEnvError as exc:
     config_error = f"environment variable {exc.env_var!r} is not set"
-    apply_logging(wica_config.logging)  # Wica.init didn't reach its own apply — do it for explore mode
+    apply_logging(
+        wica_config.logging
+    )  # Wica.init didn't reach its own apply — do it for explore mode
     # Explore-only: a World-only system (no Agent) on its own loop, so the panel and sensor inputs
     # still work while nothing reasons over them.
     _explore_loop = asyncio.new_event_loop()
@@ -417,7 +427,9 @@ def build_ui() -> gr.Blocks:
         msg.submit(on_send, inputs=msg, outputs=msg)
         detect.click(on_detect, inputs=user_id, outputs=user_id)
         gone.click(on_user_gone)
-        prompt_selector.change(on_select_prompt, inputs=prompt_selector, outputs=prompt_view)
+        prompt_selector.change(
+            on_select_prompt, inputs=prompt_selector, outputs=prompt_view
+        )
 
         timer = gr.Timer(0.4)
         timer.tick(tick, outputs=[chatbot, world_view, prompt_selector, prompt_view])

@@ -269,7 +269,9 @@ class Agent:
         # single-in-flight loop, dropping the rest). 0 disables it — each trigger fires immediately,
         # the pre-coalescing behavior. See specs/agent.md "Trigger coalescing".
         self._coalesce_window = coalesce_window
-        self._output_sink = output_sink if output_sink is not None else _noop_output_sink
+        self._output_sink = (
+            output_sink if output_sink is not None else _noop_output_sink
+        )
         # Instrumentation Events — observability only, never control flow. The Agent emits on them
         # at the right points inside the loop; any number of consumers subscribe, and Event.emit's
         # per-subscriber isolation catches+logs a raising subscriber so it can neither abort a step
@@ -335,6 +337,7 @@ class Agent:
             description=_CANCEL_COMMAND_DESCRIPTION,
         )
         _logger.info("agent starting (%d command(s) registered)", len(self._commands))
+
         # Subscribe to the World's raw trigger. The World emits on_trigger on the loop thread
         # (call_soon_threadsafe — see specs/world.md), so this sync shim runs there and create_task
         # is safe — no run_coroutine_threadsafe bridge. Wica owns and starts the loop; the Agent
@@ -435,7 +438,9 @@ class Agent:
         call_id = call_id.removeprefix(_COMMAND_KEY_PREFIX)
         if self._cancel_command_on_loop(call_id):
             return f"cancelling {call_id}"
-        return f"{call_id} is not a running command (it already finished or never existed)"
+        return (
+            f"{call_id} is not a running command (it already finished or never existed)"
+        )
 
     async def _handle_trigger(self, entry: WorldEntry) -> None:
         # Runs on the loop thread (the World emits on_trigger there, and the start() shim
@@ -445,7 +450,8 @@ class Agent:
         _logger.debug("trigger received: %s", _describe_entry(entry))
         if self._busy:
             _logger.info(
-                "dropping trigger (%s) — a call is already in flight", _describe_entry(entry)
+                "dropping trigger (%s) — a call is already in flight",
+                _describe_entry(entry),
             )
             # We don't run a step for a dropped trigger. A dropped *command completion* is left
             # in place on purpose — NOT retired here — so the terminal entry stays part of
@@ -466,7 +472,9 @@ class Agent:
         elif self._window_timer is None:
             # First trigger of a burst opens a fixed leading-edge window. Later triggers join the
             # batch above without rescheduling, so the window never extends (bounded latency).
-            self._window_timer = self._loop.call_later(self._coalesce_window, self._flush_window)
+            self._window_timer = self._loop.call_later(
+                self._coalesce_window, self._flush_window
+            )
 
     def _flush_window(self) -> None:
         """Close the coalescing window and start the single step for the batched triggers. Sync,
@@ -501,7 +509,9 @@ class Agent:
                 _describe_entry(representative),
             )
         else:
-            _logger.debug("step starting (trigger: %s)", _describe_entry(representative))
+            _logger.debug(
+                "step starting (trigger: %s)", _describe_entry(representative)
+            )
         for triggered in batch:
             self.on_trigger.emit(triggered)
         self._append_observation()
@@ -524,7 +534,9 @@ class Agent:
         for call in response.tool_calls:
             call_id = call["id"] or uuid.uuid4().hex
             args = copy.deepcopy(call["args"])
-            self._history.append(CommandRecord(call_id, call["name"], copy.deepcopy(args)))
+            self._history.append(
+                CommandRecord(call_id, call["name"], copy.deepcopy(args))
+            )
             self._dispatch_command(call_id, call["name"], args)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
 
@@ -532,7 +544,9 @@ class Agent:
         # A subscriber may annotate or otherwise mutate what it receives without changing the
         # arguments stored in history, shown in the World, or passed to the Command itself.
         self.on_command.emit(CommandIssued(name, copy.deepcopy(args)))
-        _logger.debug("dispatching command %s(%s) call_id=%s", name, _format_args(args), call_id)
+        _logger.debug(
+            "dispatching command %s(%s) call_id=%s", name, _format_args(args), call_id
+        )
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         self._command_keys.add(key)
         self._world.register(
@@ -547,15 +561,21 @@ class Agent:
         task = self._track_task(self._run_command(key, call_id, name, args))
         self._running_tasks[key] = task
 
-    async def _run_command(self, key: str, call_id: str, name: str, args: dict[str, Any]) -> None:
-        _logger.debug("command %s(%s) [call_id=%s] executing", name, _format_args(args), call_id)
+    async def _run_command(
+        self, key: str, call_id: str, name: str, args: dict[str, Any]
+    ) -> None:
+        _logger.debug(
+            "command %s(%s) [call_id=%s] executing", name, _format_args(args), call_id
+        )
         try:
             command = self._commands[name]
             result = await command.ainvoke(args)
         except asyncio.CancelledError:
             _logger.debug("command %s [call_id=%s] cancelled", name, call_id)
             try:
-                self._world.update(key, CommandExecution(name=name, args=args, state="cancelled"))
+                self._world.update(
+                    key, CommandExecution(name=name, args=args, state="cancelled")
+                )
             except RuntimeError:
                 # World already stopped — this cancel is part of Wica teardown (agent.stop() cancels
                 # in-flight commands just before world.stop()). The terminal write is moot at
@@ -565,14 +585,21 @@ class Agent:
         except Exception as exc:
             _logger.warning("command %s [call_id=%s] failed: %s", name, call_id, exc)
             self._world.update(
-                key, CommandExecution(name=name, args=args, state="failed", error=str(exc))
+                key,
+                CommandExecution(name=name, args=args, state="failed", error=str(exc)),
             )
         else:
             _logger.debug(
-                "command %s [call_id=%s] complete → %s", name, call_id, _truncate(str(result))
+                "command %s [call_id=%s] complete → %s",
+                name,
+                call_id,
+                _truncate(str(result)),
             )
             self._world.update(
-                key, CommandExecution(name=name, args=args, state="complete", result=str(result))
+                key,
+                CommandExecution(
+                    name=name, args=args, state="complete", result=str(result)
+                ),
             )
         finally:
             self._running_tasks.pop(key, None)
@@ -625,14 +652,18 @@ class Agent:
             if not pending_text and not pending_calls:
                 return
             messages.append(
-                AIMessage(content="\n".join(pending_text), tool_calls=list(pending_calls))
+                AIMessage(
+                    content="\n".join(pending_text), tool_calls=list(pending_calls)
+                )
             )
             # The tool_result is a fixed ack pointing at the Command's World entry — never the
             # outcome. The outcome is delivered by that entry, rendered as an observation at the
             # step where the completion is observed (see _command_ack and the loop below).
             for call in pending_calls:
                 messages.append(
-                    ToolMessage(content=_command_ack(call["id"]), tool_call_id=call["id"])
+                    ToolMessage(
+                        content=_command_ack(call["id"]), tool_call_id=call["id"]
+                    )
                 )
             pending_text.clear()
             pending_calls.clear()
@@ -649,10 +680,14 @@ class Agent:
                     # after its config was unregistered. Other entries use the registered fn.
                     if world_entry.key.startswith(_COMMAND_KEY_PREFIX):
                         rendered = self._world.render_entry(
-                            world_entry, archival=archival, serialize_fn=_serialize_command_execution
+                            world_entry,
+                            archival=archival,
+                            serialize_fn=_serialize_command_execution,
                         )
                     else:
-                        rendered = self._world.render_entry(world_entry, archival=archival)
+                        rendered = self._world.render_entry(
+                            world_entry, archival=archival
+                        )
                     blocks.extend(_content_to_message_blocks(rendered))
                 messages.append(HumanMessage(content=blocks))
             elif isinstance(record, AssistantTextRecord):

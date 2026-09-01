@@ -108,7 +108,9 @@ def test_scripted_flow_through_wica_init():
     sink = RecordingSink()
     wica = Wica.init(config, output_sink=sink, coalesce_window=0.0)
     world = wica.world
-    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""
@@ -160,7 +162,9 @@ def test_scripted_flow_direct_construction(loop: asyncio.AbstractEventLoop):
     the test owns, drives the loop."""
     world = World(loop)
     world.start()
-    world.register("prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
 
     config = AgentConfig(
         provider="fake",
