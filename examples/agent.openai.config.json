@@ -1,5 +1,4 @@
 {
-  "logging": "INFO",
   "agent": {
     "provider": "openai",
     "model": "gpt-4o",

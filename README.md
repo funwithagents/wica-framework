@@ -127,7 +127,6 @@ so switching backends or editing the persona is a file edit, not a code change:
 
 ```json
 {
-  "logging": "INFO",
   "agent": {
     "provider": "anthropic",
     "model": "claude-sonnet-5",

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -36,7 +35,6 @@ def identity_serialize(value: Any, previous: Any) -> Content:
 def fake_config(
     script: list[dict[str, Any]] | None = None,
     *,
-    logging_level: str = "WARNING",
     delay_s: float = 0,
 ) -> WicaConfig:
     """A WicaConfig backed by the scripted provider: "fake" model (network-free, key-less)."""
@@ -47,7 +45,6 @@ def fake_config(
             system_prompt="You are terse.",
             model_kwargs={"script": script or [{"text": "ok"}], "delay_s": delay_s},
         ),
-        logging=logging_level,
     )
 
 
@@ -83,14 +80,6 @@ def test_init_wires_world_and_agent_sharing_one_loop(wica_factory):
     # One loop for the whole system — the World and Agent were handed the same object.
     assert wica.world._loop is wica.agent._loop
     assert wica.agent._world is wica.world
-
-
-def test_init_applies_logging(wica_factory):
-    try:
-        wica_factory(fake_config(logging_level="DEBUG"))
-        assert logging.getLogger("wica").level == logging.DEBUG
-    finally:
-        logging.getLogger("wica").setLevel(logging.WARNING)
 
 
 def test_surfaced_events_are_the_same_objects(wica_factory):

@@ -34,7 +34,6 @@ Everything below is re-exported from the top-level `wica` package ([`src/wica/__
 | `CommandIssued` | dataclass | Payload of `wica.on_agent_command` (`name`, `args`) |
 | `Event` | class | The pub/sub primitive the four instrumentation signals use (`subscribe`/`unsubscribe`) |
 | `WicaConfig`, `AgentConfig` | dataclass | Config, loaded strictly from JSON |
-| `apply_logging` | fn | Set the `wica` logger level from `config.logging` (Wica.init already calls it) |
 | `ConfigError`, `MissingEnvError` | exception | Raised on invalid config / unset env var (at `Wica.init`, i.e. build) |
 | `WorldEntry`, `WorldEntryConfig`, `WorldEntryVersion` | dataclass | Entry introspection (rarely needed directly) |
 
@@ -141,7 +140,6 @@ An Agent is stood up from one JSON file, so switching provider or editing the pe
 
 ```json
 {
-  "logging": "INFO",
   "agent": {
     "provider": "anthropic",
     "model": "claude-sonnet-5",
@@ -160,9 +158,10 @@ An Agent is stood up from one JSON file, so switching provider or editing the pe
 | `agent.api_key` / `api_key_env` | at most one | Literal key, or an env var read at **Agent build** (`Wica.init`). Neither → provider's standard env var. Prefer `api_key_env` so the config carries no secret and is safe to commit |
 | `agent.model_kwargs` | no | Forwarded to the provider (e.g. `temperature`) |
 | `agent.hf_provider` | no | Only for `huggingface-hub`: the Hub backend (`auto`/`fireworks-ai`/…). Default `auto` |
-| `logging` | no | `wica` logger level. Default `INFO` |
 
-Loading is a two-call composition — `WicaConfig.from_json` → `Wica.init` — keeping code-only wiring (output sink, `coalesce_window`, an optional pre-existing event loop) in `Wica.init`'s keyword arguments, where JSON can't reach. `Wica.init` applies logging itself, and it's where a referenced-but-unset `api_key_env` raises `MissingEnvError` (so a caller that degrades — e.g. to explore-only — wraps `Wica.init`, not `from_json`). Selecting a provider whose extra isn't installed fails at runtime with a clear `ImportError`.
+Loading is a two-call composition — `WicaConfig.from_json` → `Wica.init` — keeping code-only wiring (output sink, `coalesce_window`, an optional pre-existing event loop) in `Wica.init`'s keyword arguments, where JSON can't reach. `Wica.init` is where a referenced-but-unset `api_key_env` raises `MissingEnvError` (so a caller that degrades — e.g. to explore-only — wraps `Wica.init`, not `from_json`). Selecting a provider whose extra isn't installed fails at runtime with a clear `ImportError`.
+
+**Logging is your application's concern, not WICA's.** WICA is a library: it emits records under the `wica.*` loggers and installs only a `NullHandler` — it never sets a level or adds handlers. Configure logging in your app (`logging.basicConfig(...)` and `logging.getLogger("wica").setLevel(...)`); raise the `wica` level to `DEBUG` for a full World+Agent lifecycle trace.
 
 ## Testing flows deterministically
 

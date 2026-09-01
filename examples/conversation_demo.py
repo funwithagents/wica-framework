@@ -12,8 +12,10 @@ before running:
 
 To use a different provider/model, or a literal key, edit agent.config.json directly (see
 specs/config.md) — e.g. copy it to a `*.local.json` file (git-ignored) with a literal "api_key".
-Its "logging" field controls the wica.* loggers; DEBUG shows the full World+Agent lifecycle trace
-(registrations, every update and whether it triggered a call, LLM output, command start/end).
+
+Logging is the application's concern, not the framework's: this demo configures the wica.* loggers
+below (raise the level to DEBUG to see the full World+Agent lifecycle trace — registrations, every
+update and whether it triggered a call, LLM output, command start/end).
 
 This is the first runnable example (see specs/conversation-demo.md). It drives WICA
 purely through its public API: speech and sensor events enter the World; the Agent reasons
@@ -36,10 +38,10 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from wica import CommandIssued, Content, TextPart, Wica, World, WorldEntry
 from wica.agent import CommandExecution
-from wica.config import MissingEnvError, WicaConfig, apply_logging
+from wica.config import MissingEnvError, WicaConfig
 
-# Keep third-party logs quiet; the config's "logging" field sets the wica.* level once the Agent
-# is built. Until then (or if it fails to build), default to INFO.
+# WICA is a library and configures no logging itself; the application decides what is shown. Keep
+# third-party logs quiet and show wica.* at INFO (raise to logging.DEBUG for the full trace).
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("wica").setLevel(logging.INFO)
 
@@ -245,8 +247,8 @@ def on_prompt(messages: list[BaseMessage]) -> None:
 # config's api_key_env isn't set, so the app still opens and is explorable without credentials.
 #
 # Loading is inert (validates only, reads no env/files). The api key resolves at Agent build inside
-# Wica.init (which also applies logging), so that's what we guard: an unset api_key_env raises
-# MissingEnvError there, and we degrade to a World-only system. See specs/config.md, specs/wica.md.
+# Wica.init, so that's what we guard: an unset api_key_env raises MissingEnvError there, and we
+# degrade to a World-only system. See specs/config.md, specs/wica.md.
 wica_config = WicaConfig.from_json(CONFIG_PATH)
 wica: Wica | None = None
 config_error: str | None = None
@@ -254,9 +256,6 @@ try:
     wica = Wica.init(wica_config, output_sink=output_sink)
 except MissingEnvError as exc:
     config_error = f"environment variable {exc.env_var!r} is not set"
-    apply_logging(
-        wica_config.logging
-    )  # Wica.init didn't reach its own apply — do it for explore mode
     # Explore-only: a World-only system (no Agent) on its own loop, so the panel and sensor inputs
     # still work while nothing reasons over them.
     _explore_loop = asyncio.new_event_loop()

@@ -9,7 +9,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.tools import BaseTool
 
 from wica.agent import Agent, CommandIssued
-from wica.config import WicaConfig, apply_logging
+from wica.config import WicaConfig
 from wica.events import Event
 from wica.world import World, WorldEntry
 
@@ -65,8 +65,8 @@ class Wica:
         coalesce_window: float = 0.2,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> Wica:
-        """Build a ``World`` + ``Agent`` from a ``WicaConfig``, wire them, apply logging, return the
-        ``Wica``. The one construction path.
+        """Build a ``World`` + ``Agent`` from a ``WicaConfig``, wire them, return the ``Wica``. The
+        one construction path.
 
         Owns the single event loop the whole system runs on: if ``loop`` is None (the batteries-
         included default), Wica creates one and will run it in its own daemon thread on ``start()``;
@@ -74,9 +74,10 @@ class Wica:
 
         The code-only wiring a JSON file can't express — ``output_sink``, ``coalesce_window``, and
         optionally ``loop`` — are keyword arguments here; the config carries provider/model/key/
-        prompt/logging. Resolution (env key, prompt file) happens inside ``Agent.__init__``, so a
-        ``MissingEnvError`` or unreadable prompt surfaces here, at ``init``. See specs/config.md,
-        specs/wica.md.
+        prompt. Resolution (env key, prompt file) happens inside ``Agent.__init__``, so a
+        ``MissingEnvError`` or unreadable prompt surfaces here, at ``init``. Logging is not
+        configured here: WICA is a library, so it only emits under the ``wica.*`` loggers and
+        leaves handlers/levels to the embedding application. See specs/config.md, specs/wica.md.
         """
         owns_loop = loop is None
         if loop is None:
@@ -90,7 +91,6 @@ class Wica:
                 output_sink=output_sink,
                 coalesce_window=coalesce_window,
             )
-            apply_logging(config.logging)
         except BaseException:
             # Construction failed before a Wica could be returned to own this resource.
             if owns_loop:

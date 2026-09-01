@@ -13,7 +13,7 @@ tests:
 
 ## Purpose
 
-`Wica` is the framework's **single entry point** — one object that stands up the whole system from a `WicaConfig` and exposes everything a consumer needs behind one surface. Without it, a consumer wires the internals by hand: hold the event loop, own a `World` on it, construct and configure an `Agent` against that World and loop, apply logging, register commands, and juggle three separate instrumentation callbacks. `Wica` folds all of that into one class whose job is to own the loop and the `World` + `Agent` pair, wire them together, run their shared lifecycle, and surface the World's and Agent's `Event`s as one public, multi-subscriber instrumentation surface.
+`Wica` is the framework's **single entry point** — one object that stands up the whole system from a `WicaConfig` and exposes everything a consumer needs behind one surface. Without it, a consumer wires the internals by hand: hold the event loop, own a `World` on it, construct and configure an `Agent` against that World and loop, register commands, and juggle three separate instrumentation callbacks. `Wica` folds all of that into one class whose job is to own the loop and the `World` + `Agent` pair, wire them together, run their shared lifecycle, and surface the World's and Agent's `Event`s as one public, multi-subscriber instrumentation surface.
 
 This is the "wrap all the APIs in WICA so it is the only interface" item — the consumer talks to `Wica` (and, for World-schema work, to `wica.world`), not to the framework's internals.
 
@@ -25,7 +25,7 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 
 | Member | Kind | Role |
 |---|---|---|
-| `Wica.init(config, *, output_sink=…, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, apply logging, return the `Wica`. The one construction path. |
+| `Wica.init(config, *, output_sink=…, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, return the `Wica`. The one construction path. |
 | `wica.world` | attribute (`World`) | The owned World — the home for **all** World-schema work (`register`/`update`/`get`/listeners). Not duplicated onto `Wica`. |
 | `wica.agent` | attribute (`Agent`) | The owned Agent. Directly reachable, but the common paths (command registration, lifecycle, instrumentation) are surfaced on `Wica` so a consumer rarely needs it. |
 | `wica.start()` / `wica.stop()` | methods | The restartable shared lifecycle — start or pause the World and Agent together (see "Lifecycle"). |
@@ -45,9 +45,10 @@ The **asymmetry is deliberate**: command registration is mirrored onto `Wica` be
 1. Creates the single asyncio event **loop** the whole system runs on (or adopts one passed in — see "The event loop, restartable `start()`/`stop()`, and terminal `close()`").
 2. Builds a fresh `World(loop)` (no global — see [world.md](world.md)).
 3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, output_sink=…, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`.
-4. Calls `apply_logging(config.logging)` **once**, so the caller no longer does it by hand. Logging is set on the process-global `wica` logger tree, so it survives for the life of the process regardless of later object churn (see [config.md](config.md), "Flow into the Agent").
 
-The code-only wiring a JSON file can't express — `output_sink`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The file carries provider/model/key/prompt/logging; `init`'s kwargs carry the callables and runtime objects.
+`init` **does not configure logging** — WICA is a library, so it only emits under the `wica.*` loggers and leaves handlers/levels to the embedding application (see [config.md](config.md), "Logging is not framework config").
+
+The code-only wiring a JSON file can't express — `output_sink`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The file carries provider/model/key/prompt; `init`'s kwargs carry the callables and runtime objects.
 
 `init` takes an **already-loaded `WicaConfig`**, not a path. There is deliberately **no `Wica.from_json`**: loading is one line (`WicaConfig.from_json(path)`, which already exists — see [config.md](config.md)) and `init` needs several code-only kwargs besides the config, so a path-taking convenience would save nothing and hide the config object the caller often wants. The startup shape stays two honest calls:
 

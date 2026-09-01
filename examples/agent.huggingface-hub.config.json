@@ -1,5 +1,4 @@
 {
-  "logging": "INFO",
   "agent": {
     "provider": "huggingface-hub",
     "model": "Qwen/Qwen2.5-72B-Instruct",

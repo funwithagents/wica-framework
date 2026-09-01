@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,7 +42,6 @@ class AgentConfig:
 @dataclass
 class WicaConfig:
     agent: AgentConfig
-    logging: str = "INFO"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WicaConfig:
@@ -72,7 +70,7 @@ class WicaConfig:
 _AGENT_REQUIRED = {"provider", "model"}
 _AGENT_OPTIONAL_COMMON = {"api_key", "api_key_env", "model_kwargs", "hf_provider"}
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
-_WICA_ALLOWED = {"agent", "logging"}
+_WICA_ALLOWED = {"agent"}
 
 
 def _require_str(data: dict[str, Any], key: str, *, block: str) -> str:
@@ -186,11 +184,7 @@ def _parse_wica_block(data: dict[str, Any], *, base_dir: Path | None) -> dict[st
         raise ConfigError("config: 'agent' must be an object")
     agent = AgentConfig(**_parse_agent_block(agent_data, base_dir=base_dir))
 
-    log_level = data.get("logging", "INFO")
-    if not isinstance(log_level, str):
-        raise ConfigError("config: 'logging' must be a string")
-
-    return {"agent": agent, "logging": log_level}
+    return {"agent": agent}
 
 
 def resolve_api_key(config: AgentConfig) -> str | None:
@@ -225,8 +219,3 @@ def resolve_system_prompt(config: AgentConfig) -> str:
     raise ConfigError(
         "agent: no system prompt configured"
     )  # unreachable given validation
-
-
-def apply_logging(level: str) -> None:
-    """Set the level on the `wica` logger tree, e.g. from a loaded WicaConfig.logging."""
-    logging.getLogger("wica").setLevel(level.upper())

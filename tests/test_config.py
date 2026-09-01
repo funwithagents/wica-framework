@@ -28,7 +28,7 @@ def _agent_dict(**overrides: Any) -> dict[str, Any]:
 
 
 def _wica_dict(**agent_overrides: Any) -> dict[str, Any]:
-    return {"logging": "DEBUG", "agent": _agent_dict(**agent_overrides)}
+    return {"agent": _agent_dict(**agent_overrides)}
 
 
 # --- from_dict happy path -------------------------------------------------------------
@@ -36,7 +36,6 @@ def _wica_dict(**agent_overrides: Any) -> dict[str, Any]:
 
 def test_wica_config_from_dict_happy_path():
     cfg = WicaConfig.from_dict(_wica_dict(model_kwargs={"temperature": 0.5}))
-    assert cfg.logging == "DEBUG"
     assert cfg.agent.provider == "anthropic"
     assert cfg.agent.model == "claude-sonnet-5"
     assert cfg.agent.system_prompt == "You are a test assistant."
@@ -45,13 +44,6 @@ def test_wica_config_from_dict_happy_path():
     assert cfg.agent.api_key is None
     assert cfg.agent.api_key_env is None
     assert cfg.agent.model_kwargs == {"temperature": 0.5}
-
-
-def test_wica_config_from_dict_defaults_logging():
-    data = _wica_dict()
-    del data["logging"]
-    cfg = WicaConfig.from_dict(data)
-    assert cfg.logging == "INFO"
 
 
 # --- config mirrors the JSON: fields stored verbatim, not resolved at load ------------
@@ -239,16 +231,9 @@ def test_model_kwargs_wrong_type_raises():
         AgentConfig.from_dict(_agent_dict(model_kwargs="not-a-dict"))
 
 
-def test_logging_wrong_type_raises():
-    data = _wica_dict()
-    data["logging"] = 123
-    with pytest.raises(ConfigError, match="logging"):
-        WicaConfig.from_dict(data)
-
-
 def test_missing_agent_block_raises():
     with pytest.raises(ConfigError, match="agent"):
-        WicaConfig.from_dict({"logging": "INFO"})
+        WicaConfig.from_dict({})
 
 
 # --- Resolution happens at build (build_chat_model / resolve_system_prompt) -------------
@@ -322,10 +307,9 @@ def test_build_chat_model_raises_missing_env_at_build(monkeypatch: pytest.Monkey
 def test_from_json_then_wica_init_composes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The blessed startup shape: load the file, then Wica.init — which applies logging and builds
-    the Agent (resolution at build). See specs/config.md "Flow into the Agent"."""
+    """The blessed startup shape: load the file, then Wica.init — which builds the Agent (resolution
+    at build). See specs/config.md "Flow into the Agent"."""
     import asyncio
-    import logging
 
     from wica import Wica
 
@@ -348,15 +332,9 @@ def test_from_json_then_wica_init_composes(
         asyncio.new_event_loop()
     )  # injected + owned here, never started (no model call needed)
     try:
-        Wica.init(
-            wica_config, loop=loop
-        )  # applies logging + builds the model (monkeypatched)
-        assert logging.getLogger("wica").level == logging.DEBUG
+        Wica.init(wica_config, loop=loop)  # builds the model (monkeypatched)
         assert captured["model"] == "claude-sonnet-5"
     finally:
-        logging.getLogger("wica").setLevel(
-            logging.WARNING
-        )  # don't leak into other tests
         loop.close()
     assert captured["kwargs"]["api_key"] == "sk-abc"
 

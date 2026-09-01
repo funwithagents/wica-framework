@@ -17,11 +17,10 @@ A **framework config** lets you start WICA — or at least an Agent — from a s
 
 ### Framework-level, not just agent-level
 
-The config is a **top-level framework config** with an `agent` block nested inside it, not a bare `AgentConfig` at the root. Today the only block is `agent` plus a `logging` level, but nesting from the start means later concerns (World seeding, Command wiring, multiple agents) get added as sibling blocks without reshaping every existing file. The top-level object is `WicaConfig`.
+The config is a **top-level framework config** with an `agent` block nested inside it, not a bare `AgentConfig` at the root. Today the only block is `agent`, but nesting from the start means later concerns (World seeding, Command wiring, multiple agents) get added as sibling blocks without reshaping every existing file. The top-level object is `WicaConfig`.
 
 ```json
 {
-  "logging": "INFO",
   "agent": {
     "provider": "anthropic",
     "model": "claude-sonnet-5",
@@ -34,7 +33,6 @@ The config is a **top-level framework config** with an `agent` block nested insi
 
 | Field | Location | Required | Notes |
 |---|---|---|---|
-| `logging` | top level | no (default `"INFO"`) | Level applied to the `wica.*` loggers, mirroring the demo's `WICA_LOG` handling ([conversation_demo.py](../examples/conversation_demo.py)) |
 | `provider` | `agent` | **yes** | Selects the model backend. Most values pass straight through as LangChain's `model_provider` to `init_chat_model` (`anthropic`, `openai`, …); the special value `huggingface-hub` takes WICA's own construction path (see "Providers" below) |
 | `model` | `agent` | **yes** | Model name passed to `init_chat_model` (for `huggingface-hub`, the Hub `repo_id`, e.g. `meta-llama/Llama-3.3-70B-Instruct`) |
 | `api_key` | `agent` | no | Literal key (see "API key"); at most one of `api_key`/`api_key_env` |
@@ -60,6 +58,10 @@ Core `wica` bundles **no** provider; selecting one whose extra isn't installed f
 **`fake` is a testing provider**, not a real backend: it builds a deterministic, network-free, key-less scripted model (`FakeChatModel`) whose responses come from `model_kwargs` (`script`/`default`/`loop`/`delay_s`) rather than any API. `api_key`/`api_key_env` are unnecessary and ignored, and `model` is a free-text label. It exists to drive the Agent's whole loop deterministically in tests — see [fake-provider.md](fake-provider.md).
 
 Two of these are ordinary LangChain providers — `anthropic`, `openai`, and any other LangChain-supported value are passed through as `model_provider` to `init_chat_model`, so switching between them is a pure config edit. **`huggingface-hub` is WICA-specific:** it targets the Hugging Face Hub's serverless Inference Providers and the Agent constructs it on its own path rather than via `init_chat_model`. Config-wise that adds exactly one field — **`hf_provider`**, naming the Hub **backend** (`auto`/`fireworks-ai`/…). *How* that model is built and *why* it bypasses `init_chat_model` (including how the resolved API key is forwarded) is an Agent concern — see [agent.md](agent.md), "Provider-agnostic model, from config".
+
+### Logging is not framework config
+
+WICA is a **library**, and by the Python stdlib convention a library only *emits* log records — every module holds `logging.getLogger(__name__)` under the `wica.*` tree — and never *configures* logging: no `setLevel`, no handlers, no `basicConfig`. Deciding what is shown, at what level, and where, is the **embedding application's** policy. So there is deliberately **no `logging` field on `WicaConfig`** and no `apply_logging` helper: the framework config carries only what stands up the Agent, not what the host app chooses to surface. The one library-appropriate action lives in [__init__.py](../src/wica/__init__.py) — a `logging.NullHandler()` on the top-level `wica` logger, so records don't hit the stdlib last-resort handler when the app hasn't configured logging. The emitted-level convention (DEBUG/INFO/WARNING) is documented in [agent.md](agent.md) as *what the library emits*, distinct from what the application shows. A demo or app configures its own logging in application code (the conversation demo calls `basicConfig` and sets the `wica` level itself — see [conversation_demo.py](../examples/conversation_demo.py)).
 
 ### Config objects mirror the JSON; resolution is deferred to use
 
@@ -125,9 +127,8 @@ The persona can be given **inline** (`system_prompt`) or **by reference** (`syst
 The config is consumed through the `Wica` facade (see [wica.md](wica.md)), which owns the World+Agent it builds:
 
 - `WicaConfig.from_json(path)` → a `WicaConfig` holding a validated, **unresolved** `AgentConfig` (no env or file read has happened yet).
-- `Wica.init(wica_config, **kwargs)` is where the config is put to work. It builds a `World`, constructs `Agent(wica_config.agent, world=…, **code_only_kwargs)`, and applies logging. **`Agent.__init__` is where resolution happens**: it resolves the system prompt (see "System prompt") and calls `build_chat_model`, which resolves the api key (see "API key"), before constructing the model. This is the point where `MissingEnvError` or an unreadable prompt file surfaces — so a caller that degrades wraps `Wica.init`, not `from_json`.
+- `Wica.init(wica_config, **kwargs)` is where the config is put to work. It builds a `World`, constructs `Agent(wica_config.agent, world=…, **code_only_kwargs)`. **`Agent.__init__` is where resolution happens**: it resolves the system prompt (see "System prompt") and calls `build_chat_model`, which resolves the api key (see "API key"), before constructing the model. This is the point where `MissingEnvError` or an unreadable prompt file surfaces — so a caller that degrades wraps `Wica.init`, not `from_json`.
 - **Config-driven construction *is* the constructor: exactly one build path.** `Agent.__init__` takes the `AgentConfig` directly. "Start from a file" is the caller composing two honest calls — `config = WicaConfig.from_json(path)` then `Wica.init(config, **kwargs)` — the `**kwargs` carrying the code-only wiring a JSON file can't express (event loop, output sink, `coalesce_window`). There is deliberately no path-taking convenience folding these into one (`Wica.from_json`): it would save nothing over the two calls and would hide the config object the caller often wants alongside those kwargs.
-- **Applying `logging` moves into `Wica.init`** (`apply_logging(wica_config.logging)`), so the caller no longer does it by hand. Because the level is set on the process-global `wica` logger tree, it persists for the life of the process regardless of later object churn — no re-apply is needed if the `Wica` is later discarded and rebuilt.
 
 ### Module placement
 
@@ -137,7 +138,7 @@ The **resolution helpers** (`resolve_api_key(config)`, `resolve_system_prompt(co
 
 Direction of dependency: `config.py` holds only **pure data + loading + resolution helpers** and imports nothing from `agent.py`; `agent.py` imports `AgentConfig` and the resolvers from `config.py`. This keeps the dependency one-way (no import cycle): model construction (`init_chat_model`/`build_chat_model`) stays in `agent.py`, so `config.py` never needs to know about `Agent`. `WicaConfig` therefore carries no `build_agent()` method — "file → running Agent" is the `WicaConfig.from_json` + `Wica.init` composition described above ("Flow into the Agent"), not a single convenience method on the config side.
 
-The public API (`__init__.py`) re-exports the config surface a caller composes a `Wica` from a file with — `AgentConfig`, `WicaConfig`, the `apply_logging` helper (still exported, though `Wica.init` now calls it), and the `ConfigError`/`MissingEnvError` types a caller catches around `Wica.init` (the demo falls back to explore-only on `MissingEnvError`, the e2e helper skips) — all from `config.py`. Adding a top-level `src/wica/` module means the **Project map in AGENTS.md** and its drift-guard test (`tests/test_project_map.py`) are updated in the same change.
+The public API (`__init__.py`) re-exports the config surface a caller composes a `Wica` from a file with — `AgentConfig`, `WicaConfig`, and the `ConfigError`/`MissingEnvError` types a caller catches around `Wica.init` (the demo falls back to explore-only on `MissingEnvError`, the e2e helper skips) — all from `config.py`. Adding a top-level `src/wica/` module means the **Project map in AGENTS.md** and its drift-guard test (`tests/test_project_map.py`) are updated in the same change.
 
 ## Open questions
 
