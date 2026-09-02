@@ -80,8 +80,12 @@ Four surfaces, side by side:
 - **Speech out.** The robot speaks by calling a `say` **output Command** — so its user-facing voice
   is a real, observable, cancellable Command, and the model's free text becomes private *thinking*
   shown apart from the voice (see [agent.md](agent.md), "Output"). One (or a short chain of)
-  utterance(s) per turn. (No token streaming in v1.) The demo configures `say` via
-  `Wica.init(output_command=…)`; without an output Command the free text would itself be the voice.
+  utterance(s) per turn. The demo configures `say` via `Wica.init(output_command=…)`; without an
+  output Command the free text would itself be the voice. **The demo simulates speaking**: `say`
+  takes time and reveals its words one by one, streaming them into the transcript while the Command
+  stays `running` (and cancellable) in the World. This is a *demo* effect — a slow backing function
+  updating its own UI message — **not** framework token streaming (which is post-v1; see
+  [agent.md](agent.md), "Future improvements").
 - **Acting.** The robot may perform robot actions (Commands, below) alongside a spoken reply.
   Their effects show up in the World state view, and a longer action remains visible while it runs.
 

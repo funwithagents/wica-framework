@@ -105,15 +105,32 @@ OUTPUT_COMMAND_NAME = "say"
 # output-Command re-trigger chain). It fires on_command like any issued command, so the demo can
 # show it — see on_command below. Matches wica.agent's _NOOP_COMMAND_NAME.
 NOOP_COMMAND_NAME = "noop"
+# Simulated per-word speaking pace. Because `say` is a real Command, taking time here means it stays
+# "running" (and cancellable — barge-in) in the World for its whole duration, and the demo streams
+# the words into the transcript as they're "spoken". This is a demo simulation, not framework token
+# streaming (which is post-v1 — see specs/agent.md "Future improvements").
+_SAY_WORD_DELAY_S = 0.3
 
 
 async def say(text: str) -> str:
     """Speak out loud to the person in front of you — this is the only way they hear you. Use it for
     anything you want to say; keep it to a sentence or two."""
-    if text.strip():
-        # Labelled by source ("say") so the demo makes plain which framework channel produced this
-        # text — the output Command — versus the output sink. Nested under the current reaction group.
-        _events.put(_reaction_child("🗣️ say", text))
+    words = text.split()
+    if not words:
+        return "Said it."
+    # Enqueue the say bubble once, then grow its content word by word: tick appends this exact dict
+    # to the transcript, so mutating its content in place streams the words into the UI. Simulating
+    # speech as a slow async loop also keeps the Command "running" (cancellable) while it speaks.
+    message: dict[str, Any] | None = None
+    spoken: list[str] = []
+    for word in words:
+        await asyncio.sleep(_SAY_WORD_DELAY_S)
+        spoken.append(word)
+        if message is None:
+            message = _reaction_child("🗣️ say", word)
+            _events.put(message)
+        else:
+            message["content"] = " ".join(spoken)
     return "Said it."
 
 
@@ -502,7 +519,9 @@ def build_ui() -> gr.Blocks:
             on_select_prompt, inputs=prompt_selector, outputs=prompt_view
         )
 
-        timer = gr.Timer(0.4)
+        # Refresh faster than the per-word speaking pace (_SAY_WORD_DELAY_S) so `say` streams into
+        # the transcript smoothly, roughly one word at a time.
+        timer = gr.Timer(0.2)
         timer.tick(tick, outputs=[chatbot, world_view, prompt_selector, prompt_view])
 
     return demo
