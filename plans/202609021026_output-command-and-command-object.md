@@ -108,9 +108,9 @@ Settled in discussion; recorded here so the build doesn't re-litigate them:
 8. Add a **dedicated `NoReactionRecord(call_id: str)`** to the `HistoryRecord` union (decision
    pinned in [agent.md](../specs/agent.md), "History record shape" — *not* an overloaded
    `CommandRecord`). `_run_step` tool-call loop ([agent.py:534-540](../src/wica/agent.py#L534)):
-   special-case `noop` — append a `NoReactionRecord(call_id)`, but **do not** `_dispatch_command`
-   it (no entry, no task, no trigger) and **do not** emit `on_command` (it is not an action). All
-   other calls unchanged.
+   special-case `noop` — append a `NoReactionRecord(call_id)` and emit `on_command`
+   (`CommandIssued("noop", {})`, for observability), but **do not** `_dispatch_command` it (no
+   entry, no task, no trigger; it is not a World action). All other calls unchanged.
 9. `_dispatch_command`: when `name == self._output_command_name`, register the
    `agent:command:<call_id>` entry with `triggers_llm_call=_TRIGGER_ON_OUTPUT_COMMAND_COMPLETION`
    instead of the hardcoded `True` ([agent.py:558](../src/wica/agent.py#L558)). Everything else
@@ -148,8 +148,8 @@ Settled in discussion; recorded here so the build doesn't re-litigate them:
       step happens when `True`). Assert `output_sink` still receives the step's free text when an
       output command is set.
     - `noop`: issuing it records history, creates **no** `agent:command:*` entry, spawns no
-      task, fires **no** re-trigger, does not emit `on_command`, and ends the step; its rendered
-      tool_result is the plain ack.
+      task, fires **no** re-trigger, and ends the step (but *does* emit `on_command` for
+      observability); its rendered tool_result is the plain ack.
 
 ### E2e (`tests-e2e/`)
 

@@ -96,6 +96,26 @@ def register_world() -> None:
 
 # --- Commands (the robot's fake actions) --------------------------------------------
 
+# The output Command: the robot's user-facing voice. With it configured (output_command=say in
+# Wica.init), the model's free text becomes private reasoning (shown as a 💭 thought via output_sink)
+# and anything the robot actually says goes through this Command — a real, cancellable, observable
+# Command like any other. See specs/agent.md ("Output") and specs/commands.md ("The output Command").
+OUTPUT_COMMAND_NAME = "say"
+# WICA auto-registers a `noop` Command the model calls to declare "no reaction" (it often ends an
+# output-Command re-trigger chain). It fires on_command like any issued command, so the demo can
+# show it — see on_command below. Matches wica.agent's _NOOP_COMMAND_NAME.
+NOOP_COMMAND_NAME = "noop"
+
+
+async def say(text: str) -> str:
+    """Speak out loud to the person in front of you — this is the only way they hear you. Use it for
+    anything you want to say; keep it to a sentence or two."""
+    if text.strip():
+        # Labelled by source ("say") so the demo makes plain which framework channel produced this
+        # text — the output Command — versus the output sink. Nested under the current reaction group.
+        _events.put(_reaction_child("🗣️ say", text))
+    return "Said it."
+
 
 async def dance() -> str:
     """Perform a fun little dance. Takes about 10 seconds to complete."""
@@ -132,15 +152,21 @@ COMMANDS = [
 #
 # Roles map to the two sides of the conversation:
 #  - "user"      → right side: the World entry the Agent actually observed (wica.on_agent_trigger).
-#  - "assistant" → left side:  the robot's spoken reply (output_sink) and its command calls
-#                              (wica.on_agent_command).
+#  - "assistant" → left side:  the robot's spoken reply — the `say` output Command, labelled
+#                              "🗣️ say" — plus its private free text (output_sink, labelled
+#                              "💭 output sink") and its command calls (wica.on_agent_command, 🦾).
 
-_events: queue.Queue[dict[str, str]] = queue.Queue()
+# Messages use Gradio's "messages" format ({"role", "content", optional "metadata"}). Two metadata
+# features carry the structure: a metadata.title names the framework channel each assistant item came
+# from ("🗣️ say", "💭 output sink", "🦾 <cmd>", "🚫 noop"); and metadata.id / metadata.parent_id nest
+# every item of one reasoning step under a single "reaction" group header (opened in on_prompt), so
+# the transcript reads as one collapsible group per reaction.
+_events: queue.Queue[dict[str, Any]] = queue.Queue()
 
 _NO_PROMPT_YET = "(no prompt sent to the model yet)"
 
 _state_lock = threading.Lock()
-_conversation: list[dict[str, str]] = []
+_conversation: list[dict[str, Any]] = []
 # Every reasoning step's prompt, append-only, each {"label": ..., "text": ...} — never mutated in
 # place, so readers (tick/on_select_prompt) can pull `text` outside the lock once they've read len.
 _prompts: list[dict[str, str]] = []
@@ -149,12 +175,31 @@ _prompts: list[dict[str, str]] = []
 _last_trigger_label = "start"
 # How many prompts the UI has shown; tick snaps the view to the newest whenever this trails len().
 _last_shown_count = 0
+# Reaction grouping: each reasoning step (a "reaction") is one collapsible group in the transcript.
+# on_prompt (once per step) opens a new group — a parent assistant message with an `id` — and the
+# step's outputs (say, output sink, 🦾 actions, noop) are emitted as children nested under it via
+# metadata.parent_id. All these callbacks run on the single agent loop, so the id is set/read
+# consistently without a lock.
+_reaction_count = 0
+_current_reaction_id: str | None = None
+
+
+def _reaction_child(title: str, content: str) -> dict[str, Any]:
+    """An assistant transcript item nested under the current reaction group (or top-level if no
+    reaction is open, e.g. before the first step)."""
+    metadata: dict[str, Any] = {"title": title}
+    if _current_reaction_id is not None:
+        metadata["parent_id"] = _current_reaction_id
+    return {"role": "assistant", "content": content, "metadata": metadata}
 
 
 async def output_sink(text: str) -> None:
-    """Agent speech out — one complete utterance per step (v1). Runs on the agent loop."""
-    if text:
-        _events.put({"role": "assistant", "content": text})
+    """The agent's free text for a step. With an output Command configured, this is no longer the
+    robot's *voice* (that goes through `say`) but its private reasoning. Labelled by source ("output
+    sink") so the demo makes plain which framework channel produced it, set apart from the spoken
+    `say` reply above. Runs on the agent loop."""
+    if text.strip():
+        _events.put(_reaction_child("💭 output sink", text))
 
 
 def _describe_trigger(entry: WorldEntry) -> str:
@@ -187,10 +232,17 @@ def on_trigger(entry: WorldEntry) -> None:
 
 
 def on_command(command: CommandIssued) -> None:
-    """The robot issued a command — show it on the assistant (left) side, italicised to set it
-    apart from spoken replies."""
+    """The robot issued a command — show it on the assistant (left) side. `say` is skipped here (it
+    *is* the spoken reply, rendered by say() itself, not a 🦾 action); `noop` — the robot explicitly
+    choosing not to react — is shown labelled by source like say/output_sink; every other command is
+    a 🦾 action, italicised."""
+    if command.name == OUTPUT_COMMAND_NAME:
+        return
+    if command.name == NOOP_COMMAND_NAME:
+        _events.put(_reaction_child("🚫 noop", "chose not to react"))
+        return
     rendered = ", ".join(f"{k}={v!r}" for k, v in command.args.items())
-    _events.put({"role": "assistant", "content": f"_🦾 {command.name}({rendered})_"})
+    _events.put(_reaction_child(f"🦾 {command.name}", f"{command.name}({rendered})"))
 
 
 def _flatten_content(content: str | list[Any]) -> str:
@@ -235,12 +287,28 @@ def _render_message(m: BaseMessage) -> str:
 
 def on_prompt(messages: list[BaseMessage]) -> None:
     """Debug hook — capture the exact messages sent to the model, appending to the prompt history
-    labelled by time + the trigger that caused this step. Runs on the agent loop."""
+    labelled by time + the trigger that caused this step; and open this step's **reaction group** in
+    the transcript so its outputs nest under one header. Fires once per reasoning step, on the agent
+    loop, before the model call — so it precedes the step's say/output-sink/command events."""
     rendered = "\n\n".join(_render_message(m) for m in messages)
     stamp = datetime.now().astimezone().strftime("%H:%M:%S")
+    trigger_label = _last_trigger_label
     with _state_lock:
-        label = f"{stamp} — {_last_trigger_label}"
-        _prompts.append({"label": label, "text": rendered})
+        _prompts.append({"label": f"{stamp} — {trigger_label}", "text": rendered})
+
+    global _reaction_count, _current_reaction_id
+    _reaction_count += 1
+    _current_reaction_id = f"reaction-{_reaction_count}"
+    _events.put(
+        {
+            "role": "assistant",
+            "content": "",
+            "metadata": {
+                "id": _current_reaction_id,
+                "title": f"💬 reaction {_reaction_count} · {trigger_label}",
+            },
+        }
+    )
 
 
 # Stand up the whole system through the single entry point; fall back to explore-only if the
@@ -253,7 +321,7 @@ wica_config = WicaConfig.from_json(CONFIG_PATH)
 wica: Wica | None = None
 config_error: str | None = None
 try:
-    wica = Wica.init(wica_config, output_sink=output_sink)
+    wica = Wica.init(wica_config, output_sink=output_sink, output_command=say)
 except MissingEnvError as exc:
     config_error = f"environment variable {exc.env_var!r} is not set"
     # Explore-only: a World-only system (no Agent) on its own loop, so the panel and sensor inputs
@@ -334,7 +402,7 @@ def on_select_prompt(index: int | None) -> Any:
     return gr.update()
 
 
-def tick() -> tuple[list[dict[str, str]], list[list[str]], Any, Any]:
+def tick() -> tuple[list[dict[str, Any]], list[list[str]], Any, Any]:
     global _last_shown_count
     with _state_lock:
         while True:
@@ -377,8 +445,12 @@ def build_ui() -> gr.Blocks:
             "The robot handles **one reasoning call at a time** (v1): while the model is thinking, "
             "a new input is *dropped*, not queued. Long actions are different: a 10s dance keeps "
             "running in the background, so a later input can start a new step that sees or cancels "
-            "it. Inputs (right) and the robot's replies + 🦾 command calls (left) appear as they "
-            "actually happen."
+            "it. Inputs appear on the **right**; on the **left**, each **reasoning step is one "
+            "collapsible group** (`💬 reaction N`), and inside it every item is labelled by the "
+            "framework channel it came from: **🗣️ say** (the robot's spoken reply — its `say` output "
+            "Command, what the person hears), **💭 output sink** (the model's free text, now private "
+            "reasoning), **🦾** command calls, and **🚫 noop** (the robot explicitly choosing not to "
+            "react — often its own re-triggered step, since speaking wakes the agent again)."
         )
 
         with gr.Row():

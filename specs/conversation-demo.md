@@ -40,10 +40,22 @@ Four surfaces, side by side:
 1. **Conversation.** A chat transcript that doubles as a trace of the reasoning loop. The user
    types an utterance (their "speech"); more broadly, whatever World entry triggers a reasoning
    step shows on the **input (right) side** — a typed utterance or a sensor event like a user being
-   detected. The robot's **spoken replies and its command calls** show on the **assistant (left)
-   side**, in the order they happen, so a turn reads as "input → the robot says X → the robot does
-   Y". An input that's *dropped* because a reasoning call is already in flight doesn't appear and
-   gets no reply — faithful to what actually happened.
+   detected. On the **assistant (left) side**, each **reasoning step (a "reaction") is one
+   collapsible group** (`💬 reaction N`, labelled by the trigger that caused it), and inside that
+   group its outputs appear in order, each **labelled by the framework channel it came from** — so
+   the demo makes the **output Command** feature concrete (see [agent.md](agent.md), "Output"):
+   - **🗣️ say** — the robot's spoken reply, delivered through the `say` **output Command** (what the
+     person actually hears), not free text;
+   - **💭 output sink** — the model's free text for the step, which an output Command turns into
+     private reasoning (delivered to the `output_sink`), shown apart from the voice;
+   - **🦾** command calls — its other actions like `dance`, italicised;
+   - **🚫 noop** — the robot explicitly *choosing not to react* (the auto-registered `noop`
+     Command); it commonly ends a turn, since speaking through the output Command re-triggers the
+     agent and the model then declines to add more.
+
+   So a turn reads as "input → (the robot thinks…) → the robot says X → the robot does Y". An input
+   that's *dropped* because a reasoning call is already in flight doesn't appear and gets no reply —
+   faithful to what actually happened.
 2. **World state.** A live view of the current World — every entry the demo tracks, shown as raw
    values (key, version id, value, when it last changed). This is the robot's whole mind laid bare:
    what it heard, who's nearby, how it feels, who it's tracking, and any command currently running.
@@ -65,7 +77,11 @@ Four surfaces, side by side:
 - **Sensing in.** The input buttons simulate perception events. They change World state and can
   prompt the robot to react on their own — the robot may say something in response to *who walked
   up*, not only to what was said.
-- **Speech out.** The robot's reply is one complete utterance per turn. (No token streaming in v1.)
+- **Speech out.** The robot speaks by calling a `say` **output Command** — so its user-facing voice
+  is a real, observable, cancellable Command, and the model's free text becomes private *thinking*
+  shown apart from the voice (see [agent.md](agent.md), "Output"). One (or a short chain of)
+  utterance(s) per turn. (No token streaming in v1.) The demo configures `say` via
+  `Wica.init(output_command=…)`; without an output Command the free text would itself be the voice.
 - **Acting.** The robot may perform robot actions (Commands, below) alongside a spoken reply.
   Their effects show up in the World state view, and a longer action remains visible while it runs.
 
@@ -98,6 +114,7 @@ and the point is to watch the model choose them in context.
 
 | Action | What it does | Notable |
 |---|---|---|
+| **Say `<text>`** | Speaks to the person. | The **output Command** (`Wica.init(output_command=…)`): the robot's voice, shown in the transcript labelled **🗣️ say**. Because it is a Command, the model's own free text becomes private reasoning (the **💭 output sink**) instead of speech. |
 | **Dance** | Performs a ~10-second dance. | Long-running: visibly "in progress" in the World state for its whole duration. New inputs may start reasoning while it runs, letting the model observe or cancel the action. |
 | **Set emotion `<emotion>`** | Sets the robot's current emotional state. | Reflected in World state and in the robot's subsequent prompt/behaviour. |
 | **Switch tracking to user `<id>` (or nobody)** | Follows one specific person, or stops tracking when called with no user. | The robot follows **at most one** person at a time — a single `tracked_user` entry, not a set. Passing no user (null) clears it. |

@@ -1248,12 +1248,13 @@ def test_noop_takes_no_action_and_does_not_retrigger(loop, world, sink):
     wait_until(lambda: len(model.calls) == 1)
     time.sleep(0.2)  # give any (erroneous) re-trigger a chance to fire
 
-    # No World command entry was created, nothing spoke, on_command did not fire, no re-trigger.
+    # No World command entry was created, nothing spoke, no re-trigger. on_command *does* fire for
+    # noop (observability — it is a command the model issued, just not a World action).
     assert not any(
         e.key.startswith("agent:command:") for e in world.get_prompt_entries()
     )
     assert sink.texts == []
-    assert issued == []
+    assert issued == [CommandIssued("noop", {})]
     assert len(model.calls) == 1
     # History records the declined reaction as a dedicated NoReactionRecord.
     assert any(isinstance(r, NoReactionRecord) for r in agent._history)

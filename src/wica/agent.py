@@ -375,7 +375,8 @@ class Agent:
         # nor starve siblings (no _fire_hook guard needed). See specs/agent.md "Instrumentation".
         #  - on_trigger(entry):    once per trigger a run-to-completion step observes (filtered).
         #  - on_prompt(messages):  the exact rendered messages just before each model call.
-        #  - on_command(command):  each Command the model issues, at dispatch time.
+        #  - on_command(command):  each Command the model issues, when issued — including noop
+        #                           (which is observable but not a World action; filter by name).
         self.on_trigger: Event[WorldEntry] = Event()
         self.on_prompt: Event[list[BaseMessage]] = Event()
         self.on_command: Event[CommandIssued] = Event()
@@ -646,8 +647,11 @@ class Agent:
             if call["name"] == _NOOP_COMMAND_NAME:
                 # noop is the model declaring no reaction: record it (so context shows the choice
                 # and the tool_call has a matching tool_result), but do not dispatch it — no World
-                # entry, no task, no trigger; it is not a World action. See specs/commands.md.
+                # entry, no task, no trigger; it is not a World *action*. It is still a command the
+                # model issued, so on_command fires for it like every other (a consumer that wants
+                # only real actions filters it out by name). See specs/commands.md, specs/agent.md.
                 _logger.debug("noop issued (call_id=%s) — no action taken", call_id)
+                self.on_command.emit(CommandIssued(_NOOP_COMMAND_NAME, {}))
                 self._history.append(NoReactionRecord(call_id))
                 continue
             args = copy.deepcopy(call["args"])
