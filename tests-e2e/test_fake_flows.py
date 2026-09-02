@@ -188,3 +188,99 @@ def test_scripted_flow_direct_construction(loop: asyncio.AbstractEventLoop):
     finally:
         agent.stop()
         world.stop()
+
+
+def test_output_command_flow_through_wica_init():
+    """With an output Command configured, the model's free text goes to the sink (private
+    reasoning) while the user-facing text is delivered by the Command; its completion re-triggers a
+    step that ends the turn with noop."""
+    config = WicaConfig.from_dict(
+        {
+            "agent": {
+                "provider": "fake",
+                "model": "scripted",
+                "system_prompt": "You are a test double.",
+                "model_kwargs": {
+                    "delay_s": 0,
+                    "script": [
+                        {
+                            "text": "thinking about it",
+                            "tool_calls": [
+                                {"name": "speak", "args": {"text": "hello"}}
+                            ],
+                        },
+                        {"tool_calls": [{"name": "noop", "args": {}}]},
+                    ],
+                    "default": {"text": ""},
+                },
+            }
+        }
+    )
+
+    spoken: list[str] = []
+    spoke = threading.Event()
+
+    async def speak(text: str) -> str:
+        """Say something to the user."""
+        spoken.append(text)
+        spoke.set()
+        return "spoken"
+
+    sink = RecordingSink()
+    wica = Wica.init(
+        config, output_sink=sink, output_command=speak, coalesce_window=0.0
+    )
+    wica.world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    try:
+        wica.world.update("prompt", "Greet the user.")
+        assert spoke.wait(timeout=WAIT_TIMEOUT)
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        # Command carried the user-facing text; sink carried the private free-text reasoning.
+        assert spoken == ["hello"]
+        assert sink.texts == ["thinking about it"]
+        # The output command completing re-triggered a second step (ended by noop).
+        model = wica.agent.model
+        assert isinstance(model, FakeChatModel)
+        wait_until(lambda: len(model.calls) >= 2)
+    finally:
+        wica.close()
+
+
+def test_noop_flow_takes_no_action():
+    """A scripted noop declares no reaction: no command entry, nothing spoken, no re-trigger."""
+    config = WicaConfig.from_dict(
+        {
+            "agent": {
+                "provider": "fake",
+                "model": "scripted",
+                "system_prompt": "You are a test double.",
+                "model_kwargs": {
+                    "delay_s": 0,
+                    "script": [{"tool_calls": [{"name": "noop", "args": {}}]}],
+                    "default": {"text": ""},
+                },
+            }
+        }
+    )
+
+    sink = RecordingSink()
+    wica = Wica.init(config, output_sink=sink, coalesce_window=0.0)
+    wica.world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    try:
+        wica.world.update("prompt", "Nothing to do.")
+        model = wica.agent.model
+        assert isinstance(model, FakeChatModel)
+        wait_until(lambda: len(model.calls) == 1)
+        time.sleep(0.2)  # give any (erroneous) re-trigger a chance to fire
+
+        assert find_command_entry(wica.world) is None  # noop created no World entry
+        assert sink.texts == []  # nothing spoken
+        assert len(model.calls) == 1  # no re-trigger
+    finally:
+        wica.close()

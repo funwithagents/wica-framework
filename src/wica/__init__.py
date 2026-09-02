@@ -1,6 +1,7 @@
 import logging
 
 from wica.agent import Agent, CommandIssued
+from wica.command import Command
 from wica.config import (
     AgentConfig,
     ConfigError,
@@ -21,6 +22,7 @@ logging.getLogger("wica").addHandler(logging.NullHandler())
 __all__ = [
     "Agent",
     "AgentConfig",
+    "Command",
     "CommandIssued",
     "ConfigError",
     "Content",

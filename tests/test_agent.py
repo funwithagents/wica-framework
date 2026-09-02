@@ -18,9 +18,13 @@ from wica.agent import (
     Agent,
     AssistantTextRecord,
     CommandIssued,
+    NoReactionRecord,
     ObservationRecord,
     _command_ack,
+    _NOOP_ACK,
+    _NOOP_COMMAND_NAME,
 )
+from wica.command import Command
 from wica.config import AgentConfig
 from wica.content import Content, TextPart
 from wica.world import World
@@ -1114,5 +1118,183 @@ def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
 
     assert len(model.calls) == 1  # urgent did not start a second step
     assert len([r for r in agent._history if isinstance(r, ObservationRecord)]) == 1
+
+    agent.stop()
+
+
+# --- Command object, output Command, noop, and system-prompt composition ---------------------
+
+
+def text_and_tool_response(
+    text: str, calls: list[tuple[str, dict[str, Any], str]]
+) -> Callable[[list[BaseMessage]], Awaitable[AIMessage]]:
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        return AIMessage(
+            content=text,
+            tool_calls=[
+                {"name": name, "args": args, "id": call_id}
+                for name, args, call_id in calls
+            ],
+        )
+
+    return respond
+
+
+def test_register_command_accepts_a_command_object(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("plus", {"a": 1, "b": 2}, "call1")]),
+            text_response("done"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    # A Command lets us override the name without register_command kwargs.
+    agent.register_command(Command(add, name="plus", description="Add two numbers."))
+    agent.start()
+
+    world.update("input", "add them")
+    key = "agent:command:call1"
+    wait_until(lambda: world.get_entry(key).current.value.state == "complete")
+    assert world.get_entry(key).current.value.result == "3"
+
+    agent.stop()
+
+
+def test_system_prompt_composes_persona_and_runtime_primer_without_output_clause(
+    loop, world, sink
+):
+    model = ProgrammableChatModel(respond=text_response("hi"))
+    agent = make_agent(
+        model, world=world, loop=loop, system_prompt="You are terse.", output_sink=sink
+    )
+
+    prompt = agent.system_prompt
+    # Persona is preserved verbatim, at the front.
+    assert prompt.startswith("You are terse.")
+    # The always-on primer is appended (perception + noop guidance present).
+    assert "observations of your World" in prompt
+    assert _NOOP_COMMAND_NAME in prompt
+    # No output Command → default text-reply clause, not the private-reasoning one.
+    assert "write your answer as ordinary text" in prompt
+    assert "private reasoning" not in prompt
+
+
+def test_output_command_is_the_user_channel_free_text_is_private(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    spoken: list[str] = []
+    spoke = threading.Event()
+
+    async def speak(text: str) -> str:
+        """Say something to the user."""
+        spoken.append(text)
+        spoke.set()
+        return "spoken"
+
+    # Step 1: think in free text and speak via the output Command. Step 2 (re-triggered by the
+    # output command completing) ends the turn with noop.
+    model = ProgrammableChatModel(
+        respond=sequence(
+            text_and_tool_response(
+                "thinking about it", [("speak", {"text": "hello"}, "s1")]
+            ),
+            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+        )
+    )
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, output_command=speak
+    )
+
+    # The output clause names the command and marks free text private.
+    assert "speak" in agent.system_prompt
+    assert "private reasoning" in agent.system_prompt
+
+    agent.start()
+    world.update("input", "greet the user")
+
+    assert spoke.wait(timeout=WAIT_TIMEOUT)
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    # The Command carried the user-facing text; the sink got the private free-text reasoning.
+    assert spoken == ["hello"]
+    assert sink.texts == ["thinking about it"]
+    # The output command's completion re-triggered a step (default flag), which the model ended
+    # with noop — so the model was called at least twice.
+    wait_until(lambda: len(model.calls) >= 2)
+
+    agent.stop()
+
+
+def test_noop_takes_no_action_and_does_not_retrigger(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")])
+    )
+    issued: list[CommandIssued] = []
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.on_command.subscribe(issued.append)
+    agent.start()
+
+    world.update("input", "nothing to do here")
+    wait_until(lambda: len(model.calls) == 1)
+    time.sleep(0.2)  # give any (erroneous) re-trigger a chance to fire
+
+    # No World command entry was created, nothing spoke, on_command did not fire, no re-trigger.
+    assert not any(
+        e.key.startswith("agent:command:") for e in world.get_prompt_entries()
+    )
+    assert sink.texts == []
+    assert issued == []
+    assert len(model.calls) == 1
+    # History records the declined reaction as a dedicated NoReactionRecord.
+    assert any(isinstance(r, NoReactionRecord) for r in agent._history)
+
+    agent.stop()
+
+
+def test_noop_renders_as_native_call_with_plain_ack(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    # First input → noop; a later input drives a second step whose prompt contains the rendered
+    # noop from history (native tool call + plain ack).
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+            text_response("ok"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+
+    world.update("input", "first")
+    wait_until(lambda: len(model.calls) == 1)
+
+    world.update("input", "second")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    second_prompt = model.calls[1]
+    # The past noop re-renders as the model's own native tool call...
+    assert any(
+        c["name"] == _NOOP_COMMAND_NAME
+        for m in second_prompt
+        if isinstance(m, AIMessage)
+        for c in m.tool_calls
+    )
+    # ...paired with a plain acknowledgement tool_result (not an entry-pointer ack).
+    assert any(
+        m.tool_call_id == "n1" and m.content == _NOOP_ACK
+        for m in second_prompt
+        if isinstance(m, ToolMessage)
+    )
 
     agent.stop()

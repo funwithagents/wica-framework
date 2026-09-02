@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from wica.agent import NoReactionRecord
 from wica.content import Content, TextPart
 from wica.world import World, WorldEntry
 
@@ -118,5 +119,40 @@ def test_real_tool_calling_round_trip(config_path: Path):
         # agent.md open question #2) — asserting it would make this test flaky on real
         # non-determinism unrelated to the tool-calling round trip under test. The sink/output
         # path itself is already covered by test_plain_text_round_trip.
+    finally:
+        wica.close()
+
+
+@pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
+def test_noop_empty_reaction_live(config_path: Path):
+    """A live provider *declining to act*: given an observation that plainly needs no response, and
+    a persona telling it to do nothing then, the model should call the auto-registered `noop`
+    Command rather than reply. This verifies models actually reach for `noop` — explained only in
+    the runtime primer + the tool's own description, with no bespoke prompting here. The declined
+    reaction surfaces as a NoReactionRecord in the Agent's history (noop makes no World entry and no
+    sink output, so history is the observable)."""
+    persona = (
+        "You are a silent monitoring agent. You act ONLY when an observation genuinely requires a "
+        "response. When an observation requires nothing from you, you MUST call the noop tool to "
+        "take no action. Never reply with text unless a response is actually needed."
+    )
+    sink = RecordingSink()
+    wica = real_wica(config_path, system_prompt=persona, output_sink=sink)
+    wica.world.register(
+        "status", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    try:
+        wica.world.update(
+            "status",
+            "Routine heartbeat: all systems nominal, no user is present, nothing requires "
+            "your attention.",
+        )
+        # The model declined by calling noop → a NoReactionRecord lands in history. If it instead
+        # replied with text, this never appears and the wait fails — which is the real signal under
+        # test: whether the provider can produce an empty reaction on demand.
+        wait_until(
+            lambda: any(isinstance(r, NoReactionRecord) for r in wica.agent._history)
+        )
     finally:
         wica.close()

@@ -25,12 +25,12 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 
 | Member | Kind | Role |
 |---|---|---|
-| `Wica.init(config, *, output_sink=…, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, return the `Wica`. The one construction path. |
+| `Wica.init(config, *, output_sink=…, output_command=…, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, return the `Wica`. The one construction path. `output_command` (optional, `Callable \| Command`) is the user-facing output channel (see [agent.md](agent.md), "Output"); when set, free text becomes the agent's private reasoning stream. |
 | `wica.world` | attribute (`World`) | The owned World — the home for **all** World-schema work (`register`/`update`/`get`/listeners). Not duplicated onto `Wica`. |
 | `wica.agent` | attribute (`Agent`) | The owned Agent. Directly reachable, but the common paths (command registration, lifecycle, instrumentation) are surfaced on `Wica` so a consumer rarely needs it. |
 | `wica.start()` / `wica.stop()` | methods | The restartable shared lifecycle — start or pause the World and Agent together (see "Lifecycle"). |
 | `wica.close()` | method | Permanently stop the instance and close its owned event loop. Idempotent; a closed instance cannot be restarted. |
-| `wica.register_command(fn, *, name=…, description=…)` | method | Delegates to `agent.register_command` — the one convenience method that *is* mirrored onto `Wica`, since it's part of the everyday setup flow. |
+| `wica.register_command(fn)` | method | Delegates to `agent.register_command` — the one convenience method that *is* mirrored onto `Wica`, since it's part of the everyday setup flow. Takes one argument, `fn: Callable \| Command`; override name/description by passing a `Command(fn, name=…, description=…)` (see [commands.md](commands.md), "The `Command` object"). |
 | `wica.on_world_trigger` | `Event[WorldEntry]` | The World's **raw** trigger — fires on every qualifying update, pre-coalescing (= `world.on_trigger`). |
 | `wica.on_agent_trigger` | `Event[WorldEntry]` | The Agent's **filtered** trigger — fires once per trigger a run-to-completion step actually observes (= `agent.on_trigger`). |
 | `wica.on_agent_prompt` | `Event[list[BaseMessage]]` | Fires with the exact rendered messages before each model call (= `agent.on_prompt`). |
@@ -44,11 +44,11 @@ The **asymmetry is deliberate**: command registration is mirrored onto `Wica` be
 
 1. Creates the single asyncio event **loop** the whole system runs on (or adopts one passed in — see "The event loop, restartable `start()`/`stop()`, and terminal `close()`").
 2. Builds a fresh `World(loop)` (no global — see [world.md](world.md)).
-3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, output_sink=…, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`.
+3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, output_sink=…, output_command=…, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`.
 
 `init` **does not configure logging** — WICA is a library, so it only emits under the `wica.*` loggers and leaves handlers/levels to the embedding application (see [config.md](config.md), "Logging is not framework config").
 
-The code-only wiring a JSON file can't express — `output_sink`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The file carries provider/model/key/prompt; `init`'s kwargs carry the callables and runtime objects.
+The code-only wiring a JSON file can't express — `output_sink`, `output_command`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The file carries provider/model/key/prompt; `init`'s kwargs carry the callables and runtime objects. `output_command` is a callable (or a `Command`), so like `output_sink` it can only be code-wired, never JSON-expressed.
 
 `init` takes an **already-loaded `WicaConfig`**, not a path. There is deliberately **no `Wica.from_json`**: loading is one line (`WicaConfig.from_json(path)`, which already exists — see [config.md](config.md)) and `init` needs several code-only kwargs besides the config, so a path-taking convenience would save nothing and hide the config object the caller often wants. The startup shape stays two honest calls:
 
@@ -84,7 +84,7 @@ Because the objects never change identity within one `Wica`'s life (there is no 
 
 ### Command registration is delegated
 
-`wica.register_command(fn, *, name=…, description=…)` forwards verbatim to `agent.register_command` ([agent.md](agent.md)). It's the single command-side convenience mirrored onto `Wica` because registering the agent's capabilities is part of every setup. Everything else command-related (the auto-registered `cancel_command`, execution-as-World-entry) stays entirely inside the Agent.
+`wica.register_command(fn)` forwards verbatim to `agent.register_command` ([agent.md](agent.md)) — one argument, `fn: Callable | Command`, no `name`/`description` kwargs (override via `Command(fn, name=…, description=…)`; wrap an off-the-shelf tool as `Command(tool)` — see [commands.md](commands.md), "The `Command` object"). It's the single command-side convenience mirrored onto `Wica` because registering the agent's capabilities is part of every setup. Everything else command-related (the auto-registered `cancel_command` and `noop`, the optional output Command, execution-as-World-entry) stays entirely inside the Agent.
 
 ### `Event`s are surfaced, not adapted
 

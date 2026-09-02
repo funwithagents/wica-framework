@@ -6,9 +6,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain_core.messages import BaseMessage
-from langchain_core.tools import BaseTool
 
 from wica.agent import Agent, CommandIssued
+from wica.command import Command
 from wica.config import WicaConfig
 from wica.events import Event
 from wica.world import World, WorldEntry
@@ -62,6 +62,7 @@ class Wica:
         config: WicaConfig,
         *,
         output_sink: Callable[[str], Awaitable[None]] | None = None,
+        output_command: Callable[..., Any] | Command | None = None,
         coalesce_window: float = 0.2,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> Wica:
@@ -72,9 +73,12 @@ class Wica:
         included default), Wica creates one and will run it in its own daemon thread on ``start()``;
         otherwise it adopts the injected loop and leaves the thread to the caller.
 
-        The code-only wiring a JSON file can't express — ``output_sink``, ``coalesce_window``, and
-        optionally ``loop`` — are keyword arguments here; the config carries provider/model/key/
-        prompt. Resolution (env key, prompt file) happens inside ``Agent.__init__``, so a
+        The code-only wiring a JSON file can't express — ``output_sink``, ``output_command``,
+        ``coalesce_window``, and optionally ``loop`` — are keyword arguments here; the config
+        carries provider/model/key/prompt. ``output_command`` (a callable or a ``Command``) is the
+        user-facing output channel; when set, free text becomes the agent's private reasoning
+        stream (see specs/agent.md, "Output"). Resolution (env key, prompt file) happens inside
+        ``Agent.__init__``, so a
         ``MissingEnvError`` or unreadable prompt surfaces here, at ``init``. Logging is not
         configured here: WICA is a library, so it only emits under the ``wica.*`` loggers and
         leaves handlers/levels to the embedding application. See specs/config.md, specs/wica.md.
@@ -89,6 +93,7 @@ class Wica:
                 world=world,
                 loop=loop,
                 output_sink=output_sink,
+                output_command=output_command,
                 coalesce_window=coalesce_window,
             )
         except BaseException:
@@ -172,14 +177,9 @@ class Wica:
             self._loop_thread.join()
         self._loop_thread = None
 
-    def register_command(
-        self,
-        fn: Callable[..., Any] | BaseTool,
-        *,
-        name: str | None = None,
-        description: str | None = None,
-    ) -> None:
-        """Register a Command — delegates verbatim to ``agent.register_command``. The one command-
-        side convenience mirrored onto ``Wica`` (see specs/wica.md, "Command registration is
+    def register_command(self, fn: Callable[..., Any] | Command) -> None:
+        """Register a Command — delegates verbatim to ``agent.register_command``. One argument, a
+        callable or a ``Command`` (override name/description via ``Command(fn, name=…, …)``). The one
+        command-side convenience mirrored onto ``Wica`` (see specs/wica.md, "Command registration is
         delegated")."""
-        self.agent.register_command(fn, name=name, description=description)
+        self.agent.register_command(fn)

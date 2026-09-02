@@ -1,8 +1,10 @@
 ---
 code:
   - src/wica/agent.py
+  - src/wica/command.py
 tests:
   - tests/test_agent.py
+  - tests/test_command.py
 ---
 
 # Commands
@@ -23,19 +25,59 @@ This keeps the framework's vocabulary aligned with its name: agents act on the W
 
 ## Commands and tools
 
-- **Off-the-shelf LangChain tools work unmodified.** Registering an existing tool *is* how you commonly define a Command — the Agent must not require a tool to carry any WICA-specific hook (a describe/serialize function, a mode annotation, …). Anything WICA needs beyond `name`/`args`/`result` is optional and lives at the *registration/wrapper* layer, never inside the tool ([agent.md](agent.md), "Commands").
+- **Off-the-shelf LangChain tools work unmodified.** Registering an existing tool *is* how you commonly define a Command — the Agent must not require a tool to carry any WICA-specific hook (a describe/serialize function, a mode annotation, …). Anything WICA needs beyond `name`/`args`/`result` is optional and lives at the *registration/wrapper* layer, never inside the tool ([agent.md](agent.md), "Commands"). That wrapper layer is now a concrete object — the **`Command`** below.
 - **Registering a Command builds its backing tool.** The Agent exposes `register_command(fn)` (over LangChain's `@tool`/`bind_tools`); the resulting tool is what gets bound to the model.
-- **Not every Command is backed by an off-the-shelf tool.** Command is the umbrella for *all* agent actions on the World. Some are plain registered tools (`add`, `walk_to`); others are WICA-native control actions the Agent implements directly — e.g. `cancel_command(call_id)` (below), the deferred `cancel_reaction(reaction_id)` (which would cancel an in-flight reasoning reaction — see [agent.md](agent.md), "Future improvements"), and the deferred `speak(text)` output Command. All are Commands; the tool is just the most common backing.
+- **Not every Command is backed by an off-the-shelf tool.** Command is the umbrella for *all* agent actions on the World. Some are plain registered tools (`add`, `walk_to`); others are WICA-native control actions the Agent implements directly — e.g. `cancel_command(call_id)` and the always-registered `noop` (both below), the deferred `cancel_reaction(reaction_id)` (which would cancel an in-flight reasoning reaction — see [agent.md](agent.md), "Future improvements"), and the optional **output Command** (below), the generalized realization of the once-deferred `speak(text)`. All are Commands; the tool is just the most common backing.
+
+## The `Command` object
+
+WICA is *named* for Commands (the **C** in WICA), yet until now it had no `Command` *type* — only the runtime companions `CommandExecution`, `CommandRecord`, and `CommandIssued` (all in [agent.py](../src/wica/agent.py)). `Command` is the missing member: the **definition-time** object, the concrete home for the "registration/wrapper layer" the tenet above names, and the seam that keeps LangChain out of the framework's command-definition surface.
+
+- **`Command` wraps a callable or an off-the-shelf tool and holds the backing `BaseTool` internally.** Its constructor accepts **either** a plain `Callable[..., Any]` **or** a LangChain `BaseTool`:
+  - `Command(fn, *, name=None, description=None)` — builds the backing tool from the function (name from `__name__`, description from the docstring; explicit `name`/`description` override). An undocumented function with no `description` fails loudly, the same `tool()` requirement WICA already inherits.
+  - `Command(existing_tool)` — wraps an off-the-shelf `BaseTool` unmodified. "Works unmodified" still holds: you *wrap*, you don't *modify* — it's just explicit now.
+- **`Command` is the one place `BaseTool` appears at the definition layer.** LangChain construction (`@tool`/binding of a `BaseTool`) lives inside `Command`; the Agent unwraps a `Command` to its tool only where it already speaks LangChain — `bind_tools` and the model-call adapter. This **completes the quarantine** [agent.md](agent.md) claims ("LangChain as a primitive, not a framework"): before, `register_command` accepted a raw `BaseTool`, leaking LangChain into how you *define* commands; now the command-definition surface speaks `Command | Callable` only.
+- **`register_command` takes exactly one argument: `fn: Callable[..., Any] | Command`.** A bare callable is auto-wrapped into a `Command` internally (the everyday convenience — name and description come from `__name__`/docstring); a `Command` is used directly. There are **no** `name`/`description` keyword arguments on `register_command` any longer — overriding either is expressed by constructing a `Command(fn, name=…, description=…)` and passing that. In practice every application/test call site is already the bare `register_command(fn)` form; the only sites that overrode name/description were WICA's own control Commands, which now build a `Command` (see `cancel_command`, `noop`).
+- **`Command` is where deferred per-command options will live.** The sync/async `mode` (see "Sync vs. async") and a custom result-rendering hook ([Open questions](#open-questions) #5) are natural `Command` fields when built — additive, and none required today.
 
 ### `cancel_command` — the model aborting its own in-flight Command
 
-A running Command is genuinely current state (its `agent:command:<call_id>` entry renders `running`), so the model can decide to abort one it previously issued. `cancel_command(call_id)` is a WICA-native control Command the Agent **auto-registers** (no app wiring, like the deferred `cancel_reaction`) and implements directly over the same loop-thread cancellation path the framework already uses (`Agent.cancel_command`, run from `stop()` — see [agent.md](agent.md), "Concurrency and long-running Commands in v1").
+A running Command is genuinely current state (its `agent:command:<call_id>` entry renders `running`), so the model can decide to abort one it previously issued. `cancel_command(call_id)` is a WICA-native control Command the Agent **auto-registers** (no app wiring, like the deferred `cancel_reaction`) — as a `Command(self._cancel_command_action, name=…, description=…)`, now that `register_command` carries no `name`/`description` kwargs — and implements directly over the same loop-thread cancellation path the framework already uses (`Agent.cancel_command`, run from `stop()` — see [agent.md](agent.md), "Concurrency and long-running Commands in v1"). It targets a running **output Command** (below) exactly like any other, which is what makes barge-in — cancelling in-flight speech — possible.
 
 - **No new identifier.** The target is named by its `call_id`, which is **already visible** to the model: the World renders every command entry inside an `<entry key="agent:command:<call_id>" …>` envelope ([world.md](world.md)), so the `call_id` is on screen with no extra rendering. The Command reads it straight from there — the entry body is left unchanged. The handler is lenient: it accepts either the bare `call_id` or the full `agent:command:<call_id>` key (it strips the prefix), so a verbatim copy of the envelope key also works.
 - **id-guarded no-op.** Cancelling a Command that has already finished, is not running, or never existed is a harmless no-op (the running-task lookup misses) — same guard as `Agent.cancel_command` and the World's TTL `expected_id` pattern. The Command's `result` reports which happened (`cancelling <call_id>` vs. a "not a running command" message), so the model gets feedback through the normal completion-observation path.
 - **Uniform lifecycle — no special-casing.** `cancel_command` is dispatched, tracked, and observed exactly like any other Command: it gets its own `agent:command:<call_id>` entry that goes terminal and re-triggers. So a single cancel produces **two** triggers — the cancel Command's own completion and the target going `cancelled` — which the single-in-flight loop handles by its normal drop-and-leave-in-place rule (one is processed, the other's terminal entry waits to be observed; see [agent.md](agent.md), "Future improvements"). No new machinery.
 
 `cancel_command` cancels a *Command*; the deferred `cancel_reaction` cancels an in-flight *reaction* — siblings, not the same Command. Only `cancel_command` is buildable in v1, where concurrent LLM calls don't exist yet but concurrent Commands do (a step dispatches async Commands and goes idle; a later step observes them still `running`).
+
+### The output Command — deliberate, cancellable user-facing output
+
+The output Command is the generalized realization of the once-deferred `speak(text)` ([agent.md](agent.md), "Future improvements"): instead of a fixed `speak`, the **application registers whatever Command is its user-facing output channel** — TTS, a chat bubble, a robot's mouth — and the Agent treats it as *the* output channel. It is **optional**: when none is set, the Agent keeps its v1 free-text-as-output behavior unchanged (see [agent.md](agent.md), "Output").
+
+Why a Command rather than reusing the `output_sink`? The point is **not** "get text to TTS" — an async `output_sink` could already call TTS. It is the two things only the Command lifecycle provides:
+
+- **Cancellable, barge-in-able output.** An output Command runs as a tracked async task with an `agent:command:<call_id>` entry, so `cancel_command` (above) can interrupt in-flight speech when a new input arrives. An `output_sink` is an opaque inline `await` with no handle — the model can neither *observe* nor *cancel* it.
+- **Observable output.** Because the running entry is `include_in_prompt=True`, a concurrent step *sees* "speaking … (running)" and can decide to cancel it or wait. The model gains explicit, per-step control over **what** it says and **whether** it says anything — its free text becomes private reasoning (see [agent.md](agent.md), "Output").
+
+The output Command runs through the **same uniform lifecycle** as any other Command below — `running` → terminal `agent:command:<call_id>` entry — with exactly one tunable difference: **whether its terminal completion re-triggers a step.** A module-level constant `_TRIGGER_ON_OUTPUT_COMMAND_COMPLETION` (default **`True`**) gates the `triggers_llm_call` its entry is registered with:
+
+- **`True` (default):** speaking re-triggers, so the Agent gets a follow-up step and can chain a second utterance, self-correct, or **`noop`** (below) to stop. Cost: **≥2 LLM calls per utterance** (the utterance, then the "anything else?" step).
+- **`False`:** speaking never wakes a fresh step (speak → idle). Saves the extra inference but forbids self-continuation without a new external input. The terminal entry is then observed and retired by the next input-driven step, exactly like any completion whose trigger was dropped (see "Command execution as a World entry").
+
+Shipping default is `True`; the constant exists so flipping the trade is a one-line change, not a refactor. The choice is recorded, not hidden, precisely because the cost/behavior trade is real. `include_in_prompt` stays `True` regardless, so barge-in works either way.
+
+### `noop` — the model choosing not to act
+
+LLMs are unreliable at returning *genuinely* empty output, so "reply with empty text to do nothing" is a fragile terminator. Instead the Agent **auto-registers a zero-argument WICA-native `noop` Command** (always, independent of any output Command — "the agent may choose not to react to an observation" is generally useful) that the model calls to signal *no reaction*.
+
+`noop` is explained to the model in two complementary places: the **WICA runtime primer** appended to the system prompt (which establishes that declining to react is allowed at all — see [agent.md](agent.md), "System prompt composition") and its own tool **description** (which states *when* to call it). A live e2e test verifies models actually reach for it (see [testing.md](testing.md)).
+
+`noop` is the **one Command that is deliberately not an action on the World**, so it breaks the uniform lifecycle on purpose:
+
+- It creates **no** `agent:command:<call_id>` entry, spawns **no** task, and **never triggers** — it exists precisely to *stop* a cycle (were it to re-trigger, `noop` → completion → `noop` would loop forever). Its non-triggering is **not** tunable (contrast the output Command's flag).
+- It **is** recorded in history so later context shows the agent *chose* not to react — as a **dedicated `NoReactionRecord`** (`call_id` only), *not* a `CommandRecord`: `noop` has no `name`/`args` worth recording and never yields an Observation outcome (see [agent.md](agent.md), "History record shape"). To keep the provider message stream valid (a native `tool_call` needs a matching `tool_result`), it renders as the model's native `noop` tool call paired with a **plain acknowledgement** `tool_result` — *not* the entry-pointer ack the real Commands use (there is no entry to point at); the render path selects that ack by record type. Because there is always an assistant turn (the `noop` call) between observations, it also sidesteps the consecutive-observation rendering wrinkle a truly empty response would create.
+
+`noop` is the natural terminator for the output Command's re-trigger chain (when `_TRIGGER_ON_OUTPUT_COMMAND_COMPLETION` is `True`), and independently the way any agent declines to react.
 
 ## Command execution as a World entry (event-driven)
 

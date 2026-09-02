@@ -20,8 +20,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import Runnable
-from langchain_core.tools import BaseTool, tool
 
+from wica.command import Command
 from wica.config import AgentConfig, resolve_api_key, resolve_system_prompt
 from wica.content import Content, ImagePart, TextPart
 from wica.events import Event
@@ -79,7 +79,18 @@ class CommandRecord:
     args: dict[str, Any]
 
 
-HistoryRecord = ObservationRecord | AssistantTextRecord | CommandRecord
+# The model's explicit "I chose not to act" (a noop call). A dedicated record, not a CommandRecord:
+# noop is not a World action, so it has no name/args to record and never becomes an Observation
+# outcome. It exists to keep the provider message stream valid (a native tool_call needs a matching
+# tool_result) and to show the declined reaction in context. See specs/agent.md, specs/commands.md.
+@dataclass(frozen=True)
+class NoReactionRecord:
+    call_id: str
+
+
+HistoryRecord = (
+    ObservationRecord | AssistantTextRecord | CommandRecord | NoReactionRecord
+)
 
 
 def _format_args(args: dict[str, Any]) -> str:
@@ -151,6 +162,65 @@ _CANCEL_COMMAND_DESCRIPTION = (
     f"after '{_COMMAND_KEY_PREFIX}' in the running command's World entry key (the full key is "
     "accepted too). Cancelling a command that has already finished or never existed is a harmless "
     "no-op."
+)
+
+
+# noop is a WICA-native, zero-arg control Command the model calls to declare *no reaction* — a
+# reliable stand-in for "return empty text" (which models do poorly). It is the one Command that is
+# not an action on the World: the loop intercepts it before dispatch, records a NoReactionRecord,
+# and ends the step (no entry, no task, never triggers). See specs/commands.md ("noop").
+_NOOP_COMMAND_NAME = "noop"
+_NOOP_COMMAND_DESCRIPTION = (
+    "Take no action this step. Call this when the current observation needs no response from you — "
+    "you have nothing to say and no command to issue. This is how you explicitly choose to do "
+    "nothing; do not try to reply with empty text."
+)
+# The tool_result paired with a rendered noop call — a plain acknowledgement, not the entry-pointer
+# ack real Commands use (noop has no World entry to point at). See specs/agent.md ("History").
+_NOOP_ACK = "Acknowledged — no action taken."
+
+# Whether a completed output Command re-triggers a reasoning step. True (default) lets the model
+# chain utterances / self-continue (ended by noop), at ~2 LLM calls per utterance; False makes
+# speaking go straight to idle. Flipping it is deliberately a one-line change. See
+# specs/commands.md ("The output Command").
+_TRIGGER_ON_OUTPUT_COMMAND_COMPLETION = True
+
+# The WICA runtime primer appended to the configured persona (see specs/agent.md, "System prompt
+# composition"). Curated: only what changes how the model interprets the prompt or chooses actions —
+# never runtime plumbing (coalescing, rendering, TTLs, the loop) it can't act on. Composed as:
+# perception + acting  →  an output-mode clause (default text OR the output Command)  →  the noop
+# clause. The output-mode clause is conditional because *how you reply* differs by configuration:
+# with no output Command, free text is the reply; with one, free text is private and the Command
+# speaks. Getting this explicit matters — without a "how to reply" line, some models (gpt-4o
+# observed) treat a plain request as an ignorable observation and noop it.
+_RUNTIME_PRIMER = (
+    "\n\n---\n"
+    "How you operate (WICA runtime):\n"
+    "- The messages you receive in the user role are observations of your World — your environment: "
+    "inputs, sensor readings, or the status of actions you took. Respond to whatever is addressed "
+    "to you or calls for your attention.\n"
+    "- To act on the World, call a tool: a tool call is a command that runs asynchronously, and its "
+    "immediate result only confirms it was dispatched. The actual outcome appears later as a World "
+    "observation (the command's entry turning from running to complete or failed), not in that "
+    "acknowledgement."
+)
+# Appended when there is *no* output Command: free text is the reply channel. Without this some
+# models default to a tool (noop) instead of answering. See specs/agent.md ("System prompt
+# composition").
+_DEFAULT_OUTPUT_PROMPT = "\n- To reply to the user, write your answer as ordinary text — that is how you speak."
+# Appended instead when an output Command is configured: the free-text-is-private contract the model
+# can't infer from a tool schema. See specs/agent.md ("Output").
+_OUTPUT_COMMAND_PROMPT = (
+    "\n- Anything you want to communicate to the user must be said by calling {name}. Your "
+    "free-text responses are private reasoning and are not shown to the user."
+)
+# Always appended last — references the reply mechanism established just above, and is deliberately
+# conservative so it never suppresses an expected response. See specs/commands.md ("noop").
+_NOOP_PROMPT = (
+    "\n- You need not act on every observation. If one genuinely calls for nothing from you — "
+    f"passive background state, say — call {_NOOP_COMMAND_NAME} to do nothing. But a request, a "
+    f"question, or anything addressed to you should be answered; never use {_NOOP_COMMAND_NAME} to "
+    "skip an expected response."
 )
 
 
@@ -245,6 +315,7 @@ class Agent:
         loop: asyncio.AbstractEventLoop,
         coalesce_window: float = 0.2,
         output_sink: Callable[[str], Awaitable[None]] | None = None,
+        output_command: Callable[..., Any] | Command | None = None,
         model: BaseChatModel | None = None,
     ) -> None:
         # Config-driven construction *is* the constructor — resolution happens here, at build. The
@@ -257,7 +328,33 @@ class Agent:
         # passed in (the raw-model injection seam — a caller supplying a model no config can express,
         # and the seam the Agent unit tests use to drive the loop over a fully-scripted fake). The
         # system prompt is always config-expressed. See specs/agent.md, specs/wica.md (open q. 3).
-        self.system_prompt = resolve_system_prompt(config)
+        # The optional application-supplied output Command — the user-facing output channel. Built
+        # into a Command now (before prompt composition) so its name is known. When set, free text
+        # becomes the agent's private reasoning stream and this Command is how it speaks. See
+        # specs/commands.md ("The output Command") and specs/agent.md ("Output").
+        self._output_command: Command | None = (
+            None
+            if output_command is None
+            else output_command
+            if isinstance(output_command, Command)
+            else Command(output_command)
+        )
+        self._output_command_name: str | None = (
+            None if self._output_command is None else self._output_command.name
+        )
+        # The system prompt the model receives is composed: the resolved persona (verbatim) followed
+        # by the WICA runtime primer (+ the output clause when an output Command is set). Composed
+        # once here so the combined string is stable across the conversation and stays in the cached
+        # deep prefix. See specs/agent.md ("System prompt composition").
+        # perception + acting, then the output-mode clause (how you reply differs by whether an
+        # output Command is set), then the noop clause last.
+        primer = _RUNTIME_PRIMER
+        if self._output_command_name is not None:
+            primer += _OUTPUT_COMMAND_PROMPT.format(name=self._output_command_name)
+        else:
+            primer += _DEFAULT_OUTPUT_PROMPT
+        primer += _NOOP_PROMPT
+        self.system_prompt = resolve_system_prompt(config) + primer
         self.model = model if model is not None else build_chat_model(config)
         self._world = world
         # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
@@ -283,8 +380,8 @@ class Agent:
         self.on_prompt: Event[list[BaseMessage]] = Event()
         self.on_command: Event[CommandIssued] = Event()
 
-        # name -> the LangChain tool backing each registered Command (see commands.md)
-        self._commands: dict[str, BaseTool] = {}
+        # name -> the registered Command (which holds the backing LangChain tool — see commands.md)
+        self._commands: dict[str, Command] = {}
         self._bound_model: Runnable[Any, AIMessage] = self.model
         self._history: list[HistoryRecord] = []
         self._busy = False
@@ -303,39 +400,46 @@ class Agent:
         self._trigger_sub: Callable[[WorldEntry], None] | None = None
         self._started = False
 
-    def register_command(
-        self,
-        fn: Callable[..., Any] | BaseTool,
-        *,
-        name: str | None = None,
-        description: str | None = None,
-    ) -> None:
-        """Register a Command. Commonly a plain function or an off-the-shelf LangChain
-        tool — the tool is the under-the-hood primitive the model issues the Command
-        through (see specs/commands.md)."""
-        wrapped: BaseTool
-        if isinstance(fn, BaseTool):
-            wrapped = fn
-        elif name is not None:
-            wrapped = tool(name, description=description)(fn)
-        else:
-            wrapped = tool(fn, description=description)
-        self._commands[wrapped.name] = wrapped
-        self._bound_model = self.model.bind_tools(list(self._commands.values()))
-        _logger.debug("registered command %r", wrapped.name)
+    def register_command(self, fn: Callable[..., Any] | Command) -> None:
+        """Register a Command. Takes one argument: a plain callable (auto-wrapped — name from
+        ``__name__``, description from the docstring) or a ``Command`` (used directly). To override
+        name/description, or to wrap an off-the-shelf tool, pass ``Command(fn, name=…, …)`` /
+        ``Command(tool)`` — there are no name/description kwargs here. See specs/commands.md."""
+        command = fn if isinstance(fn, Command) else Command(fn)
+        self._commands[command.name] = command
+        self._bound_model = self.model.bind_tools(
+            [c.tool for c in self._commands.values()]
+        )
+        _logger.debug("registered command %r", command.name)
 
     def start(self) -> None:
         if self._started:
             return
-        # WICA-native control Command: let the model abort a Command it previously issued that is
-        # still running. Auto-registered here (no app wiring) since it needs Agent internals;
-        # registering at start (not construction) keeps __init__ inert — it never touches the model.
-        # register_command is idempotent on the name, so a second start() is harmless.
+        # WICA-native control Commands, auto-registered here (no app wiring) since they need Agent
+        # internals. Registering at start (not construction) keeps __init__ inert — it never touches
+        # the model. register_command is idempotent on the name, so a second start() is harmless.
+        #  - cancel_command: abort a still-running Command previously issued (also reaches an output
+        #    Command, enabling barge-in).
+        #  - noop: declare no reaction (intercepted before dispatch — see _run_step).
         self.register_command(
-            self._cancel_command_action,
-            name=_CANCEL_COMMAND_NAME,
-            description=_CANCEL_COMMAND_DESCRIPTION,
+            Command(
+                self._cancel_command_action,
+                name=_CANCEL_COMMAND_NAME,
+                description=_CANCEL_COMMAND_DESCRIPTION,
+            )
         )
+        self.register_command(
+            Command(
+                self._noop_action,
+                name=_NOOP_COMMAND_NAME,
+                description=_NOOP_COMMAND_DESCRIPTION,
+            )
+        )
+        # The optional application-supplied output Command (built in __init__). An ordinary Command
+        # in every respect but its trigger-on-completion flag (see _dispatch_command) and the prompt
+        # clause (see __init__).
+        if self._output_command is not None:
+            self.register_command(self._output_command)
         _logger.info("agent starting (%d command(s) registered)", len(self._commands))
 
         # Subscribe to the World's raw trigger. The World emits on_trigger on the loop thread
@@ -442,6 +546,12 @@ class Agent:
             f"{call_id} is not a running command (it already finished or never existed)"
         )
 
+    async def _noop_action(self) -> str:
+        """Backing for the `noop` Command. Never actually invoked — `_run_step` intercepts a noop
+        call before dispatch and records a NoReactionRecord — but a real tool is needed so the model
+        can be bound to it and issue the call. Zero-arg (the model just names it)."""
+        return _NOOP_ACK
+
     async def _handle_trigger(self, entry: WorldEntry) -> None:
         # Runs on the loop thread (the World emits on_trigger there, and the start() shim
         # create_tasks this coroutine on it). All window state below is therefore touched
@@ -533,6 +643,13 @@ class Agent:
 
         for call in response.tool_calls:
             call_id = call["id"] or uuid.uuid4().hex
+            if call["name"] == _NOOP_COMMAND_NAME:
+                # noop is the model declaring no reaction: record it (so context shows the choice
+                # and the tool_call has a matching tool_result), but do not dispatch it — no World
+                # entry, no task, no trigger; it is not a World action. See specs/commands.md.
+                _logger.debug("noop issued (call_id=%s) — no action taken", call_id)
+                self._history.append(NoReactionRecord(call_id))
+                continue
             args = copy.deepcopy(call["args"])
             self._history.append(
                 CommandRecord(call_id, call["name"], copy.deepcopy(args))
@@ -549,12 +666,21 @@ class Agent:
         )
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         self._command_keys.add(key)
+        # The output Command is the one Command whose completion may deliberately not re-trigger:
+        # speaking need not wake a fresh step. include_in_prompt stays True either way so a
+        # concurrent step can observe running speech and cancel it (barge-in). Every other Command
+        # re-triggers on completion (the uniform model). See specs/commands.md ("The output Command").
+        triggers_llm_call = (
+            _TRIGGER_ON_OUTPUT_COMMAND_COMPLETION
+            if name == self._output_command_name
+            else True
+        )
         self._world.register(
             key,
             CommandExecution,
             serialize_fn=_serialize_command_execution,
             include_in_prompt=True,
-            triggers_llm_call=True,
+            triggers_llm_call=triggers_llm_call,
             trigger_condition_fn=lambda old, new: new is not None and new.is_terminal(),
         )
         self._world.update(key, CommandExecution(name=name, args=args, state="running"))
@@ -569,7 +695,7 @@ class Agent:
         )
         try:
             command = self._commands[name]
-            result = await command.ainvoke(args)
+            result = await command.tool.ainvoke(args)
         except asyncio.CancelledError:
             _logger.debug("command %s [call_id=%s] cancelled", name, call_id)
             try:
@@ -647,6 +773,9 @@ class Agent:
         # real call), each paired with the tool_result carrying its outcome.
         pending_text: list[str] = []
         pending_calls: list[dict[str, Any]] = []
+        # call_id -> the tool_result content for that call. A Command's is the fixed entry-pointer
+        # ack (_command_ack); a noop's is the plain _NOOP_ACK — selected by record type below.
+        pending_acks: dict[str, str] = {}
 
         def flush_assistant() -> None:
             if not pending_text and not pending_calls:
@@ -656,17 +785,18 @@ class Agent:
                     content="\n".join(pending_text), tool_calls=list(pending_calls)
                 )
             )
-            # The tool_result is a fixed ack pointing at the Command's World entry — never the
-            # outcome. The outcome is delivered by that entry, rendered as an observation at the
-            # step where the completion is observed (see _command_ack and the loop below).
+            # A Command's tool_result is a fixed ack pointing at its World entry — never the outcome
+            # (the outcome is delivered by that entry, rendered as an observation at the step where
+            # the completion is observed). A noop's is a plain acknowledgement — it has no entry.
             for call in pending_calls:
                 messages.append(
                     ToolMessage(
-                        content=_command_ack(call["id"]), tool_call_id=call["id"]
+                        content=pending_acks[call["id"]], tool_call_id=call["id"]
                     )
                 )
             pending_text.clear()
             pending_calls.clear()
+            pending_acks.clear()
 
         for i, record in enumerate(self._history):
             if isinstance(record, ObservationRecord):
@@ -700,6 +830,14 @@ class Agent:
                         "id": record.call_id,
                     }
                 )
+                pending_acks[record.call_id] = _command_ack(record.call_id)
+            elif isinstance(record, NoReactionRecord):
+                # Render as the model's native noop tool call (keeps the message stream valid) with
+                # a plain-ack tool_result — selected here by record type. See specs/agent.md.
+                pending_calls.append(
+                    {"name": _NOOP_COMMAND_NAME, "args": {}, "id": record.call_id}
+                )
+                pending_acks[record.call_id] = _NOOP_ACK
 
         flush_assistant()
         return messages

@@ -41,14 +41,21 @@ def real_chat_model(config_path: Path) -> BaseChatModel:
         pytest.skip(f"{exc.env_var} not set — skipping e2e test")
 
 
-def real_wica(config_path: Path, **kwargs: Any) -> Wica:
+def real_wica(
+    config_path: Path, *, system_prompt: str | None = None, **kwargs: Any
+) -> Wica:
     """Stand up a full Wica (its own loop + World + Agent) from a committed config, through the real
     entrypoint — `Wica.init`. This is what makes the live tier meaningful: it drives the whole
     system the way production does, exercising the real per-provider construction (including
     `huggingface-hub`'s dedicated non-`init_chat_model` path). The caller passes code-only wiring
-    (`output_sink`, `coalesce_window`) as kwargs. Skips when the config's api_key_env is unset — the
-    key resolves at build inside `Wica.init`, so `MissingEnvError -> pytest.skip` lives here."""
+    (`output_sink`, `output_command`, `coalesce_window`) as kwargs. `system_prompt` overrides the
+    committed persona when a test needs a specific one (inline wins over `system_prompt_file` — see
+    specs/config.md). Skips when the config's api_key_env is unset — the key resolves at build inside
+    `Wica.init`, so `MissingEnvError -> pytest.skip` lives here."""
+    config = WicaConfig.from_json(config_path)
+    if system_prompt is not None:
+        config.agent.system_prompt = system_prompt
     try:
-        return Wica.init(WicaConfig.from_json(config_path), **kwargs)
+        return Wica.init(config, **kwargs)
     except MissingEnvError as exc:
         pytest.skip(f"{exc.env_var} not set — skipping e2e test")
