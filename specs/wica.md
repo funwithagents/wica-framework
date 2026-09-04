@@ -29,6 +29,7 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 | `wica.world` | attribute (`World`) | The owned World — the home for **all** World-schema work (`register`/`update`/`get`/listeners). Not duplicated onto `Wica`. |
 | `wica.agent` | attribute (`Agent`) | The owned Agent. Directly reachable, but the common paths (command registration, lifecycle, instrumentation) are surfaced on `Wica` so a consumer rarely needs it. |
 | `wica.start()` / `wica.stop()` | methods | The restartable shared lifecycle — start or pause the World and Agent together (see "Lifecycle"). |
+| `wica.is_running` | attribute (`bool`) | Read-only flag; `True` between a successful `start()` and `stop()` (mirrors `world.is_running` — see [world.md](world.md), "Lifecycle"). |
 | `wica.close()` | method | Permanently stop the instance and close its owned event loop. Idempotent; a closed instance cannot be restarted. |
 | `wica.register_command(fn)` | method | Delegates to `agent.register_command` — the one convenience method that *is* mirrored onto `Wica`, since it's part of the everyday setup flow. Takes one argument, `fn: Callable \| Command`; override name/description by passing a `Command(fn, name=…, description=…)` (see [commands.md](commands.md), "The `Command` object"). |
 | `wica.on_world_trigger` | `Event[WorldEntry]` | The World's **raw** trigger — fires on every qualifying update, pre-coalescing (= `world.on_trigger`). |
