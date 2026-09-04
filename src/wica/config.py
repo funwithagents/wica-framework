@@ -35,8 +35,10 @@ class AgentConfig:
     hf_provider: str = "auto"  # only used by provider "huggingface-hub"
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
-        return cls(**_parse_agent_block(data, base_dir=None))
+    def from_dict(
+        cls, data: dict[str, Any], *, base_dir: str | Path | None = None
+    ) -> AgentConfig:
+        return cls(**_parse_agent_block(data, base_dir=_as_base_dir(base_dir)))
 
 
 @dataclass
@@ -44,8 +46,10 @@ class WicaConfig:
     agent: AgentConfig
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> WicaConfig:
-        return cls(**_parse_wica_block(data, base_dir=None))
+    def from_dict(
+        cls, data: dict[str, Any], *, base_dir: str | Path | None = None
+    ) -> WicaConfig:
+        return cls(**_parse_wica_block(data, base_dir=_as_base_dir(base_dir)))
 
     @classmethod
     def from_json(cls, path: str | Path) -> WicaConfig:
@@ -71,6 +75,13 @@ _AGENT_REQUIRED = {"provider", "model"}
 _AGENT_OPTIONAL_COMMON = {"api_key", "api_key_env", "model_kwargs", "hf_provider"}
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent"}
+
+
+def _as_base_dir(base_dir: str | Path | None) -> Path | None:
+    """Normalize the optional `from_dict` base directory (a `str` or `Path`) into the `Path | None`
+    the `_parse_*` locate plumbing expects — the same base-dir context `from_json` derives from the
+    config file's own directory. See specs/config.md ("System prompt")."""
+    return Path(base_dir) if base_dir is not None else None
 
 
 def _require_str(data: dict[str, Any], key: str, *, block: str) -> str:

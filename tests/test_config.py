@@ -60,6 +60,67 @@ def test_agent_config_from_dict_stores_system_prompt_file_verbatim():
     assert cfg.system_prompt_file == "persona.md"
 
 
+def test_from_dict_locates_system_prompt_file_against_base_dir(tmp_path: Path):
+    # A relative system_prompt_file + base_dir absolutizes against that dir — the same locate
+    # from_json does against the config file's directory (no read).
+    data = _agent_dict()
+    del data["system_prompt"]
+    data["system_prompt_file"] = "prompts/persona.md"
+
+    cfg = AgentConfig.from_dict(data, base_dir=tmp_path)
+
+    assert cfg.system_prompt is None
+    assert cfg.system_prompt_file == str(
+        (tmp_path / "prompts" / "persona.md").resolve()
+    )
+
+
+def test_from_dict_base_dir_matches_from_json_location(tmp_path: Path):
+    # from_dict(..., base_dir=<config dir>) yields the same located path as from_json for a config
+    # file sitting in that dir — the app hands a section-dict + os.path.dirname(path) and gets parity.
+    config_dir = tmp_path / "deploy"
+    config_dir.mkdir()
+
+    agent = _agent_dict()
+    del agent["system_prompt"]
+    agent["system_prompt_file"] = "prompts/wica.md"
+
+    config_path = config_dir / "agent.config.json"
+    config_path.write_text(json.dumps({"agent": agent}))
+
+    from_json_cfg = WicaConfig.from_json(config_path)
+    from_dict_cfg = WicaConfig.from_dict(
+        {"agent": dict(agent)}, base_dir=str(config_dir)
+    )
+
+    assert (
+        from_dict_cfg.agent.system_prompt_file
+        == from_json_cfg.agent.system_prompt_file
+        == str((config_dir / "prompts" / "wica.md").resolve())
+    )
+
+
+def test_from_dict_without_base_dir_stores_relative_verbatim():
+    # Regression guard on the unchanged default: no base_dir keeps the relative path as given.
+    data = _agent_dict()
+    del data["system_prompt"]
+    data["system_prompt_file"] = "prompts/persona.md"
+
+    assert AgentConfig.from_dict(data).system_prompt_file == "prompts/persona.md"
+
+
+def test_from_dict_base_dir_ignored_for_absolute_system_prompt_file(tmp_path: Path):
+    # An absolute path is stored as-is; base_dir is ignored (matches from_json).
+    absolute = str((tmp_path / "elsewhere" / "persona.md").resolve())
+    data = _agent_dict()
+    del data["system_prompt"]
+    data["system_prompt_file"] = absolute
+
+    cfg = AgentConfig.from_dict(data, base_dir=tmp_path / "deploy")
+
+    assert cfg.system_prompt_file == absolute
+
+
 def test_agent_config_from_dict_stores_api_key_env_verbatim():
     cfg = AgentConfig.from_dict(_agent_dict(api_key_env="WICA_SOME_KEY"))
     # The env var *name* is kept; nothing is read at load (the var need not even exist).
