@@ -57,9 +57,10 @@ Four surfaces, side by side:
    that's *dropped* because a reasoning call is already in flight doesn't appear and gets no reply —
    faithful to what actually happened.
 2. **World state.** A live view of the current World — every entry the demo tracks, shown as raw
-   values (key, version id, value, when it last changed). This is the robot's whole mind laid bare:
+   values (key, value, when it last changed). This is the robot's whole mind laid bare:
    what it heard, who's nearby, how it feels, who it's tracking, and any command currently running.
-   It updates in real time as inputs arrive and the robot acts.
+   It updates in real time as inputs arrive and the robot acts — including a short-lived command
+   entry (e.g. a `say` that is "running" only while it speaks), so a fleeting action still shows.
 3. **Prompt.** The exact prompt sent to the model, shown as read-only text — so the user can see
    *how* World state becomes an LLM prompt, the core idea of WICA. Every reasoning step's prompt is
    kept, not just the last one: a dropdown above the text lists them (labelled by time and the
