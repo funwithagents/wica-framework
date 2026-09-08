@@ -138,7 +138,7 @@ the demo wiring the effect deterministically behind the agent's back.
 ## Configuration
 
 - **The demo loads from a committed JSON config**, `examples/agent.config.json`, via
-  `WicaConfig.from_json` followed by `Wica.init` (see [config.md](config.md)) — provider,
+  `WicaConfig.from_json_file` followed by `Wica.init` (see [config.md](config.md)) — provider,
   model, and persona (`system_prompt_file`, pointing at `examples/prompts/wica.md`) all live
   there. Switching providers/models, or editing the persona, is a file edit, not a code change.
   Committed per-provider variants sit alongside it — `agent.anthropic.config.json`,

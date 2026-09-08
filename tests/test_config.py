@@ -62,7 +62,7 @@ def test_agent_config_from_dict_stores_system_prompt_file_verbatim():
 
 def test_from_dict_locates_system_prompt_file_against_base_dir(tmp_path: Path):
     # A relative system_prompt_file + base_dir absolutizes against that dir — the same locate
-    # from_json does against the config file's directory (no read).
+    # from_json_file does against the config file's directory (no read).
     data = _agent_dict()
     del data["system_prompt"]
     data["system_prompt_file"] = "prompts/persona.md"
@@ -75,9 +75,9 @@ def test_from_dict_locates_system_prompt_file_against_base_dir(tmp_path: Path):
     )
 
 
-def test_from_dict_base_dir_matches_from_json_location(tmp_path: Path):
-    # from_dict(..., base_dir=<config dir>) yields the same located path as from_json for a config
-    # file sitting in that dir — the app hands a section-dict + os.path.dirname(path) and gets parity.
+def test_from_dict_base_dir_matches_from_json_file_location(tmp_path: Path):
+    # from_dict(..., base_dir=<config dir>) yields the same located path as from_json_file for a
+    # config file in that dir — the app hands a section-dict + os.path.dirname(path) and gets parity.
     config_dir = tmp_path / "deploy"
     config_dir.mkdir()
 
@@ -88,14 +88,14 @@ def test_from_dict_base_dir_matches_from_json_location(tmp_path: Path):
     config_path = config_dir / "agent.config.json"
     config_path.write_text(json.dumps({"agent": agent}))
 
-    from_json_cfg = WicaConfig.from_json(config_path)
+    from_json_file_cfg = WicaConfig.from_json_file(config_path)
     from_dict_cfg = WicaConfig.from_dict(
         {"agent": dict(agent)}, base_dir=str(config_dir)
     )
 
     assert (
         from_dict_cfg.agent.system_prompt_file
-        == from_json_cfg.agent.system_prompt_file
+        == from_json_file_cfg.agent.system_prompt_file
         == str((config_dir / "prompts" / "wica.md").resolve())
     )
 
@@ -110,7 +110,7 @@ def test_from_dict_without_base_dir_stores_relative_verbatim():
 
 
 def test_from_dict_base_dir_ignored_for_absolute_system_prompt_file(tmp_path: Path):
-    # An absolute path is stored as-is; base_dir is ignored (matches from_json).
+    # An absolute path is stored as-is; base_dir is ignored (matches from_json_file).
     absolute = str((tmp_path / "elsewhere" / "persona.md").resolve())
     data = _agent_dict()
     del data["system_prompt"]
@@ -135,7 +135,7 @@ def test_from_json_inline_system_prompt(tmp_path: Path):
     config_path = tmp_path / "agent.config.json"
     config_path.write_text(json.dumps(_wica_dict()))
 
-    cfg = WicaConfig.from_json(config_path)
+    cfg = WicaConfig.from_json_file(config_path)
     assert cfg.agent.system_prompt == "You are a test assistant."
     assert cfg.agent.system_prompt_file is None
 
@@ -157,7 +157,7 @@ def test_from_json_locates_system_prompt_file_relative_to_config_but_defers_read
     other_dir.mkdir()
     monkeypatch.chdir(other_dir)
 
-    cfg = WicaConfig.from_json(config_path)
+    cfg = WicaConfig.from_json_file(config_path)
     # Located (absolutized against the config dir), inline slot stays empty, file not read yet.
     assert cfg.agent.system_prompt is None
     assert cfg.agent.system_prompt_file == str(
@@ -175,11 +175,49 @@ def test_from_json_does_not_read_system_prompt_file_at_load(tmp_path: Path):
     config_path.write_text(json.dumps(data))
 
     # Loads fine — locating is not reading, so a missing file is not an error until build.
-    cfg = WicaConfig.from_json(config_path)
+    cfg = WicaConfig.from_json_file(config_path)
     assert Path(cfg.agent.system_prompt_file or "").is_absolute()
     # ...and the error surfaces at resolution (build), naming the path.
     with pytest.raises(ConfigError, match="does-not-exist.md"):
         resolve_system_prompt(cfg.agent)
+
+
+# --- from_json: parse a JSON string (base_dir optional, like from_dict) ---------------
+
+
+def test_from_json_parses_string():
+    cfg = WicaConfig.from_json(
+        json.dumps(_wica_dict(model_kwargs={"temperature": 0.5}))
+    )
+    assert cfg.agent.provider == "anthropic"
+    assert cfg.agent.model == "claude-sonnet-5"
+    assert cfg.agent.system_prompt == "You are a test assistant."
+    assert cfg.agent.model_kwargs == {"temperature": 0.5}
+
+
+def test_from_json_string_locates_system_prompt_file_against_base_dir(tmp_path: Path):
+    # A JSON string has no location of its own, so from_json takes the same optional base_dir as
+    # from_dict and locates a relative system_prompt_file against it (parity with from_dict).
+    data = _wica_dict()
+    del data["agent"]["system_prompt"]
+    data["agent"]["system_prompt_file"] = "prompts/persona.md"
+
+    cfg = WicaConfig.from_json(json.dumps(data), base_dir=tmp_path)
+
+    assert cfg.agent.system_prompt is None
+    assert cfg.agent.system_prompt_file == str(
+        (tmp_path / "prompts" / "persona.md").resolve()
+    )
+
+
+def test_from_json_invalid_json_raises_config_error():
+    with pytest.raises(ConfigError, match="invalid JSON"):
+        WicaConfig.from_json("{not valid json")
+
+
+def test_from_json_non_object_raises_config_error():
+    with pytest.raises(ConfigError, match="JSON object"):
+        WicaConfig.from_json("[1, 2, 3]")
 
 
 @pytest.mark.parametrize(
@@ -388,7 +426,7 @@ def test_from_json_then_wica_init_composes(
     config_path = tmp_path / "agent.config.json"
     config_path.write_text(json.dumps(_wica_dict(api_key="sk-abc")))
 
-    wica_config = WicaConfig.from_json(config_path)
+    wica_config = WicaConfig.from_json_file(config_path)
     loop = (
         asyncio.new_event_loop()
     )  # injected + owned here, never started (no model call needed)

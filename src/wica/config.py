@@ -54,7 +54,26 @@ class WicaConfig:
         return cls(**_parse_wica_block(data, base_dir=_as_base_dir(base_dir)))
 
     @classmethod
-    def from_json(cls, path: str | Path) -> WicaConfig:
+    def from_json(cls, text: str, *, base_dir: str | Path | None = None) -> WicaConfig:
+        """Parse a WICA config from a JSON **string**. Like ``from_dict`` but for un-parsed text:
+        it ``json.loads`` the string, then validates the same shape. A JSON string has no location
+        of its own, so it takes the same optional ``base_dir`` as ``from_dict`` for locating a
+        relative ``system_prompt_file``; ``from_json_file`` supplies it from the file's directory.
+        See specs/config.md ("Plain dataclasses with dictionary and JSON loaders")."""
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"invalid JSON config: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ConfigError("config must be a JSON object")
+        return cls(**_parse_wica_block(data, base_dir=_as_base_dir(base_dir)))
+
+    @classmethod
+    def from_json_file(cls, path: str | Path) -> WicaConfig:
+        """Load a WICA config from a dedicated JSON **file**. Reads the file, then parses it via
+        ``from_json`` with ``base_dir`` derived from the file's own directory, so a relative
+        ``system_prompt_file`` is located relative to the config file and stays CWD-independent.
+        See specs/config.md ("System prompt")."""
         config_path = Path(path)
         try:
             text = config_path.read_text(encoding="utf-8")
@@ -63,14 +82,9 @@ class WicaConfig:
                 f"could not read config file {config_path}: {exc}"
             ) from exc
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ConfigError(
-                f"invalid JSON in config file {config_path}: {exc}"
-            ) from exc
-        if not isinstance(data, dict):
-            raise ConfigError(f"config file {config_path} must contain a JSON object")
-        return cls(**_parse_wica_block(data, base_dir=config_path.parent))
+            return cls.from_json(text, base_dir=config_path.parent)
+        except ConfigError as exc:
+            raise ConfigError(f"in config file {config_path}: {exc}") from exc
 
 
 _AGENT_REQUIRED = {"provider", "model"}
@@ -80,9 +94,9 @@ _WICA_ALLOWED = {"agent"}
 
 
 def _as_base_dir(base_dir: str | Path | None) -> Path | None:
-    """Normalize the optional `from_dict` base directory (a `str` or `Path`) into the `Path | None`
-    the `_parse_*` locate plumbing expects — the same base-dir context `from_json` derives from the
-    config file's own directory. See specs/config.md ("System prompt")."""
+    """Normalize the optional `from_dict`/`from_json` base directory (a `str` or `Path`) into the
+    `Path | None` the `_parse_*` locate plumbing expects — the same base-dir context `from_json_file`
+    derives from the config file's own directory. See specs/config.md ("System prompt")."""
     return Path(base_dir) if base_dir is not None else None
 
 
@@ -119,10 +133,11 @@ def _validate_system_prompt(
     data: dict[str, Any], *, base_dir: Path | None, block: str
 ) -> tuple[str | None, str | None]:
     """Structural check + *locate* (no read). Enforces exactly-one and string types. For a relative
-    `system_prompt_file`, from_json (base_dir set) absolutizes it against the config directory so
-    the path is bound to the config's location, not the process CWD — a locate, not a file read; the
-    read is deferred to resolve_system_prompt at build. from_dict (base_dir None) stores it as
-    given. See specs/config.md ("System prompt")."""
+    `system_prompt_file`, a caller-supplied base_dir (from_json_file derives it from the config
+    directory) absolutizes it against that directory so the path is bound to the config's location,
+    not the process CWD — a locate, not a file read; the read is deferred to resolve_system_prompt
+    at build. With base_dir None the path is stored as given. See specs/config.md ("System
+    prompt")."""
     has_inline = "system_prompt" in data
     has_file = "system_prompt_file" in data
     if has_inline and has_file:
@@ -216,7 +231,7 @@ def resolve_api_key(config: AgentConfig) -> str | None:
 
 def resolve_system_prompt(config: AgentConfig) -> str:
     """Resolve the effective system prompt at Agent build: inline `system_prompt` if set, else the
-    contents of `system_prompt_file` (already absolutized by from_json). A missing/unreadable file
+    contents of `system_prompt_file` (already absolutized by from_json_file). A missing/unreadable file
     raises ConfigError naming the path. Load-time validation guarantees exactly one is set. See
     specs/config.md ("System prompt")."""
     if config.system_prompt is not None:

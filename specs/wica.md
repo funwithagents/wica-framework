@@ -51,10 +51,10 @@ The **asymmetry is deliberate**: command registration is mirrored onto `Wica` be
 
 The runtime wiring a config object should not express — `output_sink`, `output_command`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The config carries provider/model/key/prompt; `init`'s kwargs carry callables and runtime objects. `output_command` is a callable (or a `Command`), so like `output_sink` it can only be code-wired, never represented as plain configuration data.
 
-`init` takes an **already-created `WicaConfig`**, not a path. The caller may construct it directly or obtain it through `WicaConfig.from_dict` / `WicaConfig.from_json` (see [config.md](config.md)). There is deliberately **no `Wica.from_json`**: a path-taking convenience would privilege one config source, save only one line, and hide the config object the caller often wants. For a dedicated file, startup remains two honest calls:
+`init` takes an **already-created `WicaConfig`**, not a path. The caller may construct it directly or obtain it through `WicaConfig.from_dict` / `WicaConfig.from_json` / `WicaConfig.from_json_file` (see [config.md](config.md)). There is deliberately **no `Wica.from_json_file`**: a path-taking convenience would privilege one config source, save only one line, and hide the config object the caller often wants. For a dedicated file, startup remains two honest calls:
 
 ```python
-config = WicaConfig.from_json(path)
+config = WicaConfig.from_json_file(path)
 wica = Wica.init(config, output_sink=my_sink, coalesce_window=0.2)
 wica.world.register("speech_input", str, serialize_fn=…, triggers_llm_call=True)
 wica.register_command(dance)

@@ -341,7 +341,7 @@ def on_prompt(messages: list[BaseMessage]) -> None:
 # Loading is inert (validates only, reads no env/files). The api key resolves at Agent build inside
 # Wica.init, so that's what we guard: an unset api_key_env raises MissingEnvError there, and we
 # degrade to a World-only system. See specs/config.md, specs/wica.md.
-wica_config = WicaConfig.from_json(CONFIG_PATH)
+wica_config = WicaConfig.from_json_file(CONFIG_PATH)
 wica: Wica | None = None
 config_error: str | None = None
 try:

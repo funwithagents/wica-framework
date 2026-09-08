@@ -27,7 +27,7 @@ PROVIDER_CONFIGS = [
 def load_agent_config(config_path: Path) -> AgentConfig:
     """Load the config (inert — validates only, reads no env/files). The api key resolves later, at
     build; the skip-when-unset lives in the build helpers below."""
-    return WicaConfig.from_json(config_path).agent
+    return WicaConfig.from_json_file(config_path).agent
 
 
 def real_chat_model(config_path: Path) -> BaseChatModel:
@@ -52,7 +52,7 @@ def real_wica(
     committed persona when a test needs a specific one (inline wins over `system_prompt_file` — see
     specs/config.md). Skips when the config's api_key_env is unset — the key resolves at build inside
     `Wica.init`, so `MissingEnvError -> pytest.skip` lives here."""
-    config = WicaConfig.from_json(config_path)
+    config = WicaConfig.from_json_file(config_path)
     if system_prompt is not None:
         config.agent.system_prompt = system_prompt
     try:
