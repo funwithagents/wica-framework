@@ -21,9 +21,11 @@ class MissingEnvError(ConfigError):
 
 @dataclass
 class AgentConfig:
-    """Plain data mirroring the JSON `agent` block. The `*_env`/`*_file` fields hold references
-    resolved at Agent build, not at load — see resolve_api_key / resolve_system_prompt and
-    specs/config.md."""
+    """Plain data mirroring the dictionary/JSON ``agent`` block.
+
+    The ``*_env``/``*_file`` fields hold references resolved at Agent build, not during config
+    creation — see ``resolve_api_key`` / ``resolve_system_prompt`` and specs/config.md.
+    """
 
     provider: str
     model: str

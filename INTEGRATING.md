@@ -4,7 +4,7 @@
 
 > WICA ships **no model provider**. Install the extra for the one you use:
 > ```bash
-> uv add "wica[anthropic] @ git+https://github.com/<owner>/wica-framework"
+> uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
 > # or wica[openai], or wica[huggingface-hub]
 > ```
 
@@ -31,10 +31,11 @@ Everything below is re-exported from the top-level `wica` package ([`src/wica/__
 | `TextPart`, `ImagePart` | dataclass | Multimodal content parts; `Content` is a `list` of them |
 | `Content`, `ContentPart` | type alias | What a `serialize_fn` returns |
 | `Agent` | class | The reasoning loop; usually owned by `Wica`, but constructible directly (see the direct seam below) |
+| `Command` | class | Definition wrapper for a callable or an off-the-shelf LangChain tool; use it to override callable metadata or wrap an existing tool |
 | `CommandIssued` | dataclass | Payload of `wica.on_agent_command` (`name`, `args`) |
 | `Event` | class | The pub/sub primitive the four instrumentation signals use (`subscribe`/`unsubscribe`) |
-| `WicaConfig`, `AgentConfig` | dataclass | Config, loaded strictly from JSON |
-| `ConfigError`, `MissingEnvError` | exception | Raised on invalid config / unset env var (at `Wica.init`, i.e. build) |
+| `WicaConfig`, `AgentConfig` | dataclass | Plain configuration objects; construct directly or parse strictly from a dictionary/JSON file |
+| `ConfigError`, `MissingEnvError` | exception | Invalid parsed config or a reference that cannot be resolved when the Agent is built |
 | `WorldEntry`, `WorldEntryConfig`, `WorldEntryVersion` | dataclass | Entry introspection (rarely needed directly) |
 
 Instrumentation is four `Event`s you `.subscribe(...)` on — multi-consumer, so panels, a logger, and a metrics sink can all watch the same signal:
@@ -49,9 +50,13 @@ Instrumentation is four `Event`s you `.subscribe(...)` on — multi-consumer, so
 Signatures you'll actually call:
 
 ```python
-Wica.init(config: WicaConfig, *, output_sink=None, coalesce_window=0.2, loop=None) -> Wica
+WicaConfig(agent=AgentConfig(...))
+WicaConfig.from_dict(data, *, base_dir=None)
+WicaConfig.from_json(path)
+Wica.init(config: WicaConfig, *, output_sink=None, output_command=None,
+          coalesce_window=0.2, loop=None) -> Wica
 wica.world            # the World (below); wica.agent — the Agent (rarely needed)
-wica.register_command(fn, *, name=None, description=None)   # fn: plain callable or LangChain BaseTool
+wica.register_command(fn_or_command)   # plain callable, or Command(...) for metadata/tool wrapping
 wica.start(); wica.stop(); wica.start()   # stop is a reversible pause
 wica.close()                              # terminal; releases an owned event loop
 wica.on_world_trigger / on_agent_trigger / on_agent_prompt / on_agent_command   # .subscribe(handler)
@@ -69,7 +74,8 @@ world.get(key)               # defensive copy of current value (works any time)
 world.unregister(key)
 
 # The direct seam (advanced / tests): construct an Agent yourself instead of via Wica.
-Agent(config: AgentConfig, *, world: World, loop, coalesce_window=0.2, output_sink=None, model=None)
+Agent(config: AgentConfig, *, world: World, loop, coalesce_window=0.2,
+      output_sink=None, output_command=None, model=None)
 ```
 
 ## Recipes
@@ -102,20 +108,32 @@ async def dance() -> str:
 wica.register_command(dance)
 ```
 
-A Command needs no WICA-specific hooks — off-the-shelf LangChain tools register unmodified. Its execution is tracked as a World entry `agent:command:<call_id>` that renders `running` while in flight and terminal (`result`/`error`) once done, so a later step can *see* an action still running. The Agent auto-registers a native `cancel_command(call_id)` so the model can abort its own in-flight Commands.
+A plain callable needs no WICA-specific hooks. Wrap an off-the-shelf LangChain tool as
+`Command(existing_tool)` before registration; use `Command(fn, name=..., description=...)` to
+override a callable's inferred metadata. Each execution is tracked as a World entry
+`agent:command:<call_id>` that renders `running` while in flight and terminal (`result`/`error`)
+once done, so a later step can *see* an action still running. The Agent auto-registers a native
+`cancel_command(call_id)` so the model can abort its own in-flight Commands.
 
 > **Prefer `async` for anything cancellable.** Cancellation (`cancel_command`, or `stop()`) cancels the `asyncio` task: an `async` Command unwinds cleanly at its next `await`. A plain **sync** function works too — it's offloaded to a thread — but Python can't kill a running thread, so on cancel the entry flips to `cancelled` immediately while the thread runs the function to completion in the background, result discarded. Make a long-running sync Command **cooperative** (poll a `threading.Event`) if it needs to actually stop. See [specs/commands.md](specs/commands.md) ("Cancellation reaches the task, not always the work").
 
 ### 3. Wire and run the system
 
 ```python
-from wica import TextPart, WicaConfig, Wica
+from wica import AgentConfig, TextPart, Wica, WicaConfig
 
 async def speak(text: str) -> None:     # the output sink: async, takes the model's text
     print("robot says:", text)
 
-config = WicaConfig.from_json("agent.config.json")   # provider/model/key/persona from a file
-wica = Wica.init(config, output_sink=speak)          # owns the loop + World + Agent; applies logging
+config = WicaConfig(
+    agent=AgentConfig(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        api_key_env="WICA_ANTHROPIC_API_KEY",
+        system_prompt="You are a friendly social robot.",
+    )
+)
+wica = Wica.init(config, output_sink=speak)          # owns the loop + World + Agent
 
 # Register entries and Commands against the owned World, then start.
 wica.world.register(
@@ -134,9 +152,29 @@ wica.close()
 
 `wica.world` / `wica.agent` are **borrowed references** — valid for the life of the `Wica`. While stopped, reactive mutation through `world.update()` raises `RuntimeError("World is not running")`; schema operations and reads remain available, and `start()` resumes the same objects with their registrations, values, subscriptions, Commands, and Agent history intact. `close()` is terminal. To reset state rather than resume it, close this Wica and initialize a new one.
 
-## Config schema
+## Configuration
 
-An Agent is stood up from one JSON file, so switching provider or editing the persona is a file edit, not a code change. Loading is strict — missing required keys, unknown keys (typos), and wrong types all fail loudly at load time.
+`Wica.init()` consumes a `WicaConfig`, regardless of where its values originate. Construct the
+plain dataclasses directly when Python owns the settings, call `WicaConfig.from_dict()` for a
+mapping supplied by a larger application, or call `WicaConfig.from_json()` for a dedicated file.
+The two loaders are strict: missing required keys, unknown keys (typos), invalid combinations, and
+wrong types fail with `ConfigError`.
+
+For a larger application configuration, extract the WICA-shaped subsection:
+
+```python
+config = WicaConfig.from_dict(
+    app_settings["wica"],
+    base_dir=app_settings_path.parent,
+)
+```
+
+`base_dir` is only needed to give a relative `system_prompt_file` the same stable origin it would
+have in a dedicated file. Without it, `from_dict()` keeps a relative path verbatim. Direct
+dataclass construction does not run the loaders' strict runtime validation, so callers using that
+path are responsible for valid types and field combinations.
+
+The dictionary/JSON representation has this shape:
 
 ```json
 {
@@ -154,12 +192,17 @@ An Agent is stood up from one JSON file, so switching provider or editing the pe
 |---|---|---|
 | `agent.provider` | yes | `anthropic` \| `openai` \| `huggingface-hub` \| `fake` (deterministic test double — see "Testing flows deterministically") |
 | `agent.model` | yes | Model id (or Hub `repo_id` for `huggingface-hub`) |
-| `agent.system_prompt` / `system_prompt_file` | exactly one | Inline, or a path resolved relative to the config file |
+| `agent.system_prompt` / `system_prompt_file` | exactly one | Inline, or a path located according to the construction method described above |
 | `agent.api_key` / `api_key_env` | at most one | Literal key, or an env var read at **Agent build** (`Wica.init`). Neither → provider's standard env var. Prefer `api_key_env` so the config carries no secret and is safe to commit |
 | `agent.model_kwargs` | no | Forwarded to the provider (e.g. `temperature`) |
 | `agent.hf_provider` | no | Only for `huggingface-hub`: the Hub backend (`auto`/`fireworks-ai`/…). Default `auto` |
 
-Loading is a two-call composition — `WicaConfig.from_json` → `Wica.init` — keeping code-only wiring (output sink, `coalesce_window`, an optional pre-existing event loop) in `Wica.init`'s keyword arguments, where JSON can't reach. `Wica.init` is where a referenced-but-unset `api_key_env` raises `MissingEnvError` (so a caller that degrades — e.g. to explore-only — wraps `Wica.init`, not `from_json`). Selecting a provider whose extra isn't installed fails at runtime with a clear `ImportError`.
+For `from_json()`, a relative `system_prompt_file` is located relative to the JSON file. Neither
+loader reads the prompt file or resolves `api_key_env`; those operations happen when `Wica.init()`
+builds the Agent. A caller that degrades on `MissingEnvError` or an unreadable prompt therefore
+wraps `Wica.init()`, not config creation. Code-only wiring (`output_sink`, `output_command`,
+`coalesce_window`, and an optional event loop) also belongs in `Wica.init()`. Selecting a provider
+whose extra is not installed fails there with a clear `ImportError`.
 
 **Logging is your application's concern, not WICA's.** WICA is a library: it emits records under the `wica.*` loggers and installs only a `NullHandler` — it never sets a level or adds handlers. Configure logging in your app (`logging.basicConfig(...)` and `logging.getLogger("wica").setLevel(...)`); raise the `wica` level to `DEBUG` for a full World+Agent lifecycle trace.
 

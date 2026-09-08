@@ -73,12 +73,12 @@ class Wica:
         included default), Wica creates one and will run it in its own daemon thread on ``start()``;
         otherwise it adopts the injected loop and leaves the thread to the caller.
 
-        The code-only wiring a JSON file can't express — ``output_sink``, ``output_command``,
-        ``coalesce_window``, and optionally ``loop`` — are keyword arguments here; the config
-        carries provider/model/key/prompt. ``output_command`` (a callable or a ``Command``) is the
-        user-facing output channel; when set, free text becomes the agent's private reasoning
-        stream (see specs/agent.md, "Output"). Resolution (env key, prompt file) happens inside
-        ``Agent.__init__``, so a
+        Runtime wiring the config object should not express — ``output_sink``, ``output_command``,
+        ``coalesce_window``, and optionally ``loop`` — is supplied through keyword arguments here;
+        the config carries provider/model/key/prompt. ``output_command`` (a callable or a
+        ``Command``) is the user-facing output channel; when set, free text becomes the agent's
+        private reasoning stream (see specs/agent.md, "Output"). Resolution (env key, prompt file)
+        happens inside ``Agent.__init__``, so a
         ``MissingEnvError`` or unreadable prompt surfaces here, at ``init``. Logging is not
         configured here: WICA is a library, so it only emits under the ``wica.*`` loggers and
         leaves handlers/levels to the embedding application. See specs/config.md, specs/wica.md.

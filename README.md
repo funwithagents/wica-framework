@@ -89,21 +89,28 @@ WICA is distributed via git (not PyPI), and ships with **no** model provider —
 
 ```bash
 # In a consuming project:
-uv add "wica[anthropic] @ git+https://github.com/<owner>/wica-framework"
+uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
 # or wica[openai], or wica[huggingface-hub]
 ```
 
-A minimal agent, wired from a JSON config:
+A minimal agent starts from a `WicaConfig`. For configuration owned by Python code, construct it directly:
 
 ```python
-from wica import TextPart, WicaConfig, Wica
+from wica import AgentConfig, TextPart, Wica, WicaConfig
 
 async def speak(text: str) -> None:
     print("robot says:", text)
 
-# Load provider/model/persona from a file; wire code-only bits (sink, coalesce window) as kwargs.
-config = WicaConfig.from_json("agent.config.json")
-wica = Wica.init(config, output_sink=speak)   # owns the loop + World + Agent; applies logging
+config = WicaConfig(
+    agent=AgentConfig(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        api_key_env="WICA_ANTHROPIC_API_KEY",
+        system_prompt="You are a friendly social robot.",
+        model_kwargs={"temperature": 0.7},
+    )
+)
+wica = Wica.init(config, output_sink=speak)   # owns the loop + World + Agent
 
 wica.world.register(
     "speech_input",
@@ -122,8 +129,50 @@ wica.close()  # terminal teardown; use stop() instead when you intend to start a
 
 ## Configuration
 
-An Agent is stood up from a single JSON file — provider, model, API key, and persona all live there,
-so switching backends or editing the persona is a file edit, not a code change:
+`Wica.init()` accepts a `WicaConfig`. The configuration object is the stable API; construct it directly, parse it from a dictionary owned by a larger application, or load it from a dedicated JSON file.
+
+### Construct directly in Python
+
+Direct construction is the simplest choice when configuration belongs in application code:
+
+```python
+from wica import AgentConfig, WicaConfig
+
+config = WicaConfig(
+    agent=AgentConfig(
+        provider="openai",
+        model="gpt-4o",
+        system_prompt="You are a concise assistant.",
+        # No key field: let the provider use its standard environment variable.
+    )
+)
+```
+
+These are plain dataclasses. Direct construction benefits from static type checking, but does not run the strict runtime validation performed by the loaders below; the caller is responsible for providing valid field combinations.
+
+### Parse part of an application configuration
+
+`from_dict()` is useful when WICA settings are nested inside a larger JSON document, settings object, or configuration system. Pass the WICA-shaped subsection, not the unrelated application keys:
+
+```python
+import json
+from pathlib import Path
+
+from wica import WicaConfig
+
+settings_path = Path("app.config.json")
+settings = json.loads(settings_path.read_text(encoding="utf-8"))
+config = WicaConfig.from_dict(
+    settings["wica"],
+    base_dir=settings_path.parent,
+)
+```
+
+`base_dir` is optional. When the dictionary contains a relative `system_prompt_file`, it locates that path relative to `base_dir`; without one, a relative path is kept as written and is read relative to the process working directory when the Agent is built.
+
+### Load a dedicated JSON file
+
+`from_json()` reads the same nested shape from a standalone file:
 
 ```json
 {
@@ -137,11 +186,25 @@ so switching backends or editing the persona is a file edit, not a code change:
 }
 ```
 
-- **API key** — give a literal `api_key`, or an `api_key_env` naming the env var to read at **Agent build** (`Wica.init`), at most one. With neither, the provider's standard env var is used. An env-referenced config carries no secret and is safe to commit; a literal-key config should be git-ignored.
-- **System prompt** — inline `system_prompt`, or `system_prompt_file` (resolved relative to the config file, so a config-plus-prompts folder is relocatable). Exactly one is required.
-- **Strict loading** — missing required keys, unknown keys (typos), and wrong types all fail loudly at load time with an actionable WICA error, never a silent default.
+```python
+from wica import WicaConfig
 
-Loading is a two-call composition (`WicaConfig.from_json` → `Wica.init`), keeping the code-only wiring (output sink, `coalesce_window`, an optional pre-existing event loop) in `Wica.init`'s keyword arguments where JSON can't express it. `Wica.init` applies logging itself and is where a referenced-but-unset `api_key_env` raises `MissingEnvError`.
+config = WicaConfig.from_json("agent.config.json")
+```
+
+For this path, a relative `system_prompt_file` is automatically located relative to the JSON file's directory, so a config-plus-prompts folder remains relocatable.
+
+All three forms produce the same type and use the same framework entry point:
+
+```python
+wica = Wica.init(config, output_sink=speak, coalesce_window=0.2)
+```
+
+- **API key** — give a literal `api_key`, or an `api_key_env` naming the env var to read at **Agent build** (`Wica.init`), at most one. With neither, the provider's standard env var is used. An env-referenced config carries no secret and is safe to commit; a literal-key config should be git-ignored.
+- **System prompt** — give exactly one of inline `system_prompt` or `system_prompt_file`. Relative file-path handling depends on the construction method as described above.
+- **Strict parsing** — `from_dict()` and `from_json()` reject missing required keys, unknown keys (including typos), invalid field combinations, and wrong types with `ConfigError`.
+
+Creating a config is side-effect-light: the loaders validate references but do not read an API-key environment variable or the prompt file. Those are resolved when `Wica.init()` builds the Agent; that is where a referenced-but-unset `api_key_env` raises `MissingEnvError`, or an unreadable prompt file raises `ConfigError`. Runtime-only wiring (`output_sink`, `output_command`, `coalesce_window`, and an optional event loop) remains in `Wica.init()` because it consists of callables and runtime objects rather than configuration data. WICA does not configure logging; the embedding application owns its handlers and levels.
 
 ### Providers
 

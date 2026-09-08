@@ -49,9 +49,9 @@ The **asymmetry is deliberate**: command registration is mirrored onto `Wica` be
 
 `init` **does not configure logging** — WICA is a library, so it only emits under the `wica.*` loggers and leaves handlers/levels to the embedding application (see [config.md](config.md), "Logging is not framework config").
 
-The code-only wiring a JSON file can't express — `output_sink`, `output_command`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The file carries provider/model/key/prompt; `init`'s kwargs carry the callables and runtime objects. `output_command` is a callable (or a `Command`), so like `output_sink` it can only be code-wired, never JSON-expressed.
+The runtime wiring a config object should not express — `output_sink`, `output_command`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The config carries provider/model/key/prompt; `init`'s kwargs carry callables and runtime objects. `output_command` is a callable (or a `Command`), so like `output_sink` it can only be code-wired, never represented as plain configuration data.
 
-`init` takes an **already-loaded `WicaConfig`**, not a path. There is deliberately **no `Wica.from_json`**: loading is one line (`WicaConfig.from_json(path)`, which already exists — see [config.md](config.md)) and `init` needs several code-only kwargs besides the config, so a path-taking convenience would save nothing and hide the config object the caller often wants. The startup shape stays two honest calls:
+`init` takes an **already-created `WicaConfig`**, not a path. The caller may construct it directly or obtain it through `WicaConfig.from_dict` / `WicaConfig.from_json` (see [config.md](config.md)). There is deliberately **no `Wica.from_json`**: a path-taking convenience would privilege one config source, save only one line, and hide the config object the caller often wants. For a dedicated file, startup remains two honest calls:
 
 ```python
 config = WicaConfig.from_json(path)
