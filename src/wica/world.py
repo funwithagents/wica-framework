@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import inspect
 import logging
 import threading
@@ -34,6 +35,21 @@ def _describe_value(value: Any) -> str:
         return f"<{len(value)} bytes>"
     text = repr(value)
     return text if len(text) <= 80 else text[:77] + "..."
+
+
+_FORBIDDEN_KEY_CHARS = frozenset('"<>&')
+
+
+def validate_key(key: str) -> None:
+    """Raise ValueError unless `key` is safe to embed verbatim in an `<entry key="…">` envelope:
+    non-empty, no whitespace, none of " < > &. See specs/world.md ("Key grammar")."""
+    if not isinstance(key, str) or not key:
+        raise ValueError("World key must be a non-empty string")
+    if any(ch.isspace() for ch in key):
+        raise ValueError(f"World key {key!r} must not contain whitespace")
+    bad = sorted(set(key) & _FORBIDDEN_KEY_CHARS)
+    if bad:
+        raise ValueError(f"World key {key!r} must not contain {''.join(bad)!r}")
 
 
 @dataclass
@@ -159,6 +175,7 @@ class World:
         ttl: timedelta | None = None,
         bypass_coalescing: bool = False,
     ) -> None:
+        validate_key(key)
         with self._lock:
             if key in self._configs:
                 raise ValueError(f"key {key!r} is already registered")
@@ -218,6 +235,10 @@ class World:
             raise KeyError(key)
         return copy.deepcopy(entry)
 
+    def is_registered(self, key: str) -> bool:
+        with self._lock:
+            return key in self._configs
+
     def update(self, key: str, value: Any) -> None:
         self._update(key, value, ttl_reset=False)
 
@@ -252,6 +273,16 @@ class World:
             # and mutating its original object cannot change versioned state without another
             # update() (and therefore without a new id/timestamp/trigger).
             stored_value = copy.deepcopy(value)
+            # Evaluate the trigger predicate BEFORE committing, so a raising predicate leaves the
+            # entry (value, id, timestamp, timer) untouched and the error reaches the caller.
+            # See specs/world.md ("update()").
+            triggers_configured = config.triggers_llm_call and not ttl_reset
+            should_trigger = triggers_configured and (
+                config.trigger_condition_fn is None
+                or config.trigger_condition_fn(
+                    copy.deepcopy(old_entry.current.value), copy.deepcopy(stored_value)
+                )
+            )
             new_id = self._id_counters[key] + 1
             self._id_counters[key] = new_id
             new_entry = WorldEntry(
@@ -274,13 +305,6 @@ class World:
                 timer.start()
 
             listeners = list(self._listeners.get(key, ()))
-            triggers_configured = config.triggers_llm_call and not ttl_reset
-            should_trigger = triggers_configured and (
-                config.trigger_condition_fn is None
-                or config.trigger_condition_fn(
-                    copy.deepcopy(old_entry.current.value), copy.deepcopy(stored_value)
-                )
-            )
 
         new_id = new_entry.current.id
         _logger.debug(
@@ -383,6 +407,23 @@ class World:
             ]
             entries.sort(key=lambda e: e.current.timestamp)
         return copy.deepcopy(entries)
+
+    def get_prompt_snapshot(self) -> list[tuple[WorldEntry, WorldEntryConfig]]:
+        """Like get_prompt_entries(), but each entry is paired with a copy of its registration
+        config, taken under one lock so the pair is consistent. The Agent captures the serializers
+        from it at observation time so history renders identically regardless of later
+        unregister/re-register. See specs/world.md."""
+        with self._lock:
+            pairs = [
+                (entry, self._configs[key])
+                for key, entry in self._entries.items()
+                if self._configs[key].include_in_prompt
+            ]
+            pairs.sort(key=lambda pair: pair[0].current.timestamp)
+            return [
+                (copy.deepcopy(entry), dataclasses.replace(config))
+                for entry, config in pairs
+            ]
 
     def render_entry(
         self,

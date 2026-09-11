@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -49,12 +50,17 @@ def real_wica(
     system the way production does, exercising the real per-provider construction (including
     `huggingface-hub`'s dedicated non-`init_chat_model` path). The caller passes code-only wiring
     (`output_sink`, `output_command`, `coalesce_window`) as kwargs. `system_prompt` overrides the
-    committed persona when a test needs a specific one (inline wins over `system_prompt_file` — see
-    specs/config.md). Skips when the config's api_key_env is unset — the key resolves at build inside
-    `Wica.init`, so `MissingEnvError -> pytest.skip` lives here."""
+    committed persona when a test needs a specific one (replacing the committed persona; the file
+    field is cleared so the exactly-one invariant holds). Skips when the config's api_key_env is
+    unset — the key resolves at build inside `Wica.init`, so `MissingEnvError -> pytest.skip` lives
+    here."""
     config = WicaConfig.from_json_file(config_path)
     if system_prompt is not None:
-        config.agent.system_prompt = system_prompt
+        config = WicaConfig(
+            agent=dataclasses.replace(
+                config.agent, system_prompt=system_prompt, system_prompt_file=None
+            )
+        )
     try:
         return Wica.init(config, **kwargs)
     except MissingEnvError as exc:

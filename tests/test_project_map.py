@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+from wica import Agent, Wica, WicaConfig, World
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AGENTS_MD = _REPO_ROOT / "AGENTS.md"
 _WICA_PKG = _REPO_ROOT / "src" / "wica"
@@ -130,4 +132,36 @@ def test_every_concept_module_is_governed_by_a_spec():
         f"src/wica modules not named in any spec's `code:` frontmatter: {sorted(ungoverned)}. "
         "Add each to the frontmatter of the spec that governs it "
         f"(package glue exempt from this rule: {sorted(_NON_CONCEPT_MODULES)})."
+    )
+
+
+# --- Consumer-docs API drift guard ------------------------------------------
+#
+# README.md and INTEGRATING.md have twice lagged a rename while the tests stayed
+# green, because nothing checked the documented signatures. This asserts that
+# every `owner.method(` in those documents' python code fences names a method
+# that actually exists on the public API.
+
+_CONSUMER_DOCS = [_REPO_ROOT / "README.md", _REPO_ROOT / "INTEGRATING.md"]
+_DOC_CALL = re.compile(r"\b(WicaConfig|Wica|wica|world|agent)\.([a-z_]+)\(")
+_DOC_TARGETS = {
+    "WicaConfig": WicaConfig,
+    "Wica": Wica,
+    "wica": Wica,
+    "world": World,
+    "agent": Agent,
+}
+
+
+def test_consumer_docs_only_call_methods_that_exist():
+    missing: list[str] = []
+    for doc in _CONSUMER_DOCS:
+        text = doc.read_text(encoding="utf-8")
+        fences = re.findall(r"```(?:python|py)?\n(.*?)```", text, re.DOTALL)
+        for fence in fences:
+            for owner, method in _DOC_CALL.findall(fence):
+                if not hasattr(_DOC_TARGETS[owner], method):
+                    missing.append(f"{doc.name}: {owner}.{method}()")
+    assert not missing, (
+        f"consumer docs call methods that do not exist: {sorted(set(missing))}"
     )

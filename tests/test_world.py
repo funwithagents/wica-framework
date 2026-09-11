@@ -833,3 +833,115 @@ def test_render_full_prompt_places_multimodal_part_between_entries(world: World)
 
     content = world.render_full_prompt()
     assert any(isinstance(part, ImagePart) for part in content)
+
+
+# --- Transactional trigger predicate -----------------------------------
+
+
+def test_raising_trigger_condition_propagates_and_leaves_state_untouched(world: World):
+    def boom(old, new):
+        raise RuntimeError("predicate failed")
+
+    world.register(
+        "k",
+        str,
+        serialize_fn=identity_serialize,
+        triggers_llm_call=True,
+        trigger_condition_fn=boom,
+    )
+    listener = RecordingCallback()
+    world.add_listener("k", listener)
+    trigger = RecordingCallback()
+    world.on_trigger.subscribe(trigger)
+    before = world.get_entry("k")
+
+    with pytest.raises(RuntimeError, match="predicate failed"):
+        world.update("k", "value")
+
+    after = world.get_entry("k")
+    assert after == before  # same id, same (None) value, same timestamp
+    assert not listener.event.wait(0.2)  # no listener dispatched
+    assert not trigger.event.wait(0.2)  # no trigger emitted
+
+
+def test_raising_trigger_condition_keeps_the_pending_ttl_timer(world: World):
+    # A good update arms a TTL; a later raising update must not cancel or re-arm it.
+    def gate(old, new) -> bool:
+        if new == "bad":
+            raise RuntimeError("predicate failed")
+        return True
+
+    world.register(
+        "k",
+        str,
+        serialize_fn=identity_serialize,
+        ttl=timedelta(seconds=0.3),
+        triggers_llm_call=True,
+        trigger_condition_fn=gate,
+    )
+    world.update("k", "good")
+    id_after_good = world.get_entry("k").current.id
+    with pytest.raises(RuntimeError):
+        world.update("k", "bad")
+    assert world.get("k") == "good"
+    time.sleep(0.5)
+    assert world.get("k") is None  # the ORIGINAL timer fired
+    assert world.get_entry("k").current.id == id_after_good + 1
+
+
+# --- Key grammar and is_registered -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "has space", "tab\tkey", 'q"uote', "a<b", "a>b", "a&b"]
+)
+def test_register_rejects_unsafe_keys(world: World, bad: str):
+    with pytest.raises(ValueError):
+        world.register(bad, str, serialize_fn=identity_serialize)
+    assert not world.is_registered(bad)
+
+
+@pytest.mark.parametrize(
+    "ok", ["speech_input", "agent:command:x", "a/b.c-d_e", "ünïcödé"]
+)
+def test_register_accepts_safe_keys(world: World, ok: str):
+    world.register(ok, str, serialize_fn=identity_serialize)
+    assert world.is_registered(ok)
+
+
+def test_is_registered_reflects_register_and_unregister(world: World):
+    assert not world.is_registered("k")
+    world.register("k", str, serialize_fn=identity_serialize)
+    assert world.is_registered("k")
+    world.unregister("k")
+    assert not world.is_registered("k")
+
+
+# --- get_prompt_snapshot -----------------------------------------------
+
+
+def test_get_prompt_snapshot_pairs_each_entry_with_its_own_config(world: World):
+    world.register("a", str, serialize_fn=identity_serialize)
+    world.register(
+        "b",
+        bytes,
+        serialize_fn=image_serialize,
+        archival_serialize_fn=text_archival_serialize,
+    )
+    world.register(
+        "hidden", str, serialize_fn=identity_serialize, include_in_prompt=False
+    )
+    snapshot = world.get_prompt_snapshot()
+    assert [e.key for e, _ in snapshot] == [e.key for e in world.get_prompt_entries()]
+    by_key = {e.key: c for e, c in snapshot}
+    assert by_key["a"].serialize_fn is identity_serialize
+    assert by_key["b"].archival_serialize_fn is text_archival_serialize
+    assert "hidden" not in by_key
+
+
+def test_get_prompt_snapshot_config_is_a_copy(world: World):
+    world.register("a", str, serialize_fn=identity_serialize)
+    ((_, config),) = world.get_prompt_snapshot()
+    config.serialize_fn = lambda v, p: [TextPart("tampered")]
+    world.update("a", "x")
+    assert flatten(world.render_entry(world.get_entry("a"))).count("tampered") == 0

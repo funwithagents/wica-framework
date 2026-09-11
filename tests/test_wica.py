@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from wica import CommandIssued, Wica
+from wica import Command, CommandIssued, Wica
 from wica.config import AgentConfig, WicaConfig
 from wica.content import Content, TextPart
 from wica.world import WorldEntry
@@ -335,3 +335,89 @@ def test_stop_cancels_reasoning_before_a_restart(wica_factory):
     time.sleep(0.6)
 
     assert sink.texts == []
+
+
+# --- Safe shutdown from the loop thread --------------------------------
+
+
+def test_stop_from_an_output_sink_is_rejected_and_the_system_keeps_running(
+    wica_factory,
+):
+    wica_ref: list[Wica] = []
+    errors: list[BaseException] = []
+    done = threading.Event()
+
+    async def sink(text: str) -> None:
+        try:
+            wica_ref[0].stop()
+        except BaseException as exc:  # noqa: BLE001 - we want the exact error
+            errors.append(exc)
+        done.set()
+
+    wica = wica_factory(
+        fake_config([{"text": "hi"}]), output_sink=sink, coalesce_window=0
+    )
+    wica_ref.append(wica)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    wica.world.update("speech", "hello")
+    assert done.wait(WAIT_TIMEOUT)
+    assert len(errors) == 1 and isinstance(errors[0], RuntimeError)
+    assert "event-loop thread" in str(errors[0])
+    assert wica.is_running and wica.world.is_running  # nothing was torn down
+    wica.stop()  # from the test thread: clean
+    assert not wica.is_running
+
+
+def test_stop_from_an_event_subscriber_is_rejected(wica_factory):
+    errors: list[BaseException] = []
+    done = threading.Event()
+    wica = wica_factory(fake_config([{"text": "hi"}]), coalesce_window=0)
+
+    def on_prompt(messages) -> None:
+        try:
+            wica.close()
+        except RuntimeError as exc:
+            errors.append(exc)
+        done.set()
+
+    wica.on_agent_prompt.subscribe(on_prompt)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    wica.world.update("speech", "hello")
+    assert done.wait(WAIT_TIMEOUT)
+    assert len(errors) == 1
+    assert wica.is_running
+
+
+def test_start_rejects_an_injected_loop_that_is_not_running():
+    loop = asyncio.new_event_loop()
+    try:
+        wica = Wica.init(fake_config(), loop=loop)
+        with pytest.raises(RuntimeError, match="not running"):
+            wica.start()
+        assert not wica.is_running
+        wica.close()
+    finally:
+        loop.close()
+
+
+# --- Reserved names and duplicate rejection reach through the facade ----
+
+
+def test_wica_register_command_rejects_duplicates_and_reserved_names(wica_factory):
+    wica = wica_factory(fake_config())
+
+    def wave() -> str:
+        """Wave."""
+        return "waved"
+
+    wica.register_command(wave)
+    with pytest.raises(ValueError):
+        wica.register_command(wave)
+    with pytest.raises(ValueError):
+        wica.register_command(Command(wave, name="noop", description="Wave."))
