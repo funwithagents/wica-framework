@@ -555,11 +555,23 @@ class Agent:
         return tasks
 
     def _track_task[T](self, coroutine: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
-        """Create an Agent-owned loop task and forget it only after it has settled."""
+        """Create an Agent-owned loop task and forget it only after it has settled. Every owned
+        task also gets a logging done-callback: an exception that escapes a task is otherwise only
+        reported by asyncio at garbage-collection time ("Task exception was never retrieved"),
+        never under a wica.* logger. See specs/agent.md ("Instrumentation")."""
         task = self._loop.create_task(coroutine)
         self._owned_tasks.add(task)
         task.add_done_callback(self._owned_tasks.discard)
+        task.add_done_callback(self._log_task_failure)
         return task
+
+    def _log_task_failure(self, task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        # Retrieving the exception also marks it handled, silencing asyncio's GC-time warning.
+        exc = task.exception()
+        if exc is not None:
+            _logger.error("agent task %s raised", task.get_name(), exc_info=exc)
 
     def _cancel_window(self) -> None:
         """Cancel a pending coalescing-window timer and drop its batch (loop thread only)."""
@@ -684,7 +696,19 @@ class Agent:
         # Instrumentation is observation-only: subscribers receive a defensive copy, never the
         # message list subsequently handed to the model.
         self.on_prompt.emit(copy.deepcopy(messages))
-        response = await self._bound_model.ainvoke(messages)
+        try:
+            response = await self._bound_model.ainvoke(messages)
+        except Exception:
+            # The observation is already in history (and terminal command entries are retired),
+            # so the model never saw it this step; the renderer merges it into the next
+            # observation's user message (see _render_messages). Nothing is dispatched. Ending the
+            # step here frees the single-in-flight loop for the next trigger. CancelledError is a
+            # BaseException and keeps propagating. See specs/agent.md ("Instrumentation").
+            _logger.exception(
+                "model call failed; step abandoned (trigger: %s)",
+                _describe_entry(representative),
+            )
+            return
 
         text = response.text
         _logger.debug(
@@ -694,7 +718,15 @@ class Agent:
         )
         if text:
             self._history.append(AssistantTextRecord(text))
-            await self._output_sink(text)
+            try:
+                await self._output_sink(text)
+            except Exception:
+                # The sink is application code; its failure must not drop the Commands the model
+                # issued in the same response, nor escape the step. The text stays in history —
+                # the model did say it. See specs/agent.md ("Instrumentation").
+                _logger.exception(
+                    "output sink raised; continuing with the step's commands"
+                )
 
         for call in response.tool_calls:
             # The provider's tool-call id reconstructs the native tool_call/tool_result pair; the
@@ -921,7 +953,21 @@ class Agent:
                         item.entry, serialize_fn=serialize_fn
                     )
                     blocks.extend(_content_to_message_blocks(rendered))
-                messages.append(HumanMessage(content=blocks))
+                previous = messages[-1]
+                if isinstance(previous, HumanMessage):
+                    # Consecutive observations (a failed/cancelled/empty step in between) merge
+                    # into one user message — some providers reject back-to-back user turns, and
+                    # the older observation may hold the only record of a retired Command's
+                    # outcome. flush_assistant() above appended nothing, or the last message would
+                    # be an AI/tool message. See specs/agent.md ("Rendering to messages").
+                    merged = (
+                        list(previous.content)
+                        if isinstance(previous.content, list)
+                        else [previous.content]
+                    )
+                    messages[-1] = HumanMessage(content=[*merged, *blocks])
+                else:
+                    messages.append(HumanMessage(content=blocks))
             elif isinstance(record, AssistantTextRecord):
                 pending_text.append(record.text)
             elif isinstance(record, CommandRecord):

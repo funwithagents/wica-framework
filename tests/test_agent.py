@@ -1580,3 +1580,162 @@ def test_unknown_command_name_fails_with_a_clear_error(loop, world, sink):
     )
     assert "Called ghost() → failed: unknown command 'ghost'" in observation
     agent.stop()
+
+
+# --- Step failure handling: model-call and output-sink errors, well-formed history ---------
+
+
+async def _explode(messages: list[BaseMessage]) -> AIMessage:
+    raise ConnectionError("provider down")
+
+
+def _no_consecutive_human_messages(messages: list[BaseMessage]) -> bool:
+    return not any(
+        isinstance(a, HumanMessage) and isinstance(b, HumanMessage)
+        for a, b in zip(messages, messages[1:])
+    )
+
+
+def test_model_call_failure_is_logged_and_the_next_step_runs(loop, world, sink, caplog):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(_explode, text_response("recovered"))
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+
+    with caplog.at_level(logging.ERROR, logger="wica.agent"):
+        world.update("input", "first")
+        wait_until(lambda: len(model.calls) == 1 and not agent._busy)
+        world.update("input", "second")
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("model call failed" in r.message for r in errors)
+    assert any(
+        r.exc_info and isinstance(r.exc_info[1], ConnectionError) for r in errors
+    )
+    assert sink.texts == ["recovered"]
+
+    agent.stop()
+
+
+def test_output_sink_failure_is_logged_and_commands_still_dispatch(loop, world, caplog):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def bad_sink(text: str) -> None:
+        raise RuntimeError("sink broke")
+
+    # Step 1 speaks (into the raising sink) and issues wave; wave's completion re-triggers step 2,
+    # which ends the chain with noop.
+    model = ProgrammableChatModel(
+        respond=sequence(
+            text_and_tool_response("doing it", [("wave", {}, "w1")]),
+            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=bad_sink)
+    waved = threading.Event()
+
+    async def wave() -> str:
+        """Wave."""
+        waved.set()
+        return "waved"
+
+    agent.register_command(wave)
+    agent.start()
+
+    with caplog.at_level(logging.ERROR, logger="wica.agent"):
+        world.update("input", "hello")
+        assert waved.wait(timeout=WAIT_TIMEOUT)
+        wait_until(
+            lambda: len(model.calls) >= 2
+        )  # wave's completion re-triggers a step
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("output sink raised" in r.message for r in errors)
+    assert any(r.exc_info and isinstance(r.exc_info[1], RuntimeError) for r in errors)
+    # The utterance is still in history: the next prompt carries it as assistant text.
+    assert any(
+        isinstance(m, AIMessage) and "doing it" in str(m.content)
+        for m in model.calls[1]
+    )
+
+    agent.stop()
+
+
+def test_failed_step_observation_merges_into_the_next_prompt(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=sequence(_explode, text_response("ok")))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+    world.update("input", "first")
+    wait_until(lambda: len(model.calls) == 1 and not agent._busy)
+    world.update("input", "second")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    second = model.calls[1]
+    assert _no_consecutive_human_messages(second)
+    humans = [m for m in second if isinstance(m, HumanMessage)]
+    assert len(humans) == 1
+    text = human_texts(humans[0])
+    assert "first" in text and "second" in text  # both observations, one message
+    assert text.index("first") < text.index("second")  # older observation first
+
+    agent.stop()
+
+
+def test_merged_observations_keep_their_own_freshness(loop, world, sink):
+    def fresh_serialize(value: Any, previous: Any) -> Content:
+        return [TextPart(f"FRESH:{value}")]
+
+    def archival_serialize(value: Any, previous: Any) -> Content:
+        return [TextPart(f"ARCHIVAL:{value}")]
+
+    world.register(
+        "note",
+        str,
+        serialize_fn=fresh_serialize,
+        archival_serialize_fn=archival_serialize,
+        triggers_llm_call=True,
+    )
+    model = ProgrammableChatModel(respond=sequence(_explode, text_response("ok")))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+    world.update("note", "one")
+    wait_until(lambda: len(model.calls) == 1 and not agent._busy)
+    world.update("note", "two")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    humans = [m for m in model.calls[1] if isinstance(m, HumanMessage)]
+    assert len(humans) == 1
+    text = human_texts(humans[0])
+    assert "ARCHIVAL:one" in text and "FRESH:two" in text
+
+    agent.stop()
+
+
+def test_empty_model_response_does_not_split_the_next_prompt(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(text_response(""), text_response("ok"))
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+    world.update("input", "first")
+    wait_until(lambda: len(model.calls) == 1 and not agent._busy)
+    world.update("input", "second")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert _no_consecutive_human_messages(model.calls[1])
+    assert len([m for m in model.calls[1] if isinstance(m, HumanMessage)]) == 1
+
+    agent.stop()

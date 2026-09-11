@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
+from langchain_core.messages import BaseMessage, HumanMessage
 
 from wica import Command, CommandIssued, Wica
 from wica.config import AgentConfig, WicaConfig
@@ -316,16 +317,27 @@ def test_injected_loop_wica_can_restart_without_owning_the_loop():
         loop.close()
 
 
+def _no_consecutive_human_messages(messages: list[BaseMessage]) -> bool:
+    return not any(
+        isinstance(a, HumanMessage) and isinstance(b, HumanMessage)
+        for a, b in zip(messages, messages[1:])
+    )
+
+
 def test_stop_cancels_reasoning_before_a_restart(wica_factory):
+    # The fake consumes a script step only once its delay elapses, so the call cancelled by stop()
+    # consumes nothing and this reply belongs to the post-restart step.
     sink = RecordingSink()
     wica = wica_factory(
-        fake_config([{"text": "must not escape the stopped cycle"}], delay_s=0.5),
+        fake_config([{"text": "only the post-restart step replies"}], delay_s=0.5),
         output_sink=sink,
         coalesce_window=0,
     )
     wica.world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
+    prompts: list[list[BaseMessage]] = []
+    wica.on_agent_prompt.subscribe(prompts.append)
     wica.start()
     wica.world.update("speech", "begin slow inference")
     wait_until(lambda: len(wica.agent.model.calls) == 1)
@@ -335,6 +347,14 @@ def test_stop_cancels_reasoning_before_a_restart(wica_factory):
     time.sleep(0.6)
 
     assert sink.texts == []
+
+    # The cancelled step's observation stays in history; the next step renders it merged with its
+    # own observation, never as back-to-back user messages.
+    wica.world.update("speech", "after the restart")
+    assert sink.event.wait(WAIT_TIMEOUT)
+    assert sink.texts == ["only the post-restart step replies"]
+    assert len(prompts) == 2
+    assert _no_consecutive_human_messages(prompts[1])
 
 
 # --- Safe shutdown from the loop thread --------------------------------
