@@ -223,7 +223,7 @@ The repo ships a runnable example — a browser UI to talk to a simulated social
 
 ```bash
 export WICA_ANTHROPIC_API_KEY=sk-...
-uv run --group demo python examples/conversation_demo.py
+uv run --group demo python -m examples.conversation_demo.app
 ```
 
 Without a key set it still opens and is explorable — it just can't run the robot's reasoning.

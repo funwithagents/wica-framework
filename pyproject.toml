@@ -34,8 +34,8 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.8.0",
 ]
-# The runnable example only (examples/conversation_demo.py); kept out of core deps.
-# Run with: uv run --group demo python examples/conversation_demo.py
+# The runnable example only (examples/conversation_demo/app.py); kept out of core deps.
+# Run with: uv run --group demo python -m examples.conversation_demo.app
 demo = [
     "gradio>=5.0.0",
     "langchain-anthropic>=1.0",
@@ -48,6 +48,9 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so tests can import the `examples` package (the runnable demo);
+# `wica` itself resolves via the installed editable package, not this.
+pythonpath = ["."]
 
 [tool.pyright]
 include = ["src", "tests", "tests-e2e"]

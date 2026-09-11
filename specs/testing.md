@@ -34,7 +34,7 @@ Tests split into two directories, and the split is structural — a directory bo
 - **`tests/` is the normal dev loop.** Fast, deterministic, no real network, no API key. `pyproject.toml`'s `testpaths = ["tests"]` points the default `uv run pytest` here, so this is what runs on every change and what any contributor or CI can run with zero credentials.
 - **`tests-e2e/` is opt-in.** It is the **full-loop tier** — tests that exercise the Agent's whole step loop. Its *live-provider* tests call a real LLM (network, an API key, non-deterministic output, and it costs money), so the tier is deliberately *not* collected by the default run. Because `testpaths` already excludes it, no pytest marker or `--run-e2e` flag is needed: the physical separation is the whole mechanism. Run it explicitly (`uv run pytest tests-e2e`). One kind of test here is the exception to "network + non-deterministic": the **always-run scripted-fake flows** (below) need no key and never skip.
 
-The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_config.py`, `test_content.py`, `test_fake_model.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_wica.py`, `test_fake_flows.py`) rather than modules.
+The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_config.py`, `test_content.py`, `test_fake_model.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_wica.py`, `test_fake_flows.py`) rather than modules. The runnable **example** is tested the same way, one tier per grain: its presenter logic in the fast tier (`tests/test_conversation_demo.py`) and its whole wiring end-to-end in the full-loop tier (`tests-e2e/test_example_flow.py`, an always-run scripted-fake flow — see below). Both are governed by [conversation-demo.md](conversation-demo.md), so they sit outside the `src/wica`-module-mirroring rule; importing the `examples` package under pytest is what `pyproject.toml`'s `pythonpath = ["."]` enables.
 
 ## Always-run scripted-fake flows
 
@@ -44,6 +44,8 @@ The two tiers mirror the structure of what they exercise: `tests/` mirrors the `
 - sits **outside** `PROVIDER_CONFIGS`: it isn't parametrized over providers.
 
 It lives in `tests-e2e/` rather than `tests/` because it's a whole-loop integration test (trigger coalescing, async Command dispatch, history rendering), not a unit test — and it stays excluded from the default `uv run pytest` (that's `testpaths = ["tests"]`) with the rest of the tier. Run just this deterministic suite, no credentials needed, with `uv run pytest tests-e2e -k fake`. The fake model's own mechanics (script consumption, exhaustion, `bind_tools` name-check) are unit-tested separately in the fast tier (`tests/test_fake_model.py`).
+
+The **conversation demo's** end-to-end test (`tests-e2e/test_example_flow.py`, governed by [conversation-demo.md](conversation-demo.md)) is a second always-run scripted-fake flow of the same shape: key-less, deterministic, never skipping, and outside `PROVIDER_CONFIGS`. It differs only in what it drives — the *example's* wiring rather than the framework loop in isolation — and is selected with `-k example`. So "always-run scripted-fake" now names both.
 
 ## What a WICA test asserts
 

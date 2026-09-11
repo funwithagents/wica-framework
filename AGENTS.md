@@ -104,6 +104,8 @@ Never `echo`/print a key itself; when checking whether one is set, redact the va
 uv run pytest tests-e2e -k fake
 ```
 
+Alongside them, `tests-e2e/test_example_flow.py` is another always-run, key-less scripted-fake test — it stands up the **conversation demo** itself (via `examples.conversation_demo.app.build_app`) over a `provider: "fake"` model and asserts the example's end-to-end wiring (see [specs/conversation-demo.md](specs/conversation-demo.md)). Select it with `-k example`; the demo's fast presenter unit tests live in `tests/test_conversation_demo.py` and run in the default tier. Both need the repo root on `sys.path` to import the `examples` package — provided by `pythonpath = ["."]` in `[tool.pytest.ini_options]`.
+
 ## Implementation plans
 
 - Write implementation plans as files in the [plans](plans/) folder.

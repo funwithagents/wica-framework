@@ -260,6 +260,6 @@ Route to the spec that governs what you're touching (each carries the full ratio
 | Understand the reasoning loop, history rendering, coalescing, instrumentation Events | [specs/agent.md](specs/agent.md) |
 | Author config / add a provider | [specs/config.md](specs/config.md) |
 | Write deterministic e2e tests with the scripted `fake` provider | [specs/fake-provider.md](specs/fake-provider.md) |
-| See it all wired in a runnable app | [specs/conversation-demo.md](specs/conversation-demo.md) → [`examples/conversation_demo.py`](examples/conversation_demo.py) |
+| See it all wired in a runnable app | [specs/conversation-demo.md](specs/conversation-demo.md) → [`examples/conversation_demo/app.py`](examples/conversation_demo/app.py) |
 
 Spec index with statuses: [specs/_index.md](specs/_index.md).

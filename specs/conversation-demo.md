@@ -1,11 +1,16 @@
 ---
 code:
-  - examples/conversation_demo.py
-  - examples/prompts/wica.md
-  - examples/agent.config.json
-  - examples/agent.anthropic.config.json
-  - examples/agent.openai.config.json
-  - examples/agent.huggingface-hub.config.json
+  - examples/conversation_demo/app.py
+  - examples/conversation_demo/app_state.py
+  - examples/conversation_demo/app_ui.py
+  - examples/conversation_demo/prompts/wica.md
+  - examples/conversation_demo/agent.config.json
+  - examples/conversation_demo/agent.anthropic.config.json
+  - examples/conversation_demo/agent.openai.config.json
+  - examples/conversation_demo/agent.huggingface-hub.config.json
+tests:
+  - tests/test_conversation_demo.py
+  - tests-e2e/test_example_flow.py
 ---
 
 # Conversation demo
@@ -137,9 +142,10 @@ the demo wiring the effect deterministically behind the agent's back.
 
 ## Configuration
 
-- **The demo loads from a committed JSON config**, `examples/agent.config.json`, via
-  `WicaConfig.from_json_file` followed by `Wica.init` (see [config.md](config.md)) — provider,
-  model, and persona (`system_prompt_file`, pointing at `examples/prompts/wica.md`) all live
+- **The demo loads from a committed JSON config**, `examples/conversation_demo/agent.config.json`,
+  via `WicaConfig.from_json_file` followed by `Wica.init` (see [config.md](config.md)) — provider,
+  model, and persona (`system_prompt_file`, pointing at
+  `examples/conversation_demo/prompts/wica.md`) all live
   there. Switching providers/models, or editing the persona, is a file edit, not a code change.
   Committed per-provider variants sit alongside it — `agent.anthropic.config.json`,
   `agent.openai.config.json`, `agent.huggingface-hub.config.json` — showing the same demo against
