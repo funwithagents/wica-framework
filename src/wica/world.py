@@ -306,6 +306,22 @@ class World:
 
             listeners = list(self._listeners.get(key, ()))
 
+            # Both reactive outputs are fire-and-forget onto the shared loop, so a slow callback
+            # never blocks update()'s (possibly cross-thread) caller. Listeners run sync-on-the-pool
+            # or async-on-the-loop and are individually guarded; the trigger emits on_trigger on the
+            # loop thread so a subscriber may safely create_task. Scheduled *inside* the lock (the
+            # calls never block) so that two threads updating the same key enqueue their callbacks
+            # in version order — a later id can never be delivered before an earlier one. See
+            # specs/world.md ("The shared event loop").
+            for listener in listeners:
+                self._loop.call_soon_threadsafe(
+                    self._dispatch, listener, copy.deepcopy(new_entry)
+                )
+            if should_trigger:
+                self._loop.call_soon_threadsafe(
+                    self.on_trigger.emit, copy.deepcopy(new_entry)
+                )
+
         new_id = new_entry.current.id
         _logger.debug(
             "updated %r → id=%d, value=%s%s",
@@ -325,19 +341,6 @@ class World:
                 "update to %r (id=%d) did not trigger an LLM call (condition unmet)",
                 key,
                 new_id,
-            )
-
-        # Both reactive outputs are fire-and-forget onto the shared loop, so a slow callback never
-        # blocks update()'s (possibly cross-thread) caller. Listeners run sync-on-the-pool or
-        # async-on-the-loop and are individually guarded; the trigger emits on_trigger on the loop
-        # thread so a subscriber may safely create_task. See specs/world.md ("The shared event loop").
-        for listener in listeners:
-            self._loop.call_soon_threadsafe(
-                self._dispatch, listener, copy.deepcopy(new_entry)
-            )
-        if should_trigger:
-            self._loop.call_soon_threadsafe(
-                self.on_trigger.emit, copy.deepcopy(new_entry)
             )
 
     def _dispatch(self, callback: Listener, entry: WorldEntry) -> None:

@@ -118,29 +118,30 @@ class FakeChatModel(BaseChatModel):
             )
 
     def _next_step(self) -> tuple[dict[str, Any], int]:
-        """Consume and return the next (step, step_index). Past the end: `default` (index -1),
-        unless `loop` cycles the script."""
+        """Consume and return the next (step, call_index). `call_index` is this call's 0-based
+        ordinal — deliberately *not* the script position — so generated tool-call ids stay unique
+        across calls when `loop` cycles the script (a repeated id would collide in the Agent's
+        rendered tool_call/tool_result stream). Past the end: `default`, unless `loop` cycles."""
         n = len(self.script)
-        if self._cursor < n:
-            idx = self._cursor
-            step = self.script[idx]
+        call_index = self._cursor
+        if call_index < n:
+            step = self.script[call_index]
         elif self.loop and n:
-            idx = self._cursor % n
-            step = self.script[idx]
+            step = self.script[call_index % n]
         else:
-            idx = -1
             step = self.default
         self._cursor += 1
-        return step, idx
+        return step, call_index
 
-    def _to_result(self, step: dict[str, Any], idx: int) -> ChatResult:
+    def _to_result(self, step: dict[str, Any], call_index: int) -> ChatResult:
         text = step.get("text", "") or ""
         tool_calls = [
             {
                 "name": call["name"],
                 "args": call.get("args", {}) or {},
-                # A stable, deterministic id when none is supplied, so assertions are reproducible.
-                "id": call.get("id") or f"fake_call_{idx}_{i}",
+                # A stable, deterministic id when none is supplied, so assertions are reproducible;
+                # keyed by call ordinal so a looped script never repeats an id.
+                "id": call.get("id") or f"fake_call_{call_index}_{i}",
                 "type": "tool_call",
             }
             for i, call in enumerate(step.get("tool_calls", []) or [])
@@ -157,8 +158,8 @@ class FakeChatModel(BaseChatModel):
     ) -> ChatResult:
         self._calls.append(list(messages))
         self._validate_once()
-        step, idx = self._next_step()
-        return self._to_result(step, idx)
+        step, call_index = self._next_step()
+        return self._to_result(step, call_index)
 
     async def _agenerate(
         self,
@@ -173,5 +174,5 @@ class FakeChatModel(BaseChatModel):
         self._validate_once()
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
-        step, idx = self._next_step()
-        return self._to_result(step, idx)
+        step, call_index = self._next_step()
+        return self._to_result(step, call_index)

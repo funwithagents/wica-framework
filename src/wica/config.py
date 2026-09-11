@@ -174,8 +174,9 @@ def _validate_system_prompt(
         return _require_str(data, "system_prompt", block=block), None
     prompt_file = _require_str(data, "system_prompt_file", block=block)
     if base_dir is not None and not Path(prompt_file).is_absolute():
-        # Locate against the config directory (absolutize) — no I/O, and .resolve() normalizes
-        # `..`/symlinks so the stored path is stable regardless of the process CWD at read time.
+        # Locate against the config directory (absolutize) — no file *read*; .resolve() only
+        # normalizes `..`/symlinks (a stat-level lookup, tolerant of a missing file) so the stored
+        # path is stable regardless of the process CWD at read time.
         prompt_file = str((base_dir / prompt_file).resolve())
     return None, prompt_file
 

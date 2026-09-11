@@ -105,9 +105,14 @@ class Wica:
 
     @property
     def is_running(self) -> bool:
-        """Whether this Wica is between a successful ``start()`` and ``stop()``."""
-        with self._lifecycle_lock:
-            return self._running
+        """Whether this Wica is between a successful ``start()`` and ``stop()``.
+
+        Deliberately lock-free. A bool read is atomic, and taking the lifecycle lock here would
+        let loop-thread code (a Command polling whether to keep going, an Event subscriber) block
+        against a ``stop()`` that holds that lock while it drains the Agent on the loop and then
+        joins the loop thread — a deadlock. The lock only serializes transitions.
+        """
+        return self._running
 
     def start(self) -> None:
         """Start or restart the system: owned loop thread, then World, then Agent.

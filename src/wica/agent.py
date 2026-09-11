@@ -769,24 +769,23 @@ class Agent:
             "command %s(%s) [call_id=%s] executing", name, _format_args(args), call_id
         )
         try:
-            command = self._commands[name]
+            command = self._commands.get(name)
+            if command is None:
+                # The model named a tool the Agent never bound (or one unregistered since). Fail
+                # the entry with a readable error rather than the bare KeyError repr ("'ghost'").
+                raise LookupError(f"unknown command {name!r}")
             result = await command.tool.ainvoke(args)
         except asyncio.CancelledError:
             _logger.debug("command %s [call_id=%s] cancelled", name, call_id)
-            try:
-                self._world.update(
-                    key, CommandExecution(name=name, args=args, state="cancelled")
-                )
-            except RuntimeError:
-                # World already stopped — this cancel is part of Wica teardown (agent.stop() cancels
-                # in-flight commands just before world.stop()). The terminal write is moot at
-                # shutdown; swallow it so the task still unwinds cleanly. See specs/wica.md.
-                pass
+            self._write_terminal(
+                key, call_id, CommandExecution(name=name, args=args, state="cancelled")
+            )
             raise
         except Exception as exc:
             _logger.warning("command %s [call_id=%s] failed: %s", name, call_id, exc)
-            self._world.update(
+            self._write_terminal(
                 key,
+                call_id,
                 CommandExecution(name=name, args=args, state="failed", error=str(exc)),
             )
         else:
@@ -796,14 +795,34 @@ class Agent:
                 call_id,
                 _truncate(str(result)),
             )
-            self._world.update(
+            self._write_terminal(
                 key,
+                call_id,
                 CommandExecution(
                     name=name, args=args, state="complete", result=str(result)
                 ),
             )
         finally:
             self._running_tasks.pop(key, None)
+
+    def _write_terminal(
+        self, key: str, call_id: str, execution: CommandExecution
+    ) -> None:
+        """Write a Command's terminal state to its World entry, tolerating a World that has
+        already stopped. That happens during Wica teardown (agent.stop() cancels in-flight
+        commands just before world.stop()) and for a Command that finishes after the World paused
+        (an injected-loop shutdown, or one that swallows its cancellation). The write is moot then:
+        log and drop it rather than raise into the task. See specs/wica.md ("Lifecycle")."""
+        try:
+            self._world.update(key, execution)
+        except RuntimeError:
+            _logger.debug(
+                "command %s [call_id=%s] reached %s after the World stopped; "
+                "terminal state not recorded",
+                execution.name,
+                call_id,
+                execution.state,
+            )
 
     def _append_observation(self) -> None:
         snapshot = self._world.get_prompt_snapshot()

@@ -945,3 +945,35 @@ def test_get_prompt_snapshot_config_is_a_copy(world: World):
     config.serialize_fn = lambda v, p: [TextPart("tampered")]
     world.update("a", "x")
     assert flatten(world.render_entry(world.get_entry("a"))).count("tampered") == 0
+
+
+def test_listener_dispatch_preserves_version_order_under_concurrent_updates(world):
+    # Regression: dispatch used to be scheduled after the lock was released, so two producers
+    # updating one key could enqueue their callbacks in the opposite order to the version ids they
+    # committed. Delivery must follow id order for every key. (A regression is probabilistic —
+    # the race window is small — so the producers hammer the key to make it likely.)
+    world.register("counter", int, serialize_fn=identity_serialize)
+    per_thread, threads = 2000, 4
+    total = per_thread * threads
+    seen: list[int] = []
+    done = threading.Event()
+
+    async def record(entry: WorldEntry) -> None:
+        seen.append(entry.current.id)
+        if len(seen) == total:
+            done.set()
+
+    world.add_listener("counter", record)
+
+    def produce() -> None:
+        for i in range(per_thread):
+            world.update("counter", i)
+
+    producers = [threading.Thread(target=produce) for _ in range(threads)]
+    for t in producers:
+        t.start()
+    for t in producers:
+        t.join()
+
+    assert done.wait(timeout=WAIT_TIMEOUT * 5)
+    assert seen == sorted(seen), "a later version was delivered before an earlier one"

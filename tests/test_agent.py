@@ -1517,3 +1517,66 @@ def test_restart_keeps_exactly_one_of_each_builtin(loop, world, sink):
     agent.start()
     assert sorted(agent._commands) == ["cancel_command", "noop", "say", "wave"]
     agent.stop()
+
+
+def test_command_finishing_after_the_world_stopped_does_not_raise(loop, world, sink):
+    # A Command can complete after the World paused (injected-loop shutdown, or a Command that
+    # swallows its cancellation). Its terminal write then has nowhere to go: it must be dropped and
+    # logged, not raised into the task — the cancel branch already tolerated this; the complete and
+    # failed branches must too.
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=tool_call_response([("finish_late", {}, "late1")])
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    release = asyncio.Event()
+
+    async def finish_late() -> str:
+        """Completes only once released — by then the World is stopped."""
+        await release.wait()
+        return "done"
+
+    agent.register_command(finish_late)
+    agent.start()
+    world.update("input", "go")
+    key = "agent:command:late1"
+    wait_until(lambda: world.get_entry(key).current.value.state == "running")
+    task = agent._running_tasks[key]
+
+    world.stop()
+    loop.call_soon_threadsafe(release.set)
+    wait_until(task.done)
+
+    assert task.exception() is None, (
+        "terminal write into a stopped World escaped the task"
+    )
+    # The entry keeps its last recorded state: the completion could not be written.
+    assert world.get_entry(key).current.value.state == "running"
+    agent.stop()
+
+
+def test_unknown_command_name_fails_with_a_clear_error(loop, world, sink):
+    # A model naming a tool the Agent never bound fails the entry with a readable error (not the
+    # bare KeyError repr "'ghost'"), delivered to the next step like any Command failure.
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("ghost", {}, "g1")]),
+            text_response("noted"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+
+    world.update("input", "summon")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    observation = "".join(
+        str(m.content) for m in model.calls[1] if isinstance(m, HumanMessage)
+    )
+    assert "Called ghost() → failed: unknown command 'ghost'" in observation
+    agent.stop()

@@ -421,3 +421,40 @@ def test_wica_register_command_rejects_duplicates_and_reserved_names(wica_factor
         wica.register_command(wave)
     with pytest.raises(ValueError):
         wica.register_command(Command(wave, name="noop", description="Wave."))
+
+
+def test_is_running_polled_from_the_loop_thread_does_not_deadlock_stop():
+    # Regression: `is_running` used to take the lifecycle lock, which stop() holds for the whole
+    # shutdown (Agent drain on the loop, then join of the loop thread). A Command polling
+    # `wica.is_running` on the loop thread then blocked the loop against that lock, the drain
+    # could never run, and the join never returned. Built without the closing fixture so a
+    # regression fails the test instead of hanging the session's teardown.
+    wica = Wica.init(
+        fake_config([{"tool_calls": [{"name": "poll", "args": {}}]}]),
+        coalesce_window=0,
+    )
+    seen_running = threading.Event()
+
+    async def poll() -> str:
+        """Polls the facade's is_running until cancelled."""
+        while True:
+            if wica.is_running:
+                seen_running.set()
+            await asyncio.sleep(0)
+
+    wica.world.register(
+        "go", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.register_command(poll)
+    wica.start()
+    wica.world.update("go", "start")
+    assert seen_running.wait(timeout=WAIT_TIMEOUT)
+
+    stopper = threading.Thread(target=wica.stop, daemon=True)
+    stopper.start()
+    stopper.join(timeout=WAIT_TIMEOUT)
+    assert not stopper.is_alive(), (
+        "stop() deadlocked against a loop-thread is_running read"
+    )
+    assert wica.is_running is False
+    wica.close()

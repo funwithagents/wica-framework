@@ -140,3 +140,14 @@ def test_no_bind_no_validation():
         script=[{"tool_calls": [{"name": "whatever", "args": {}}]}], delay_s=0
     )
     assert model.invoke("q").tool_calls[0]["name"] == "whatever"
+
+
+def test_looped_script_generates_unique_ids():
+    # Generated ids key on the call ordinal, not the script position, so a looped script never
+    # repeats a tool-call id (a repeat would collide in the Agent's rendered tool_call/tool_result
+    # stream). The first call's id is unchanged for non-looped scripts (`fake_call_0_0`).
+    model = FakeChatModel(
+        script=[{"tool_calls": [{"name": "add", "args": {}}]}], loop=True, delay_s=0
+    )
+    ids = [model.invoke("q").tool_calls[0]["id"] for _ in range(3)]
+    assert ids == ["fake_call_0_0", "fake_call_1_0", "fake_call_2_0"]
