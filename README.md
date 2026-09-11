@@ -73,7 +73,7 @@ async def dance() -> str:
 wica.register_command(dance)
 ```
 
-Off-the-shelf LangChain tools work unmodified — a Command needs no WICA-specific hooks. Every Command runs as a cancellable `asyncio` task and its execution is tracked as a World entry `agent:command:<call_id>` that renders `running` while in flight and terminal (`result`/`error`) once done — so a later reasoning step can *see* an action still running and decide to cancel it. The Agent auto-registers a native `cancel_command(call_id)` so the model can abort its own in-flight Commands.
+Off-the-shelf LangChain tools work unmodified — a Command needs no WICA-specific hooks. Command names are unique, and `noop`/`cancel_command` are reserved by WICA (a duplicate or reserved name raises `ValueError`). Every Command runs as a cancellable `asyncio` task and its execution is tracked as a World entry `agent:command:<call_id>` that renders `running` while in flight and terminal (`result`/`error`) once done — so a later reasoning step can *see* an action still running and decide to cancel it. The Agent auto-registers a native `cancel_command(call_id)` so the model can abort its own in-flight Commands.
 
 ### The Agent — the reasoning loop
 

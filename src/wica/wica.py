@@ -122,6 +122,10 @@ class Wica:
                 return
             if self._loop.is_closed():
                 raise RuntimeError("Wica event loop is closed")
+            if not self._owns_loop and not self._loop.is_running():
+                # An injected loop must already be running: World dispatch and the Agent's trigger
+                # shim need a live loop, so accepting a stopped one would queue callbacks forever.
+                raise RuntimeError("injected event loop is not running")
 
             if self._owns_loop:
                 self._loop_thread = threading.Thread(
@@ -147,6 +151,7 @@ class Wica:
         because cancelling in-flight Commands writes their terminal state back into the World.
         Stopping the World first would make those final updates raise. The loop stays open for a
         later ``start()``. Idempotent while already stopped. See specs/wica.md."""
+        self._reject_if_on_owned_loop_thread("stop")
         with self._lifecycle_lock:
             if not self._running:
                 return
@@ -161,6 +166,7 @@ class Wica:
         An injected loop remains caller-owned and is never closed. Idempotent; ``start()`` after
         this terminal operation raises ``RuntimeError``.
         """
+        self._reject_if_on_owned_loop_thread("close")
         with self._lifecycle_lock:
             if self._closed:
                 return
@@ -168,6 +174,17 @@ class Wica:
             if self._owns_loop and not self._loop.is_closed():
                 self._loop.close()
             self._closed = True
+
+    def _reject_if_on_owned_loop_thread(self, operation: str) -> None:
+        """Reject a shutdown call made from an owned loop's own thread (a sink, Command, or Event
+        subscriber) *before* any state changes — a synchronous facade must join that thread, and
+        there is no correct synchronous answer on it. `_loop_thread` is None when stopped, so this
+        is a no-op then. See specs/wica.md ("Shutdown from the loop thread")."""
+        if self._owns_loop and threading.current_thread() is self._loop_thread:
+            raise RuntimeError(
+                f"cannot {operation} Wica from its own event-loop thread (an output sink, Command, "
+                "or Event subscriber); call it from another thread"
+            )
 
     def _stop_owned_loop_thread(self) -> None:
         if not self._owns_loop or self._loop_thread is None:
@@ -181,5 +198,6 @@ class Wica:
         """Register a Command — delegates verbatim to ``agent.register_command``. One argument, a
         callable or a ``Command`` (override name/description via ``Command(fn, name=…, …)``). The one
         command-side convenience mirrored onto ``Wica`` (see specs/wica.md, "Command registration is
-        delegated")."""
+        delegated"). Command names are unique and ``noop``/``cancel_command`` are reserved: a
+        duplicate or reserved name raises ``ValueError`` (see specs/commands.md)."""
         self.agent.register_command(fn)

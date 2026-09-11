@@ -25,7 +25,7 @@ from wica.command import Command
 from wica.config import AgentConfig, resolve_api_key, resolve_system_prompt
 from wica.content import Content, ImagePart, TextPart
 from wica.events import Event
-from wica.world import World, WorldEntry
+from wica.world import World, WorldEntry, validate_key
 
 _logger = logging.getLogger(__name__)
 
@@ -63,8 +63,20 @@ class CommandIssued:
 # time (not just the entry that fired), so passive include_in_prompt entries still reach
 # the model. See specs/agent.md "History record shape".
 @dataclass(frozen=True)
+class ObservedEntry:
+    """One entry of an Observation: the WorldEntry snapshot plus the serializers that governed it
+    when observed. History renders through these, never through the World's live registration, so
+    an observation renders identically after the key is unregistered or re-registered. See
+    specs/agent.md ("History record shape")."""
+
+    entry: WorldEntry
+    serialize_fn: Callable[[Any, Any], Content]
+    archival_serialize_fn: Callable[[Any, Any], Content]
+
+
+@dataclass(frozen=True)
 class ObservationRecord:
-    entries: list[WorldEntry]
+    entries: list[ObservedEntry]
 
 
 @dataclass(frozen=True)
@@ -74,7 +86,10 @@ class AssistantTextRecord:
 
 @dataclass(frozen=True)
 class CommandRecord:
+    # call_id is the World-key suffix (agent:command:<call_id>) and the cancel_command target;
+    # tool_call_id is the provider's id, used to reconstruct the native tool_call/tool_result pair.
     call_id: str
+    tool_call_id: str
     name: str
     args: dict[str, Any]
 
@@ -86,6 +101,7 @@ class CommandRecord:
 @dataclass(frozen=True)
 class NoReactionRecord:
     call_id: str
+    tool_call_id: str
 
 
 HistoryRecord = (
@@ -178,6 +194,11 @@ _NOOP_COMMAND_DESCRIPTION = (
 # The tool_result paired with a rendered noop call — a plain acknowledgement, not the entry-pointer
 # ack real Commands use (noop has no World entry to point at). See specs/agent.md ("History").
 _NOOP_ACK = "Acknowledged — no action taken."
+
+# The two Command names WICA owns. register_command rejects both (and any already-registered name);
+# an output Command may not take either. See specs/commands.md ("Names are unique and two are
+# reserved").
+_RESERVED_COMMAND_NAMES = frozenset({_CANCEL_COMMAND_NAME, _NOOP_COMMAND_NAME})
 
 # Whether a completed output Command re-triggers a reasoning step. True (default) lets the model
 # chain utterances / self-continue (ended by noop), at ~2 LLM calls per utterance; False makes
@@ -342,6 +363,25 @@ class Agent:
         self._output_command_name: str | None = (
             None if self._output_command is None else self._output_command.name
         )
+        if self._output_command_name in _RESERVED_COMMAND_NAMES:
+            raise ValueError(
+                f"output_command may not be named {self._output_command_name!r}: "
+                f"{sorted(_RESERVED_COMMAND_NAMES)} are reserved by WICA"
+            )
+        # The two WICA-native control Commands, built once here so start() can re-attach the *same*
+        # objects on every cycle (the identity check in _register_builtin then holds across a
+        # restart). Building a Command wraps the callable into a tool; it does not touch the model,
+        # so __init__ stays inert. See specs/commands.md ("Names are unique and two are reserved").
+        self._cancel_command = Command(
+            self._cancel_command_action,
+            name=_CANCEL_COMMAND_NAME,
+            description=_CANCEL_COMMAND_DESCRIPTION,
+        )
+        self._noop_command = Command(
+            self._noop_action,
+            name=_NOOP_COMMAND_NAME,
+            description=_NOOP_COMMAND_DESCRIPTION,
+        )
         # The system prompt the model receives is composed: the resolved persona (verbatim) followed
         # by the WICA runtime primer (+ the output clause when an output Command is set). Composed
         # once here so the combined string is stable across the conversation and stays in the cached
@@ -405,42 +445,56 @@ class Agent:
         """Register a Command. Takes one argument: a plain callable (auto-wrapped — name from
         ``__name__``, description from the docstring) or a ``Command`` (used directly). To override
         name/description, or to wrap an off-the-shelf tool, pass ``Command(fn, name=…, …)`` /
-        ``Command(tool)`` — there are no name/description kwargs here. See specs/commands.md."""
+        ``Command(tool)`` — there are no name/description kwargs here.
+
+        Names are unique: registering a name already registered, a WICA-reserved name (``noop``,
+        ``cancel_command``), or the output Command's name raises ``ValueError``. See
+        specs/commands.md ("Names are unique and two are reserved")."""
         command = fn if isinstance(fn, Command) else Command(fn)
+        if command.name in _RESERVED_COMMAND_NAMES:
+            raise ValueError(f"command name {command.name!r} is reserved by WICA")
+        if command.name == self._output_command_name:
+            raise ValueError(
+                f"command name {command.name!r} is the output Command's name"
+            )
+        if command.name in self._commands:
+            raise ValueError(f"command {command.name!r} is already registered")
+        self._attach_command(command)
+
+    def _attach_command(self, command: Command) -> None:
+        """Store the Command and rebind the model to the full current tool set."""
         self._commands[command.name] = command
         self._bound_model = self.model.bind_tools(
             [c.tool for c in self._commands.values()]
         )
         _logger.debug("registered command %r", command.name)
 
+    def _register_builtin(self, command: Command) -> None:
+        """Idempotent attach for WICA-native Commands and the output Command (used by start(), which
+        may run again after stop()). Their names are reserved from application use, so this can
+        never replace an application Command."""
+        if self._commands.get(command.name) is command:
+            return
+        self._attach_command(command)
+
     def start(self) -> None:
         if self._started:
             return
-        # WICA-native control Commands, auto-registered here (no app wiring) since they need Agent
-        # internals. Registering at start (not construction) keeps __init__ inert — it never touches
-        # the model. register_command is idempotent on the name, so a second start() is harmless.
+        # WICA-native control Commands, auto-attached here (no app wiring) since they need Agent
+        # internals. Attaching at start (not construction) keeps __init__ inert — it never touches
+        # the model. _register_builtin is idempotent on object identity (the Command objects are
+        # built once in __init__), so a second start() re-attaches the same ones harmlessly and
+        # never replaces an application Command (their names are reserved from register_command).
         #  - cancel_command: abort a still-running Command previously issued (also reaches an output
         #    Command, enabling barge-in).
         #  - noop: declare no reaction (intercepted before dispatch — see _run_step).
-        self.register_command(
-            Command(
-                self._cancel_command_action,
-                name=_CANCEL_COMMAND_NAME,
-                description=_CANCEL_COMMAND_DESCRIPTION,
-            )
-        )
-        self.register_command(
-            Command(
-                self._noop_action,
-                name=_NOOP_COMMAND_NAME,
-                description=_NOOP_COMMAND_DESCRIPTION,
-            )
-        )
+        self._register_builtin(self._cancel_command)
+        self._register_builtin(self._noop_command)
         # The optional application-supplied output Command (built in __init__). An ordinary Command
         # in every respect but its trigger-on-completion flag (see _dispatch_command) and the prompt
         # clause (see __init__).
         if self._output_command is not None:
-            self.register_command(self._output_command)
+            self._register_builtin(self._output_command)
         _logger.info("agent starting (%d command(s) registered)", len(self._commands))
 
         # Subscribe to the World's raw trigger. The World emits on_trigger on the loop thread
@@ -643,7 +697,10 @@ class Agent:
             await self._output_sink(text)
 
         for call in response.tool_calls:
-            call_id = call["id"] or uuid.uuid4().hex
+            # The provider's tool-call id reconstructs the native tool_call/tool_result pair; the
+            # World-key suffix is that id when it's a safe, free key, else a generated one.
+            tool_call_id = call["id"] or uuid.uuid4().hex
+            call_id = self._world_call_id(tool_call_id)
             if call["name"] == _NOOP_COMMAND_NAME:
                 # noop is the model declaring no reaction: record it (so context shows the choice
                 # and the tool_call has a matching tool_result), but do not dispatch it — no World
@@ -652,14 +709,28 @@ class Agent:
                 # only real actions filters it out by name). See specs/commands.md, specs/agent.md.
                 _logger.debug("noop issued (call_id=%s) — no action taken", call_id)
                 self.on_command.emit(CommandIssued(_NOOP_COMMAND_NAME, {}))
-                self._history.append(NoReactionRecord(call_id))
+                self._history.append(NoReactionRecord(call_id, tool_call_id))
                 continue
             args = copy.deepcopy(call["args"])
             self._history.append(
-                CommandRecord(call_id, call["name"], copy.deepcopy(args))
+                CommandRecord(call_id, tool_call_id, call["name"], copy.deepcopy(args))
             )
             self._dispatch_command(call_id, call["name"], args)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
+
+    def _world_call_id(self, provider_id: str | None) -> str:
+        """The `<call_id>` for a new agent:command:<call_id> entry: the provider's tool-call id
+        when it is a valid World key and that key is free, else a generated one. See
+        specs/commands.md ("Command execution as a World entry")."""
+        if provider_id:
+            try:
+                validate_key(provider_id)
+            except ValueError:
+                pass
+            else:
+                if not self._world.is_registered(f"{_COMMAND_KEY_PREFIX}{provider_id}"):
+                    return provider_id
+        return uuid.uuid4().hex
 
     def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         # A subscriber may annotate or otherwise mutate what it receives without changing the
@@ -735,18 +806,27 @@ class Agent:
             self._running_tasks.pop(key, None)
 
     def _append_observation(self) -> None:
-        observation = self._world.get_prompt_entries()
-        self._history.append(ObservationRecord(observation))
+        snapshot = self._world.get_prompt_snapshot()
+        observed = [
+            ObservedEntry(
+                entry=entry,
+                serialize_fn=config.serialize_fn,
+                archival_serialize_fn=config.archival_serialize_fn
+                or config.serialize_fn,
+            )
+            for entry, config in snapshot
+        ]
+        self._history.append(ObservationRecord(observed))
         # This snapshot has now captured every terminal command entry's outcome (they render from
         # it in _render_messages), so retire them all here — not just the one that fired. This is
         # the *sole* retirement path: a completion whose own trigger was dropped by the
         # single-in-flight loop stays in the World until some step observes it here, so its outcome
         # always reaches history before the entry goes away (never silently lost). The captured
-        # snapshot keeps re-rendering from history via render_entry's override after unregister.
-        for world_entry in observation:
-            if self._is_terminal_command(world_entry):
-                _logger.debug("retiring completed command entry %r", world_entry.key)
-                self._cleanup_command_entry(world_entry.key)
+        # snapshot keeps re-rendering from history via its own captured serializer after unregister.
+        for item in observed:
+            if self._is_terminal_command(item.entry):
+                _logger.debug("retiring completed command entry %r", item.entry.key)
+                self._cleanup_command_entry(item.entry.key)
 
     def _is_terminal_command(self, entry: WorldEntry) -> bool:
         value = entry.current.value
@@ -807,41 +887,43 @@ class Agent:
                 flush_assistant()
                 archival = i != newest_observation_index
                 blocks: list[str | dict[str, Any]] = []
-                for world_entry in record.entries:
-                    # Command entries carry the outcome (running → terminal). They render through
-                    # the Agent's own serializer via render_entry's override, so the World stays
-                    # command-agnostic and a retired entry still re-renders from this snapshot
-                    # after its config was unregistered. Other entries use the registered fn.
-                    if world_entry.key.startswith(_COMMAND_KEY_PREFIX):
-                        rendered = self._world.render_entry(
-                            world_entry,
-                            archival=archival,
-                            serialize_fn=_serialize_command_execution,
-                        )
-                    else:
-                        rendered = self._world.render_entry(
-                            world_entry, archival=archival
-                        )
+                for item in record.entries:
+                    # Every observed entry renders through its own captured serializer — the fresh
+                    # or archival one recorded at observation time. render_entry with an explicit
+                    # serialize_fn ignores its archival flag and never touches the World's live
+                    # config, so this cannot raise KeyError for a key that has since been
+                    # unregistered, and a re-registered key never rewrites this older observation.
+                    # Command entries are captured with the Agent's own command serializer (they
+                    # are registered with it), so they render uniformly too — no key inspection.
+                    serialize_fn = (
+                        item.archival_serialize_fn if archival else item.serialize_fn
+                    )
+                    rendered = self._world.render_entry(
+                        item.entry, serialize_fn=serialize_fn
+                    )
                     blocks.extend(_content_to_message_blocks(rendered))
                 messages.append(HumanMessage(content=blocks))
             elif isinstance(record, AssistantTextRecord):
                 pending_text.append(record.text)
             elif isinstance(record, CommandRecord):
+                # The native tool_call/tool_result pair uses the provider's tool_call_id; the ack
+                # still points the model at the World entry keyed by call_id (equal in the common
+                # case). See specs/commands.md ("Command execution as a World entry").
                 pending_calls.append(
                     {
                         "name": record.name,
                         "args": copy.deepcopy(record.args),
-                        "id": record.call_id,
+                        "id": record.tool_call_id,
                     }
                 )
-                pending_acks[record.call_id] = _command_ack(record.call_id)
+                pending_acks[record.tool_call_id] = _command_ack(record.call_id)
             elif isinstance(record, NoReactionRecord):
                 # Render as the model's native noop tool call (keeps the message stream valid) with
                 # a plain-ack tool_result — selected here by record type. See specs/agent.md.
                 pending_calls.append(
-                    {"name": _NOOP_COMMAND_NAME, "args": {}, "id": record.call_id}
+                    {"name": _NOOP_COMMAND_NAME, "args": {}, "id": record.tool_call_id}
                 )
-                pending_acks[record.call_id] = _NOOP_ACK
+                pending_acks[record.tool_call_id] = _NOOP_ACK
 
         flush_assistant()
         return messages

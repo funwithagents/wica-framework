@@ -176,6 +176,11 @@ have in a dedicated file. Without it, `from_dict()` keeps a relative path verbat
 dataclass construction does not run the loaders' strict runtime validation, so callers using that
 path are responsible for valid types and field combinations.
 
+The config dataclasses are frozen and enforce their structural invariants on construction (exactly
+one of `system_prompt`/`system_prompt_file`, at most one of `api_key`/`api_key_env`) — so direct
+construction fails with the same `ConfigError` the loaders raise; derive a variant with
+`dataclasses.replace(...)` rather than assigning.
+
 The dictionary/JSON representation has this shape:
 
 ```json
@@ -246,6 +251,9 @@ Each scripted `tool_calls[].name` is validated against your registered Commands 
 - **Lifecycle is restartable.** `wica.start()`/`wica.stop()` may repeat on the same instance and preserve its state. Call `wica.close()` for terminal teardown; a closed Wica cannot restart.
 - **The conversational sink is complete text.** `output_sink(text)` is `async` and receives the model's assistant text per step; broader output modalities are Commands. Streaming sink output is deferred.
 - **The World is a snapshot, not a log.** It holds current + previous per entry; conversation history lives in the Agent (as re-renderable snapshots). Heavy multimodal data (an image) renders inline on the turn it arrives and light thereafter.
+- **Command names are unique, and `noop`/`cancel_command` are reserved.** Registering a duplicate or a reserved name raises `ValueError` (the output Command's name is checked at construction too).
+- **World keys must be safe to embed.** A key is a non-empty string with no whitespace and none of `" < > &` (it goes verbatim into the `<entry key="…">` envelope); `register()` raises `ValueError` otherwise. The `agent:` prefix is framework-owned by convention.
+- **Don't stop Wica from inside its own loop.** When Wica owns the loop, calling `wica.stop()`/`wica.close()` from a sink, Command, or Event subscriber raises `RuntimeError` (a thread can't join itself); hand the call to another thread.
 - **Distributed via git, not PyPI**, and ships with no provider bundled (install an extra).
 
 ## Where to read deeper

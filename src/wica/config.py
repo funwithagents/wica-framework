@@ -19,12 +19,16 @@ class MissingEnvError(ConfigError):
         self.env_var = env_var
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgentConfig:
     """Plain data mirroring the dictionary/JSON ``agent`` block.
 
     The ``*_env``/``*_file`` fields hold references resolved at Agent build, not during config
     creation — see ``resolve_api_key`` / ``resolve_system_prompt`` and specs/config.md.
+
+    Frozen: derive a variant with ``dataclasses.replace(...)`` rather than assigning. The structural
+    invariants are enforced in ``__post_init__``, so direct construction fails the same way the
+    loaders do.
     """
 
     provider: str
@@ -36,6 +40,24 @@ class AgentConfig:
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     hf_provider: str = "auto"  # only used by provider "huggingface-hub"
 
+    def __post_init__(self) -> None:
+        # The structural invariants the loaders enforce, applied to direct construction too, so
+        # every AgentConfig instance is valid. See specs/config.md.
+        has_inline = self.system_prompt is not None
+        has_file = self.system_prompt_file is not None
+        if has_inline and has_file:
+            raise ConfigError(
+                "agent: specify at most one of 'system_prompt'/'system_prompt_file', not both"
+            )
+        if not has_inline and not has_file:
+            raise ConfigError(
+                "agent: specify one of 'system_prompt'/'system_prompt_file'"
+            )
+        if self.api_key is not None and self.api_key_env is not None:
+            raise ConfigError(
+                "agent: specify at most one of 'api_key'/'api_key_env', not both"
+            )
+
     @classmethod
     def from_dict(
         cls, data: dict[str, Any], *, base_dir: str | Path | None = None
@@ -43,7 +65,7 @@ class AgentConfig:
         return cls(**_parse_agent_block(data, base_dir=_as_base_dir(base_dir)))
 
 
-@dataclass
+@dataclass(frozen=True)
 class WicaConfig:
     agent: AgentConfig
 
@@ -246,4 +268,4 @@ def resolve_system_prompt(config: AgentConfig) -> str:
             ) from exc
     raise ConfigError(
         "agent: no system prompt configured"
-    )  # unreachable given validation
+    )  # unreachable: __post_init__ guarantees exactly one is set

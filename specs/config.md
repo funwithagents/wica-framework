@@ -79,7 +79,7 @@ The two references are resolved by the same principle, with one asymmetry driven
 
 ### Plain dataclasses with dictionary and JSON loaders
 
-The config objects stay **plain dataclasses** — `AgentConfig` plus `WicaConfig`, both in [config.py](../src/wica/config.py) — with hand-written loader classmethods. Callers may construct the dataclasses directly; that path relies on the caller and static type checking rather than running the loaders' validation. No pydantic dependency is added — the config objects are a small settings layer, not a pydantic model.
+The config objects stay **plain dataclasses** — `AgentConfig` plus `WicaConfig`, both in [config.py](../src/wica/config.py) — with hand-written loader classmethods. Callers may construct the dataclasses directly. The **structural invariants** (exactly one of `system_prompt`/`system_prompt_file`, at most one of `api_key`/`api_key_env`) are enforced by `AgentConfig.__post_init__`, so direct construction fails with the same `ConfigError` the loaders raise; what the loaders add on top is the *shape* validation of external data (unknown keys, wrong types). Both dataclasses are `frozen=True`: derive a variant with `dataclasses.replace(...)` rather than assigning. No pydantic dependency is added — the config objects are a small settings layer, not a pydantic model.
 
 `WicaConfig` exposes the conventional triad of input adapters, each a thin layer over the next, following the Python convention that `from_json` names a **string** parser (like `json.loads`), not a file loader:
 
@@ -132,7 +132,7 @@ The persona can be given **inline** (`system_prompt`) or **by reference** (`syst
 
 The config is consumed through the `Wica` facade (see [wica.md](wica.md)), which owns the World+Agent it builds:
 
-- `WicaConfig(agent=AgentConfig(...))` constructs the plain objects directly when Python owns the settings. It does not run loader validation.
+- `WicaConfig(agent=AgentConfig(...))` constructs the plain objects directly when Python owns the settings. It runs the invariant check but not the loaders' shape validation.
 - `WicaConfig.from_dict(data, base_dir=...)` parses and validates a WICA-shaped mapping, optionally locating a relative prompt path against the caller-supplied directory. A larger application passes its WICA subsection rather than unrelated sibling settings.
 - `WicaConfig.from_json(text, base_dir=...)` parses and validates that same shape from a JSON **string**, taking the same optional `base_dir` as `from_dict` (a string carries no location of its own).
 - `WicaConfig.from_json_file(path)` reads a dedicated JSON **file**, then parses it via `from_json` with the prompt-path base directory derived from the JSON file's location.

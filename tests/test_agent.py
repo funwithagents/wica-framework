@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
@@ -184,7 +185,7 @@ def test_text_only_response_updates_sink_and_history(loop, world, sink):
     assert sink.texts == ["Hello there"]
     assert len(agent._history) == 2
     assert isinstance(agent._history[0], ObservationRecord)
-    assert [e.key for e in agent._history[0].entries] == ["input"]
+    assert [e.entry.key for e in agent._history[0].entries] == ["input"]
     assert agent._history[1] == AssistantTextRecord("Hello there")
 
     agent.stop()
@@ -583,7 +584,7 @@ def test_full_bundle_capture_includes_passive_entries(loop, world, sink):
     assert len(agent._history) == 2
     observation = agent._history[0]
     assert isinstance(observation, ObservationRecord)
-    assert {e.key for e in observation.entries} == {"a", "b"}
+    assert {e.entry.key for e in observation.entries} == {"a", "b"}
 
     agent.stop()
 
@@ -1002,7 +1003,7 @@ def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
     assert sorted(triggers) == ["a", "b"]
     observation = agent._history[0]
     assert isinstance(observation, ObservationRecord)
-    assert {e.key for e in observation.entries} == {"a", "b"}
+    assert {e.entry.key for e in observation.entries} == {"a", "b"}
 
     agent.stop()
 
@@ -1076,7 +1077,7 @@ def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
     assert sorted(triggers) == ["ctx", "urgent"]
     observation = agent._history[0]
     assert isinstance(observation, ObservationRecord)
-    assert {e.key for e in observation.entries} == {"ctx", "urgent"}
+    assert {e.entry.key for e in observation.entries} == {"ctx", "urgent"}
 
     agent.stop()
 
@@ -1298,4 +1299,221 @@ def test_noop_renders_as_native_call_with_plain_ack(loop, world, sink):
         if isinstance(m, ToolMessage)
     )
 
+    agent.stop()
+
+
+# --- History renders from captured serializers ------------------------------------------
+
+
+def _step(
+    model: ProgrammableChatModel, world: World, key: str, value: str, n_calls: int
+) -> None:
+    """Trigger a step by updating `key` and wait until the model has been called n_calls times."""
+    world.update(key, value)
+    wait_until(lambda: len(model.calls) >= n_calls)
+
+
+def _rendered_user_text(model: ProgrammableChatModel, call_index: int) -> str:
+    return "".join(
+        human_texts(m) for m in model.calls[call_index] if isinstance(m, HumanMessage)
+    )
+
+
+def test_history_renders_an_unregistered_entry_from_its_captured_serializer(
+    loop, world, sink
+):
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+    )
+    world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    world.register("mood", str, serialize_fn=lambda v, p: [TextPart(f"mood={v}")])
+    agent.start()
+    world.update("mood", "happy")
+    _step(model, world, "speech", "one", 1)
+    assert "mood=happy" in _rendered_user_text(model, 0)
+
+    world.unregister("mood")  # would KeyError at render time before D3
+    _step(model, world, "speech", "two", 2)
+    # observation 1 still renders as it did, from its captured serializer
+    assert "mood=happy" in _rendered_user_text(model, 1)
+    agent.stop()
+
+
+def test_reregistering_a_key_does_not_rewrite_earlier_observations(loop, world, sink):
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+    )
+    world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    world.register("mood", str, serialize_fn=lambda v, p: [TextPart(f"OLD:{v}")])
+    agent.start()
+    world.update("mood", "happy")
+    _step(model, world, "speech", "one", 1)
+    first_render = _rendered_user_text(model, 0)
+
+    world.unregister("mood")
+    world.register("mood", str, serialize_fn=lambda v, p: [TextPart(f"NEW:{v}")])
+    world.update("mood", "calm")
+    _step(model, world, "speech", "two", 2)
+    # The first observation is byte-identical to what step one sent (cache-stable prefix) …
+    assert _rendered_user_text(model, 1).startswith(first_render.split("</entry>")[0])
+    assert "OLD:happy" in _rendered_user_text(model, 1)
+    # … and the new observation uses the new serializer.
+    assert "NEW:calm" in _rendered_user_text(model, 1)
+    assert "NEW:happy" not in _rendered_user_text(model, 1)
+    agent.stop()
+
+
+def test_application_entry_under_agent_command_prefix_uses_its_own_serializer(
+    loop, world, sink
+):
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+    )
+    world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    world.register(
+        "agent:command:mine", str, serialize_fn=lambda v, p: [TextPart(f"MINE:{v}")]
+    )
+    agent.start()
+    world.update("agent:command:mine", "x")
+    _step(model, world, "speech", "one", 1)
+    assert "MINE:x" in _rendered_user_text(model, 0)  # not "(no command)" / not a crash
+    agent.stop()
+
+
+# --- WICA-owned call ids ----------------------------------------------------------------
+
+
+def world_keys_seen(model: ProgrammableChatModel) -> list[str]:
+    text = "".join(
+        human_texts(m)
+        for call in model.calls
+        for m in call
+        if isinstance(m, HumanMessage)
+    )
+    return re.findall(r'<entry key="([^"]*)"', text)
+
+
+def test_invalid_provider_call_id_gets_a_safe_world_key_but_keeps_its_message_id(
+    loop, world, sink
+):
+    def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    bad_id = 'call "quoted"'
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, bad_id)]),
+            text_response("done"),
+        )
+    )
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+    )
+    agent.register_command(add)
+    world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    agent.start()
+    world.update("speech", "go")
+    wait_until(lambda: len(model.calls) >= 2)  # completion re-triggered a second step
+    keys = [k for k in world_keys_seen(model) if k.startswith("agent:command:")]
+    assert keys and all('"' not in k for k in keys)
+    ai = next(m for m in model.calls[1] if isinstance(m, AIMessage))
+    assert ai.tool_calls[0]["id"] == bad_id  # the provider's id is what the model sees
+    agent.stop()
+
+
+def test_colliding_provider_call_ids_get_distinct_entries(loop, world, sink):
+    release = threading.Event()
+
+    async def slow() -> str:
+        """Block until released."""
+        await asyncio.get_running_loop().run_in_executor(None, release.wait)
+        return "done"
+
+    model = ProgrammableChatModel(respond=tool_call_response([("slow", {}, "same")]))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+    )
+    agent.register_command(slow)
+    world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    agent.start()
+    world.update("speech", "one")
+    wait_until(lambda: world.is_registered("agent:command:same"))
+    world.update("speech", "two")  # second step, same provider id, first still running
+    wait_until(lambda: len(model.calls) >= 2)
+    wait_until(lambda: len(agent._command_keys) == 2)
+    assert "agent:command:same" in agent._command_keys
+    release.set()
+    agent.stop()
+
+
+# --- Reserved names and duplicate rejection ---------------------------------------------
+
+
+def _dummy_agent(loop, world, sink, **kwargs) -> Agent:
+    return make_agent(
+        ProgrammableChatModel(respond=text_response("ok")),
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        **kwargs,
+    )
+
+
+def _named(name: str) -> Command:
+    def fn() -> str:
+        """A test command."""
+        return "x"
+
+    return Command(fn, name=name, description="A test command.")
+
+
+@pytest.mark.parametrize("name", ["noop", "cancel_command"])
+def test_register_command_rejects_reserved_names(loop, world, sink, name):
+    agent = _dummy_agent(loop, world, sink)
+    with pytest.raises(ValueError, match="reserved"):
+        agent.register_command(_named(name))
+
+
+def test_register_command_rejects_duplicate_names(loop, world, sink):
+    agent = _dummy_agent(loop, world, sink)
+    agent.register_command(_named("wave"))
+    with pytest.raises(ValueError, match="already registered"):
+        agent.register_command(_named("wave"))
+
+
+@pytest.mark.parametrize("name", ["noop", "cancel_command"])
+def test_output_command_with_reserved_name_is_rejected_at_construction(
+    loop, world, sink, name
+):
+    with pytest.raises(ValueError, match="reserved"):
+        _dummy_agent(loop, world, sink, output_command=_named(name))
+
+
+def test_register_command_rejects_the_output_commands_name(loop, world, sink):
+    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+    with pytest.raises(ValueError, match="output Command"):
+        agent.register_command(_named("say"))
+
+
+def test_restart_keeps_exactly_one_of_each_builtin(loop, world, sink):
+    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+    agent.register_command(_named("wave"))
+    agent.start()
+    agent.stop()
+    agent.start()
+    assert sorted(agent._commands) == ["cancel_command", "noop", "say", "wave"]
     agent.stop()

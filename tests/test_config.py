@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -586,3 +587,39 @@ def test_build_chat_model_huggingface_hub_omits_token_when_no_api_key(
     # env var (mirrors how the init_chat_model providers behave when api_key is unset).
     assert "huggingfacehub_api_token" not in captured["endpoint"]
     assert captured["endpoint"]["provider"] == "auto"
+
+
+# --- Direct-construction invariants and frozen configs ---------------------------
+
+
+def test_direct_construction_with_both_prompt_fields_raises():
+    with pytest.raises(ConfigError):
+        AgentConfig(
+            provider="fake", model="m", system_prompt="a", system_prompt_file="b.md"
+        )
+
+
+def test_direct_construction_with_no_prompt_raises():
+    with pytest.raises(ConfigError):
+        AgentConfig(provider="fake", model="m")
+
+
+def test_direct_construction_with_both_key_fields_raises():
+    with pytest.raises(ConfigError):
+        AgentConfig(
+            provider="fake",
+            model="m",
+            system_prompt="a",
+            api_key="k",
+            api_key_env="E",
+        )
+
+
+def test_configs_are_frozen():
+    cfg = WicaConfig(agent=AgentConfig(provider="fake", model="m", system_prompt="a"))
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.agent.system_prompt = "b"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.agent = cfg.agent  # type: ignore[misc]
+    variant = dataclasses.replace(cfg.agent, system_prompt="b")
+    assert variant.system_prompt == "b" and cfg.agent.system_prompt == "a"
