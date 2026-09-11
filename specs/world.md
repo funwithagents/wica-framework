@@ -85,7 +85,7 @@ The World does **not** own a thread pool of its own. It is handed an asyncio eve
 
 An update has **two reactive outputs**, both scheduled onto the loop and both fire-and-forget (neither blocks `update()`'s caller):
 
-**Per-key listeners (`add_listener`) — loop-aware, sync/async, parallel, isolated.** A listener may be a plain **sync** function or an **async** coroutine function, and the World dispatches each on the shared loop accordingly (detected via `asyncio.iscoroutinefunction`):
+**Per-key listeners (`add_listener`) — loop-aware, sync/async, parallel, isolated.** A listener may be a plain **sync** function or an **async** coroutine function, and the World dispatches each on the shared loop accordingly (detected via `inspect.iscoroutinefunction`):
 
 - an **async** listener → scheduled as a task on the loop (`loop.create_task`), interleaving cooperatively at each `await`.
 - a **sync** listener → offloaded to the loop's default thread-pool executor (`loop.run_in_executor(None, …)`), so a **blocking** sync listener runs on a worker thread and never stalls the loop. Multiple sync listeners land on multiple worker threads — **parallel**.

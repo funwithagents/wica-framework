@@ -14,7 +14,7 @@ tests:
 `Content` is WICA's neutral, provider-agnostic representation of a piece of multimodal material — text, an image, and (later) audio, files, etc. It is the common currency between the layers that produce material and the layer that talks to a model:
 
 - The **World** returns `Content` from entry serialization (`serialize_fn` / `archival_serialize_fn`, `render_entry`, `render_full_prompt` — see [world.md](world.md)).
-- The **Agent** converts `Content` into a concrete provider's message blocks at its I/O boundary — the *only* place a specific model SDK (LangChain) is imported (see [agent.md](agent.md)).
+- The **Agent** converts `Content` into a concrete provider's message blocks at its I/O boundary — the only place `Content` meets LangChain message blocks (the `Command` wrapper and the `on_prompt` Event also touch LangChain types, but never convert `Content` — see [agent.md](agent.md)).
 - **Inputs** use it to present multimodal perception. Commands report their state/results through
   World serialization, although the real-world effect of a Command (speech, movement, display,
   API action) is not itself required to be a `Content` return value.

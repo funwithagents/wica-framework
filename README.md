@@ -20,7 +20,7 @@ The name is the model:
 - **Multimodal in, multimodal out.** Inputs serialize through the neutral [`Content`](specs/content.md) model (`TextPart`, `ImagePart`, more to come), while output modalities are Commands acting on the physical or digital world and reporting their state/results back through the World. A camera Input can be inline while fresh and a light text description afterwards; Commands can speak, move, display, or call external systems without making those effects `Content` return values.
 - **Actions are async and cancellable.** Commands run as `asyncio` tasks on the Agent's event loop, so a long-running action (walk to the kitchen, do a 10-second dance) can be **cancelled** — by the framework, or by the model itself issuing `cancel_command(call_id)`.
 - **Reactive by construction.** Marking an Input `triggers_llm_call=True` is all it takes to wake the Agent when a new perception arrives. Bursts of perceptions are coalesced into a single step.
-- **Provider-agnostic.** Switching between Anthropic, OpenAI, or Hugging Face Hub is a config edit, not a code change. LangChain is used only as a low-level primitive (model + tool schemas), quarantined to the Agent's I/O boundary — everything upstream stays SDK-free.
+- **Provider-agnostic.** Switching between Anthropic, OpenAI, or Hugging Face Hub is a config edit, not a code change. LangChain is used only as a low-level primitive (model + tool schemas) at the model-facing edge (the Agent, the `Command` wrapper, the prompt Event) — the World, `Content`, and Inputs never touch it, and nothing depends on a specific provider SDK.
 
 ## How it works
 
@@ -172,7 +172,7 @@ config = WicaConfig.from_dict(
 
 ### Load a dedicated JSON file
 
-`from_json()` reads the same nested shape from a standalone file:
+`from_json_file()` reads the same nested shape from a standalone file (`from_json()` parses that same shape from a JSON **string**, taking the same optional `base_dir` as `from_dict()`):
 
 ```json
 {
@@ -189,12 +189,12 @@ config = WicaConfig.from_dict(
 ```python
 from wica import WicaConfig
 
-config = WicaConfig.from_json("agent.config.json")
+config = WicaConfig.from_json_file("agent.config.json")
 ```
 
 For this path, a relative `system_prompt_file` is automatically located relative to the JSON file's directory, so a config-plus-prompts folder remains relocatable.
 
-All three forms produce the same type and use the same framework entry point:
+Every form produces the same type and use the same framework entry point:
 
 ```python
 wica = Wica.init(config, output_sink=speak, coalesce_window=0.2)
@@ -202,7 +202,7 @@ wica = Wica.init(config, output_sink=speak, coalesce_window=0.2)
 
 - **API key** — give a literal `api_key`, or an `api_key_env` naming the env var to read at **Agent build** (`Wica.init`), at most one. With neither, the provider's standard env var is used. An env-referenced config carries no secret and is safe to commit; a literal-key config should be git-ignored.
 - **System prompt** — give exactly one of inline `system_prompt` or `system_prompt_file`. Relative file-path handling depends on the construction method as described above.
-- **Strict parsing** — `from_dict()` and `from_json()` reject missing required keys, unknown keys (including typos), invalid field combinations, and wrong types with `ConfigError`.
+- **Strict parsing** — `from_dict()`, `from_json()` and `from_json_file()` reject missing required keys, unknown keys (including typos), invalid field combinations, and wrong types with `ConfigError`.
 
 Creating a config is side-effect-light: the loaders validate references but do not read an API-key environment variable or the prompt file. Those are resolved when `Wica.init()` builds the Agent; that is where a referenced-but-unset `api_key_env` raises `MissingEnvError`, or an unreadable prompt file raises `ConfigError`. Runtime-only wiring (`output_sink`, `output_command`, `coalesce_window`, and an optional event loop) remains in `Wica.init()` because it consists of callables and runtime objects rather than configuration data. WICA does not configure logging; the embedding application owns its handlers and levels.
 

@@ -160,7 +160,7 @@ class DemoState:
     def current_reaction_id(self) -> str | None:
         """The reaction group currently open, or None before the first step. `say` captures this
         before its first `await` so that a later reaction opening mid-stream doesn't adopt its
-        spoken words — see the parent_id argument to open_say_bubble and specs/_fixes.md."""
+        spoken words — see the parent_id argument to open_say_bubble."""
         return self._current_reaction_id
 
     def open_say_bubble(self, first_word: str, parent_id: str | None) -> dict[str, Any]:

@@ -117,7 +117,7 @@ async def say(text: str) -> str:
     # Capture the reaction this utterance belongs to *before* the first await: `say` streams in the
     # background, so a later step (e.g. a fast command completing in the same reaction) can open a
     # newer reaction group while we sleep. Binding the parent now keeps the spoken words in their
-    # originating group rather than adopting the newer one. See specs/_fixes.md.
+    # originating group rather than adopting the newer one.
     reaction_id = state.current_reaction_id()
     # Open the say bubble once (the presenter enqueues it), then grow its content word by word:
     # tick appends this exact dict to the transcript, so mutating its content in place streams the

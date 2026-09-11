@@ -9,6 +9,7 @@ tests:
   - tests-e2e/test_smoke.py
   - tests-e2e/test_wica.py
   - tests-e2e/test_fake_flows.py
+  - tests-e2e/test_example_flow.py
 ---
 
 # Testing
@@ -34,7 +35,7 @@ Tests split into two directories, and the split is structural — a directory bo
 - **`tests/` is the normal dev loop.** Fast, deterministic, no real network, no API key. `pyproject.toml`'s `testpaths = ["tests"]` points the default `uv run pytest` here, so this is what runs on every change and what any contributor or CI can run with zero credentials.
 - **`tests-e2e/` is opt-in.** It is the **full-loop tier** — tests that exercise the Agent's whole step loop. Its *live-provider* tests call a real LLM (network, an API key, non-deterministic output, and it costs money), so the tier is deliberately *not* collected by the default run. Because `testpaths` already excludes it, no pytest marker or `--run-e2e` flag is needed: the physical separation is the whole mechanism. Run it explicitly (`uv run pytest tests-e2e`). One kind of test here is the exception to "network + non-deterministic": the **always-run scripted-fake flows** (below) need no key and never skip.
 
-The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_config.py`, `test_content.py`, `test_fake_model.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_wica.py`, `test_fake_flows.py`) rather than modules. The runnable **example** is tested the same way, one tier per grain: its presenter logic in the fast tier (`tests/test_conversation_demo.py`) and its whole wiring end-to-end in the full-loop tier (`tests-e2e/test_example_flow.py`, an always-run scripted-fake flow — see below). Both are governed by [conversation-demo.md](conversation-demo.md), so they sit outside the `src/wica`-module-mirroring rule; importing the `examples` package under pytest is what `pyproject.toml`'s `pythonpath = ["."]` enables.
+The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_command.py`, `test_config.py`, `test_content.py`, `test_events.py`, `test_fake_model.py`, `test_wica.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_wica.py`, `test_fake_flows.py`) rather than modules. The runnable **example** is tested the same way, one tier per grain: its presenter logic in the fast tier (`tests/test_conversation_demo.py`) and its whole wiring end-to-end in the full-loop tier (`tests-e2e/test_example_flow.py`, an always-run scripted-fake flow — see below). Both are governed by [conversation-demo.md](conversation-demo.md), so they sit outside the `src/wica`-module-mirroring rule; importing the `examples` package under pytest is what `pyproject.toml`'s `pythonpath = ["."]` enables.
 
 ## Always-run scripted-fake flows
 

@@ -327,7 +327,7 @@ class Agent:
         # `model` is an optional override: config builds the model unless a bespoke BaseChatModel is
         # passed in (the raw-model injection seam — a caller supplying a model no config can express,
         # and the seam the Agent unit tests use to drive the loop over a fully-scripted fake). The
-        # system prompt is always config-expressed. See specs/agent.md, specs/wica.md (open q. 3).
+        # system prompt is always config-expressed. See specs/agent.md, specs/wica.md (open q. 2).
         # The optional application-supplied output Command — the user-facing output channel. Built
         # into a Command now (before prompt composition) so its name is known. When set, free text
         # becomes the agent's private reasoning stream and this Command is how it speaks. See

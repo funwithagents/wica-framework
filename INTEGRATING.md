@@ -17,7 +17,7 @@ You talk to **one object — `Wica`** — the single entry point. `Wica.init(con
 - **Wica**: the entry point. `Wica.init(config, *, output_sink=…)` builds and wires everything; `wica.start()` / `wica.stop()` run a restartable shared lifecycle, and `wica.close()` performs terminal teardown. `wica.world` is the World; `wica.register_command(...)` adds Commands; four `Event`s surface what the loop is doing.
 - **W — World** (`wica.world`): you `register()` a key with a type + a `serialize_fn` (value → [`Content`](specs/content.md)), then `update()` it as data changes. Values must be deep-copyable: the World copies on ingress and on outward getters/callbacks so only `update()` can change versioned state. `update()` is callable from any thread, but only **while the system is running** (between `start()` and `stop()`); `register`/`get` work any time.
 - **I — Inputs**: not a class — a *role* a World entry plays when an external producer feeds it. A registered entry marked `triggers_llm_call=True` wakes the Agent when updated. The producer can run on any thread.
-- **C — Commands**: the agent's unit of action. Register a plain function (or an off-the-shelf LangChain tool) with `wica.register_command`; the Agent binds it as a native model tool. Each runs as a cancellable `asyncio` task, tracked as a World entry.
+- **C — Commands**: the agent's unit of action. Register a plain function (or an off-the-shelf LangChain tool wrapped as `Command(tool)`) with `wica.register_command`; the Agent binds it as a native model tool. Each runs as a cancellable `asyncio` task, tracked as a World entry.
 - **A — Agent** (`wica.agent`): the reasoning loop. Built from config, runs on the shared loop, builds the prompt from World state, runs inference, dispatches Commands, and delivers one complete text response per step to your output sink. Rarely touched directly — the everyday paths are surfaced on `Wica`.
 
 ## Public API — what you import
@@ -34,7 +34,7 @@ Everything below is re-exported from the top-level `wica` package ([`src/wica/__
 | `Command` | class | Definition wrapper for a callable or an off-the-shelf LangChain tool; use it to override callable metadata or wrap an existing tool |
 | `CommandIssued` | dataclass | Payload of `wica.on_agent_command` (`name`, `args`) |
 | `Event` | class | The pub/sub primitive the four instrumentation signals use (`subscribe`/`unsubscribe`) |
-| `WicaConfig`, `AgentConfig` | dataclass | Plain configuration objects; construct directly or parse strictly from a dictionary/JSON file |
+| `WicaConfig`, `AgentConfig` | dataclass | Plain configuration objects; construct directly or parse strictly from a dictionary, a JSON string, or a JSON file |
 | `ConfigError`, `MissingEnvError` | exception | Invalid parsed config or a reference that cannot be resolved when the Agent is built |
 | `WorldEntry`, `WorldEntryConfig`, `WorldEntryVersion` | dataclass | Entry introspection (rarely needed directly) |
 
@@ -52,7 +52,8 @@ Signatures you'll actually call:
 ```python
 WicaConfig(agent=AgentConfig(...))
 WicaConfig.from_dict(data, *, base_dir=None)
-WicaConfig.from_json(path)
+WicaConfig.from_json(text, *, base_dir=None)
+WicaConfig.from_json_file(path)
 Wica.init(config: WicaConfig, *, output_sink=None, output_command=None,
           coalesce_window=0.2, loop=None) -> Wica
 wica.world            # the World (below); wica.agent — the Agent (rarely needed)
@@ -156,8 +157,9 @@ wica.close()
 
 `Wica.init()` consumes a `WicaConfig`, regardless of where its values originate. Construct the
 plain dataclasses directly when Python owns the settings, call `WicaConfig.from_dict()` for a
-mapping supplied by a larger application, or call `WicaConfig.from_json()` for a dedicated file.
-The two loaders are strict: missing required keys, unknown keys (typos), invalid combinations, and
+mapping supplied by a larger application, `WicaConfig.from_json()` for a JSON string (same optional
+`base_dir` as `from_dict()`), or `WicaConfig.from_json_file()` for a dedicated file. The loaders are
+strict: missing required keys, unknown keys (typos), invalid combinations, and
 wrong types fail with `ConfigError`.
 
 For a larger application configuration, extract the WICA-shaped subsection:
@@ -197,7 +199,7 @@ The dictionary/JSON representation has this shape:
 | `agent.model_kwargs` | no | Forwarded to the provider (e.g. `temperature`) |
 | `agent.hf_provider` | no | Only for `huggingface-hub`: the Hub backend (`auto`/`fireworks-ai`/…). Default `auto` |
 
-For `from_json()`, a relative `system_prompt_file` is located relative to the JSON file. Neither
+For `from_json_file()`, a relative `system_prompt_file` is located relative to the JSON file. No
 loader reads the prompt file or resolves `api_key_env`; those operations happen when `Wica.init()`
 builds the Agent. A caller that degrades on `MissingEnvError` or an unreadable prompt therefore
 wraps `Wica.init()`, not config creation. Code-only wiring (`output_sink`, `output_command`,

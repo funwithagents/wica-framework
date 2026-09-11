@@ -194,7 +194,7 @@ def test_open_say_bubble_streams_content_and_changes_the_signature():
 def test_open_say_bubble_honors_the_captured_reaction_not_the_current_one():
     """`say` captures its reaction before streaming; a newer reaction opening mid-stream must not
     adopt its words. open_say_bubble binds the parent passed in, not the current reaction — the fix
-    for the streaming-say nesting bug (specs/_fixes.md)."""
+    for the streaming-say nesting bug."""
     state = DemoState()
     state.on_prompt([HumanMessage(content="first")])  # reaction-1
     captured = state.current_reaction_id()
