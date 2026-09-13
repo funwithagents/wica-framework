@@ -32,7 +32,7 @@ Everything below is re-exported from the top-level `wica` package ([`src/wica/__
 | `Content`, `ContentPart` | type alias | What a `serialize_fn` returns |
 | `Agent` | class | The reasoning loop; usually owned by `Wica`, but constructible directly (see the direct seam below) |
 | `Command` | class | Definition wrapper for a callable or an off-the-shelf LangChain tool; use it to override callable metadata or wrap an existing tool |
-| `CommandIssued` | dataclass | Payload of `wica.on_agent_command` (`name`, `args`) |
+| `CommandIssued` | dataclass | Payload of `wica.on_agent_command` (`name`, `args`, `call_id` — the `agent:command:<call_id>` entry's key suffix; the Event fires once that entry is registered, so a handler may `add_listener` on it) |
 | `Event` | class | The pub/sub primitive the four instrumentation signals use (`subscribe`/`unsubscribe`) |
 | `WicaConfig`, `AgentConfig` | dataclass | Plain configuration objects; construct directly or parse strictly from a dictionary, a JSON string, or a JSON file |
 | `ConfigError`, `MissingEnvError` | exception | Invalid parsed config or a reference that cannot be resolved when the Agent is built |

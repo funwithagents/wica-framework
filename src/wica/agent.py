@@ -5,9 +5,10 @@ import base64
 import copy
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal
 
 from langchain.chat_models import init_chat_model
@@ -55,8 +56,13 @@ class CommandExecution:
 # ("Instrumentation") and specs/wica.md.
 @dataclass(frozen=True)
 class CommandIssued:
+    # call_id is the WICA-owned id of this issuance: the agent:command:<call_id> World-entry key
+    # suffix and the cancel_command target. For a dispatched Command the Event carrying this
+    # payload fires once that entry is registered (before its running value is written), so a
+    # subscriber can add_listener on it right away; noop has a call_id but no entry.
     name: str
     args: dict[str, Any]
+    call_id: str
 
 
 # History records — Observation captures the full include_in_prompt bundle at trigger
@@ -441,6 +447,19 @@ class Agent:
         self._trigger_sub: Callable[[WorldEntry], None] | None = None
         self._started = False
 
+    @property
+    def commands(self) -> Mapping[str, Command]:
+        """Read-only view of the Commands the model is currently bound to, by name: application
+        Commands plus, once start() has attached them, ``noop``/``cancel_command`` and the output
+        Command. A consumer wanting only application actions filters those out by name (see
+        ``output_command_name``). Live view, not a snapshot. See specs/agent.md ("Commands")."""
+        return MappingProxyType(self._commands)
+
+    @property
+    def output_command_name(self) -> str | None:
+        """The output Command's name, or None when no output Command is configured."""
+        return self._output_command_name
+
     def register_command(self, fn: Callable[..., Any] | Command) -> None:
         """Register a Command. Takes one argument: a plain callable (auto-wrapped — name from
         ``__name__``, description from the docstring) or a ``Command`` (used directly). To override
@@ -740,7 +759,7 @@ class Agent:
                 # model issued, so on_command fires for it like every other (a consumer that wants
                 # only real actions filters it out by name). See specs/commands.md, specs/agent.md.
                 _logger.debug("noop issued (call_id=%s) — no action taken", call_id)
-                self.on_command.emit(CommandIssued(_NOOP_COMMAND_NAME, {}))
+                self.on_command.emit(CommandIssued(_NOOP_COMMAND_NAME, {}, call_id))
                 self._history.append(NoReactionRecord(call_id, tool_call_id))
                 continue
             args = copy.deepcopy(call["args"])
@@ -765,9 +784,6 @@ class Agent:
         return uuid.uuid4().hex
 
     def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
-        # A subscriber may annotate or otherwise mutate what it receives without changing the
-        # arguments stored in history, shown in the World, or passed to the Command itself.
-        self.on_command.emit(CommandIssued(name, copy.deepcopy(args)))
         _logger.debug(
             "dispatching command %s(%s) call_id=%s", name, _format_args(args), call_id
         )
@@ -790,6 +806,11 @@ class Agent:
             triggers_llm_call=triggers_llm_call,
             trigger_condition_fn=lambda old, new: new is not None and new.is_terminal(),
         )
+        # Emit once the entry exists and before its first value lands, so a subscriber can
+        # add_listener(key) here and see running -> terminal. A subscriber may annotate or
+        # otherwise mutate what it receives without changing the arguments stored in history,
+        # shown in the World, or passed to the Command itself. See specs/agent.md.
+        self.on_command.emit(CommandIssued(name, copy.deepcopy(args), call_id))
         self._world.update(key, CommandExecution(name=name, args=args, state="running"))
         task = self._track_task(self._run_command(key, call_id, name, args))
         self._running_tasks[key] = task

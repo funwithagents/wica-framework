@@ -977,3 +977,39 @@ def test_listener_dispatch_preserves_version_order_under_concurrent_updates(worl
 
     assert done.wait(timeout=WAIT_TIMEOUT * 5)
     assert seen == sorted(seen), "a later version was delivered before an earlier one"
+
+
+# --- keys / get_config (schema enumeration) ------------------------------
+
+
+def test_keys_lists_registered_keys_in_registration_order(world: World):
+    assert world.keys() == []
+    world.register("b", str, serialize_fn=identity_serialize)
+    world.register("a", str, serialize_fn=identity_serialize, include_in_prompt=False)
+    assert world.keys() == [
+        "b",
+        "a",
+    ]  # not filtered to include_in_prompt, unlike prompt reads
+    world.unregister("b")
+    assert world.keys() == ["a"]
+
+
+def test_get_config_reports_the_declared_schema_and_is_a_copy(world: World):
+    world.register(
+        "speech",
+        str,
+        serialize_fn=identity_serialize,
+        triggers_llm_call=True,
+        ttl=timedelta(seconds=5),
+    )
+    config = world.get_config("speech")
+    assert config.type is str
+    assert config.triggers_llm_call and config.include_in_prompt
+    assert config.ttl == timedelta(seconds=5)
+    assert config.serialize_fn is identity_serialize
+    # Reassigning on the copy never reaches the World's own registration.
+    config.serialize_fn = lambda v, p: [TextPart("tampered")]
+    world.update("speech", "hi")
+    assert "tampered" not in flatten(world.render_entry(world.get_entry("speech")))
+    with pytest.raises(KeyError):
+        world.get_config("missing")

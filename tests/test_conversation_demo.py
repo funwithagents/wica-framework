@@ -134,7 +134,7 @@ def test_on_prompt_records_prompt_and_opens_a_reaction_group():
 def test_on_command_nests_actions_under_the_current_reaction():
     state = DemoState()
     state.on_prompt([HumanMessage(content="hi")])  # opens reaction-1
-    state.on_command(CommandIssued(name="dance", args={}))
+    state.on_command(CommandIssued(name="dance", args={}, call_id="c1"))
     convo = state.snapshot().conversation
 
     action = [m for m in convo if m.get("metadata", {}).get("title") == "🦾 dance"]
@@ -147,9 +147,9 @@ def test_on_command_skips_say_and_marks_noop():
     state = DemoState()
     state.on_prompt([HumanMessage(content="hi")])
     state.on_command(
-        CommandIssued(name="say", args={"text": "hi"})
+        CommandIssued(name="say", args={"text": "hi"}, call_id="c1")
     )  # the voice, not a 🦾
-    state.on_command(CommandIssued(name="noop", args={}))
+    state.on_command(CommandIssued(name="noop", args={}, call_id="c2"))
     convo_titles = titles(state.snapshot().conversation)
 
     assert "🗣️ say" not in convo_titles  # say is rendered by say(), not on_command

@@ -710,7 +710,7 @@ def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, s
     world.update("input", "add them")
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert commands == [CommandIssued("add", {"a": 1, "b": 2})]
+    assert commands == [CommandIssued("add", {"a": 1, "b": 2}, "call1")]
 
     agent.stop()
 
@@ -1255,7 +1255,10 @@ def test_noop_takes_no_action_and_does_not_retrigger(loop, world, sink):
         e.key.startswith("agent:command:") for e in world.get_prompt_entries()
     )
     assert sink.texts == []
-    assert issued == [CommandIssued("noop", {})]
+    assert issued == [CommandIssued("noop", {}, "n1")]
+    assert not world.is_registered(
+        "agent:command:n1"
+    )  # a call_id, but no entry behind it
     assert len(model.calls) == 1
     # History records the declined reaction as a dedicated NoReactionRecord.
     assert any(isinstance(r, NoReactionRecord) for r in agent._history)
@@ -1738,4 +1741,79 @@ def test_empty_model_response_does_not_split_the_next_prompt(loop, world, sink):
     assert _no_consecutive_human_messages(model.calls[1])
     assert len([m for m in model.calls[1] if isinstance(m, HumanMessage)]) == 1
 
+    agent.stop()
+
+
+def test_commands_mapping_lists_the_bound_set_read_only(loop, world, sink):
+    async def speak(text: str) -> str:
+        """Speak."""
+        return "ok"
+
+    async def add(a: int, b: int) -> int:
+        """Add."""
+        return a + b
+
+    agent = make_agent(
+        ProgrammableChatModel(respond=text_response("x")),
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        output_command=speak,
+    )
+    agent.register_command(add)
+    assert agent.output_command_name == "speak"
+    assert list(agent.commands) == ["add"]  # builtins attach at start()
+    agent.start()
+    assert set(agent.commands) == {"add", "speak", "noop", "cancel_command"}
+    assert agent.commands["add"].tool.description == "Add."
+    with pytest.raises(TypeError):
+        agent.commands["ghost"] = agent.commands["add"]  # type: ignore[index]
+    agent.stop()
+
+
+def test_on_command_fires_once_the_execution_entry_exists_and_carries_its_call_id(
+    loop, world, sink
+):
+    """A subscriber can follow a Command it did not know the id of: it attaches a listener on
+    agent:command:<call_id> from inside the on_command handler and sees running -> complete."""
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
+            text_response("done"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    registered_at_emit: list[bool] = []
+    states: list[str] = []
+    terminal = threading.Event()
+
+    def follow(command: CommandIssued) -> None:
+        key = f"agent:command:{command.call_id}"
+        registered_at_emit.append(world.is_registered(key))
+
+        async def on_update(
+            entry,
+        ) -> None:  # async: delivered in version order on the loop
+            states.append(entry.current.value.state)
+            if entry.current.value.is_terminal():
+                terminal.set()
+
+        world.add_listener(key, on_update)
+
+    agent.on_command.subscribe(follow)
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        await asyncio.sleep(0.05)
+        return a + b
+
+    agent.register_command(add)
+    agent.start()
+    world.update("input", "add them")
+    assert terminal.wait(timeout=WAIT_TIMEOUT)
+    assert registered_at_emit == [True]
+    assert states == ["running", "complete"]
     agent.stop()

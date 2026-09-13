@@ -239,6 +239,23 @@ class World:
         with self._lock:
             return key in self._configs
 
+    def keys(self) -> list[str]:
+        """Every registered key, in registration order — the schema enumeration an inspecting
+        tool needs (get_prompt_entries() is filtered to include_in_prompt). Unguarded read; a
+        snapshot list taken under the lock. See specs/world.md."""
+        with self._lock:
+            return list(self._configs)
+
+    def get_config(self, key: str) -> WorldEntryConfig:
+        """A copy of the key's registration config (declared type, serializers, flags, TTL);
+        KeyError if unregistered. The per-key counterpart of get_prompt_snapshot()'s pairs: a
+        shallow dataclasses.replace, so the callables are the registered ones but reassigning a
+        field on the copy never touches the World. See specs/world.md."""
+        with self._lock:
+            if key not in self._configs:
+                raise KeyError(key)
+            return dataclasses.replace(self._configs[key])
+
     def update(self, key: str, value: Any) -> None:
         self._update(key, value, ttl_reset=False)
 

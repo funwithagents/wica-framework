@@ -134,7 +134,7 @@ def test_input_drives_world_and_agent_triggers_and_a_command_event(wica_factory)
     assert "speech" in world_triggers
     assert "speech" in agent_triggers
     # The model issued the wave Command; on_agent_command carried a CommandIssued at dispatch.
-    assert CommandIssued("wave", {}) in commands
+    assert [(c.name, c.args) for c in commands] == [("wave", {})]
 
 
 def test_multiple_subscribers_fire_and_a_raising_one_does_not_block_others(
