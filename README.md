@@ -241,17 +241,27 @@ drop into your own `gr.Blocks`:
 ```python
 from wica.contrib.gradio import PromptLog, TranscriptLog, conversation_panel, prompt_panel, world_state_panel
 
-transcript = TranscriptLog(wica, display_entry)   # subscribes to the Wica's Events
+wica = Wica.init(config)                          # 1. build the Wica, register World entries
+transcript = TranscriptLog(wica, display_entry)   # 2. presenters subscribe to the Wica's Events…
 prompts = PromptLog(wica, display_entry)
-wica.set_output_sink(transcript.output_sink)
-with gr.Blocks() as page:
+with gr.Blocks() as page:                         #    …and panels go inside your Blocks
     conversation_panel(transcript)
     world_state_panel(wica.world)
     prompt_panel(prompts)
+wica.set_output_sink(transcript.output_sink)      # 3. wire: sink, output Command, Commands
+wica.set_output_command(say)
+wica.register_command(dance)
+wica.start()                                      # 4. start, then serve; close when done
+try:
+    page.launch()
+finally:
+    wica.close()
 ```
 
 `display_entry` is the one optional hook where your app says how its World entries (and Command
-executions) should read to a person. See [specs/gradio-contrib.md](specs/gradio-contrib.md).
+executions) should read to a person. The full recipe, with the ordering rules behind each step, is
+[INTEGRATING.md](INTEGRATING.md) ("4. Add a Gradio UI"); the design is in
+[specs/gradio-contrib.md](specs/gradio-contrib.md).
 
 ## Project layout
 

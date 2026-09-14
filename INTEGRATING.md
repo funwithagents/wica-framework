@@ -33,6 +33,7 @@ Everything below is re-exported from the top-level `wica` package ([`src/wica/__
 | `Agent` | class | The reasoning loop; usually owned by `Wica`, but constructible directly (see the direct seam below) |
 | `Command` | class | Definition wrapper for a callable or an off-the-shelf LangChain tool; use it to override callable metadata or wrap an existing tool |
 | `CommandIssued` | dataclass | Payload of `wica.on_agent_command` (`name`, `args`, `call_id` — the `agent:command:<call_id>` entry's key suffix; the Event fires once that entry is registered, so a handler may `add_listener` on it) |
+| `CommandExecution` | dataclass | Value of an `agent:command:<call_id>` World entry (`name`, `args`, `state`, `result`, `error`); `isinstance` against it to recognize a Command execution when reading the World or writing a `display_entry` hook (recipe 4) |
 | `Event` | class | The pub/sub primitive the four instrumentation signals use (`subscribe`/`unsubscribe`) |
 | `WicaConfig`, `AgentConfig` | dataclass | Plain configuration objects; construct directly or parse strictly from a dictionary, a JSON string, or a JSON file |
 | `ConfigError`, `MissingEnvError` | exception | Invalid parsed config or a reference that cannot be resolved when the Agent is built |
@@ -155,6 +156,109 @@ wica.close()
 
 `wica.world` / `wica.agent` are **borrowed references** — valid for the life of the `Wica`. While stopped, reactive mutation through `world.update()` raises `RuntimeError("World is not running")`; schema operations and reads remain available, and `start()` resumes the same objects with their registrations, values, subscriptions, Commands, and Agent history intact. `close()` is terminal. To reset state rather than resume it, close this Wica and initialize a new one.
 
+### 4. Add a Gradio UI (the three observability panels)
+
+Install `wica[gradio]` and import from `wica.contrib.gradio` (never re-exported from `wica`). The
+package ships three panels — the live World-state table, the prompt history, and the conversation
+transcript — each as a **presenter** built over your `Wica` plus a **panel** function you call
+inside your own `gr.Blocks`. The whole flow is **build → UI → wire → start → launch → close**:
+
+```python
+import gradio as gr
+
+from wica import AgentConfig, CommandExecution, TextPart, Wica, WicaConfig, WorldEntry
+from wica.contrib.gradio import (
+    EntryDisplay, PromptLog, TranscriptLog,
+    conversation_panel, prompt_panel, world_state_panel,
+)
+
+# 1. Build the Wica and register your World entries.
+config = WicaConfig(agent=AgentConfig(
+    provider="anthropic", model="claude-sonnet-5",
+    api_key_env="WICA_ANTHROPIC_API_KEY", system_prompt="You are a friendly social robot.",
+))
+wica = Wica.init(config)
+wica.world.register(
+    "speech_input", str,
+    serialize_fn=lambda value, prev: [TextPart(f'The person said: "{value}"')],
+    triggers_llm_call=True,
+)
+
+# 2. Build the presenters over the Wica (they subscribe to its Events in their constructor),
+#    then the page. One optional hook says how your entries read to a person; return None for
+#    the generic default (`⚡ key = value`, `🦾 name(args)` for a Command execution).
+def display_entry(entry: WorldEntry) -> EntryDisplay | None:
+    value = entry.current.value
+    if entry.key == "speech_input":
+        return EntryDisplay(f'🗣️ "{value}"')
+    if isinstance(value, CommandExecution) and value.name == "say":
+        return EntryDisplay("🗣️ say", str(value.args.get("text", "")))
+    return None
+
+transcript = TranscriptLog(wica, display_entry)   # pass the same hook to both presenters
+prompts = PromptLog(wica, display_entry)          # so transcript and prompt labels agree
+
+with gr.Blocks() as page:
+    with gr.Row():
+        with gr.Column():
+            conversation_panel(transcript)          # panels go inside the Blocks context
+            msg = gr.Textbox(placeholder="Say something…", show_label=False)
+        with gr.Column():
+            world_state_panel(wica.world)
+            prompt_panel(prompts)
+    # Input widgets only touch the World; the panels refresh on their own timers.
+    msg.submit(lambda text: wica.world.update("speech_input", text) or "", inputs=msg, outputs=msg)
+
+# 3. Wire: the Commands (the voice as the output Command), then hand the transcript's sink back.
+async def say(text: str) -> str:
+    """Speak out loud to the person in front of you."""
+    ...                                            # your TTS / robot voice
+    return "Said it."
+
+async def dance() -> str:
+    """Perform a fun little dance."""
+    ...
+    return "Finished the dance."
+
+wica.set_output_sink(transcript.output_sink)     # the model's free text → the 💭 item
+wica.set_output_command(say)                     # the user-facing channel → the 🗣️ item
+wica.register_command(dance)
+
+# 4. Start the system, then serve the page; tear down when the server returns.
+wica.start()
+try:
+    page.launch()
+finally:
+    wica.close()
+```
+
+Panel signatures (each owns the `gr.Timer` that keeps it live and returns its component(s)):
+
+```python
+world_state_panel(world, *, refresh_s=0.2) -> gr.HTML
+prompt_panel(prompts, *, refresh_s=0.2, lines=16) -> tuple[gr.Dropdown, gr.Textbox]
+conversation_panel(transcript, *, refresh_s=0.2, height=420) -> gr.Chatbot
+TranscriptLog(wica, display_entry=None); PromptLog(wica, display_entry=None)   # wica=None → renders empty, subscribes nothing
+```
+
+**The ordering rules behind that sequence** — what is fixed and what is free:
+
+- **Presenters after `Wica.init`.** `TranscriptLog`/`PromptLog` subscribe to the Wica's Events in their constructor, so the Wica must exist first. They are plain objects: build them before or outside the `gr.Blocks` context. Panels, by contrast, create Gradio components and **must** be called inside a `gr.Blocks` context.
+- **Wire before `start()`.** `set_output_command` recomposes the system prompt to name the Command; setting it after the first step rebuilds the message and drops the cached prefix. `set_output_sink` and `register_command` also belong before `start()`. The order *among* those three calls does not matter, nor does the order between registering World entries and building presenters.
+- **The sink's meaning depends on the output Command.** With an output Command set (as above), the free text the transcript's sink receives is the model's **private reasoning**, shown as the `💭 output sink` item, and the `🗣️` Command item is what the person hears. Without an output Command, that same sink text *is* the utterance. The transcript renders both cases identically; only the reading changes.
+- **Input widgets update the World, which works only while running.** `world.update()` raises while stopped, so start the Wica before `launch()`; a callback that fires after `stop()` fails the same way.
+- **Tear down from the Gradio thread.** `launch()` blocks until the server exits; call `wica.close()` after it returns. Never call `stop()`/`close()` from a sink, a Command, or an Event subscriber — those run on the Wica's loop thread and the call raises `RuntimeError`.
+- **One hook for both presenters.** `display_entry` is optional, but pass the same one to `TranscriptLog` and `PromptLog` so the transcript's input items and the prompt history's labels read alike.
+
+The layout is yours: the panels are building blocks, not a page. Nor is the inline shape above
+the required one — a larger app can let its layout function build the presenters next to their
+panels and return them (the presenter is the UI's read model, so it is natural UI state), then
+wire the returned transcript's sink in its main. The shipped conversation demo does exactly that:
+[`app_ui.py`](examples/conversation_demo/app_ui.py) owns the presenters and hands them back on a
+small handle, and [`app.py`](examples/conversation_demo/app.py) wires and starts — the same
+sequence with a Speaking panel, sensor buttons and an explore-only fallback when no key is set.
+[specs/gradio-contrib.md](specs/gradio-contrib.md) carries the design rationale.
+
 ## Configuration
 
 `Wica.init()` consumes a `WicaConfig`, regardless of where its values originate. Construct the
@@ -273,7 +377,7 @@ Route to the spec that governs what you're touching (each carries the full ratio
 | Understand the reasoning loop, history rendering, coalescing, instrumentation Events | [specs/agent.md](specs/agent.md) |
 | Author config / add a provider | [specs/config.md](specs/config.md) |
 | Write deterministic e2e tests with the scripted `fake` provider | [specs/fake-provider.md](specs/fake-provider.md) |
-| Show the World, the prompts and the transcript in a Gradio app (`wica[gradio]`) | [specs/gradio-contrib.md](specs/gradio-contrib.md) |
+| Show the World, the prompts and the transcript in a Gradio app (`wica[gradio]`) | Recipe 4 above, then [specs/gradio-contrib.md](specs/gradio-contrib.md) for the design |
 | See it all wired in a runnable app | [specs/conversation-demo.md](specs/conversation-demo.md) → [`examples/conversation_demo/app.py`](examples/conversation_demo/app.py) |
 
 Spec index with statuses: [specs/_index.md](specs/_index.md).
