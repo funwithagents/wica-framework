@@ -13,7 +13,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | `src/wica/` | The library itself — one module per core concept (see below) |
 | `specs/` | Pre-implementation design docs, one per concept, each with a `**Status:**` — indexed by [specs/_index.md](specs/_index.md) |
 | `plans/` | Implementation plans turning settled specs into buildable steps — indexed by [plans/_index.md](plans/_index.md) |
-| `tests/` | Fast, deterministic, no-network tests; mirrors the `src/wica/` module structure |
+| `tests/` | Fast, deterministic, no-network tests; mirrors the `src/wica/` module structure (`tests/contrib/` for the contrib; shared fixtures in `conftest.py`, plain helpers in `support.py`) |
 | `tests-e2e/` | Opt-in full-loop tests: deterministic scripted-fake flows plus live provider cases (not collected by default `pytest`) |
 | `examples/` | Runnable example apps demonstrating the framework — e.g. the Gradio conversation demo ([specs/conversation-demo.md](specs/conversation-demo.md)); deps live in the `demo` uv group, not core |
 
@@ -29,9 +29,10 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: built from `AgentConfig` on the injected loop, LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink + optional output Command, auto-registered `cancel_command`/`noop`, system-prompt runtime primer, `on_trigger`/`on_prompt`/`on_command` Events | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
 | [wica.py](src/wica/wica.py) | The `Wica` facade — single entry point owning the shared loop + a `World`+`Agent` pair, restartable `init`/`start`/`stop` lifecycle plus terminal `close`, `register_command`, `set_output_sink`/`set_output_command` (output wiring after `init`), and four surfaced instrumentation `Event`s | [wica.md](specs/wica.md) |
 | [fake_model.py](src/wica/fake_model.py) | Deterministic, network-free `FakeChatModel` for tests: a scripted `provider: "fake"` model driving the loop over canned responses; test tooling, not re-exported into the runtime `wica` namespace | [fake-provider.md](specs/fake-provider.md) |
+| `contrib/` ([__init__.py](src/wica/contrib/__init__.py)) → `contrib/gradio/` ([__init__.py](src/wica/contrib/gradio/__init__.py)) — [display.py](src/wica/contrib/gradio/display.py), [world_state.py](src/wica/contrib/gradio/world_state.py), [prompts.py](src/wica/contrib/gradio/prompts.py), [transcript.py](src/wica/contrib/gradio/transcript.py) | Opt-in Gradio observability components behind the `wica[gradio]` extra (never re-exported from `wica`; reached as `wica.contrib.gradio`): the shared `display_entry` hook + generic default, the live World-state table (`world_state_panel`), the prompt history (`PromptLog` + `prompt_panel`), the conversation transcript (`TranscriptLog` + `conversation_panel`); each surface = a presenter built over a `Wica` + a self-refreshing panel | [gradio-contrib.md](specs/gradio-contrib.md) |
 | [__init__.py](src/wica/__init__.py) | Public API surface — re-exports the names above | — |
 
-**Keep this map current:** when you add, rename, or remove a top-level `src/wica/` module or a root directory, update the map in the same change — same discipline as keeping spec/plan statuses honest (below). A test (`tests/test_project_map.py`) enforces that every `src/wica/*.py` module appears here and vice-versa — and that the spec frontmatter (see below) stays honest too.
+**Keep this map current:** when you add, rename, or remove a `src/wica/` module (top-level or in a subpackage such as `contrib/`) or a root directory, update the map in the same change — same discipline as keeping spec/plan statuses honest (below). A test (`tests/test_project_map.py`) enforces that every `src/wica/**/*.py` module appears here and vice-versa — and that the spec frontmatter (see below) stays honest too.
 
 ## Keeping statuses current
 
@@ -66,6 +67,7 @@ The mapping is **many-to-many**: a file can be governed by several specs — `ag
 
 ## Testing
 
+- The fast tier imports Gradio (the `dev` group provides it) because `tests/contrib/` and the demo tests exercise `wica.contrib.gradio`'s presenters — but no test builds a `gr.Blocks`, a timer or a browser.
 - Write functional tests: exercise what a feature/function actually does (inputs → outputs, state changes, side effects), not just that it runs or matches its signature.
 - Avoid trivial/tautological tests — e.g. asserting a constant, asserting an object is not `None`, asserting a mock was called. If a test would pass for a broken implementation, it's not worth writing.
 - Prefer driving the public API the way a real caller would over asserting on internals.

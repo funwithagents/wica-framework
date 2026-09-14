@@ -231,11 +231,33 @@ uv run --group demo python -m examples.conversation_demo.app
 Without a key set it still opens and is explorable — it just can't run the robot's reasoning.
 See [specs/conversation-demo.md](specs/conversation-demo.md).
 
+### Gradio panels for your own app
+
+The demo's three framework-facing surfaces — the live World-state table, the prompt history and the
+conversation transcript — ship in the package as reusable Gradio components behind the `wica[gradio]`
+extra (core `wica` never imports Gradio). Each is a presenter built over your `Wica` plus a panel you
+drop into your own `gr.Blocks`:
+
+```python
+from wica.contrib.gradio import PromptLog, TranscriptLog, conversation_panel, prompt_panel, world_state_panel
+
+transcript = TranscriptLog(wica, display_entry)   # subscribes to the Wica's Events
+prompts = PromptLog(wica, display_entry)
+wica.set_output_sink(transcript.output_sink)
+with gr.Blocks() as page:
+    conversation_panel(transcript)
+    world_state_panel(wica.world)
+    prompt_panel(prompts)
+```
+
+`display_entry` is the one optional hook where your app says how its World entries (and Command
+executions) should read to a person. See [specs/gradio-contrib.md](specs/gradio-contrib.md).
+
 ## Project layout
 
 | Path | What's there |
 |---|---|
-| `src/wica/` | The library — facade, World, Content, config, Agent/Commands, Events, and the scripted fake model; see the complete module map in [`AGENTS.md`](AGENTS.md) |
+| `src/wica/` | The library — facade, World, Content, config, Agent/Commands, Events, the scripted fake model, and the opt-in `contrib/gradio` panels; see the complete module map in [`AGENTS.md`](AGENTS.md) |
 | `specs/` | Pre-implementation design docs, one per concept — start at [specs/_index.md](specs/_index.md) |
 | `plans/` | Implementation plans turning specs into buildable steps — [plans/_index.md](plans/_index.md) |
 | `tests/` | Fast, deterministic, no-network tests (the default `pytest` run) |

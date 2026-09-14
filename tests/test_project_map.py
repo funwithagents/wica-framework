@@ -8,11 +8,18 @@ _AGENTS_MD = _REPO_ROOT / "AGENTS.md"
 _WICA_PKG = _REPO_ROOT / "src" / "wica"
 _SPECS_DIR = _REPO_ROOT / "specs"
 
-# Matches link targets like `src/wica/content.py` anywhere in AGENTS.md.
-_MODULE_LINK = re.compile(r"src/wica/([A-Za-z_][A-Za-z0-9_]*\.py)")
+# Matches link targets like `src/wica/content.py` or `src/wica/contrib/gradio/prompts.py`
+# anywhere in AGENTS.md; the capture is the path relative to `src/wica/`.
+_MODULE_LINK = re.compile(
+    r"src/wica/((?:[A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*\.py)"
+)
 
 # Package glue that isn't a spec'd concept, so it needs no owning spec.
-_NON_CONCEPT_MODULES = {"__init__.py"}
+_NON_CONCEPT_MODULES = {
+    "__init__.py",
+    "contrib/__init__.py",
+    "contrib/gradio/__init__.py",
+}
 
 
 def _mapped_modules() -> set[str]:
@@ -21,7 +28,9 @@ def _mapped_modules() -> set[str]:
 
 
 def _actual_modules() -> set[str]:
-    return {path.name for path in _WICA_PKG.glob("*.py")}
+    """Every module of the package, top-level and in subpackages (e.g. the contrib), as paths
+    relative to `src/wica/` — the same form the AGENTS.md links and spec frontmatter use."""
+    return {path.relative_to(_WICA_PKG).as_posix() for path in _WICA_PKG.rglob("*.py")}
 
 
 def _concept_modules() -> set[str]:
@@ -125,7 +134,7 @@ def test_every_concept_module_is_governed_by_a_spec():
     for spec in _spec_files():
         for rel in _parse_frontmatter(spec).get("code", []):
             if rel.startswith("src/wica/"):
-                governed.add(Path(rel).name)
+                governed.add(rel.removeprefix("src/wica/"))
 
     ungoverned = _concept_modules() - governed
     assert not ungoverned, (

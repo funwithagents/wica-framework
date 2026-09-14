@@ -3,13 +3,14 @@
 Like tests-e2e/test_fake_flows.py these are network-free and key-less, so they **always run** — but
 here the system under test is the *example itself*: they stand up the real demo through the same
 Gradio-free steps `main()` uses — `build_system(config)`, then `wire(wica, transcript, speaking)`,
-then `start()` — playing the UI's role themselves (a `TranscriptLog` and a `SpeakingSlot` of their
-own, exactly what `build_ui` would create), against a scripted fake config, and assert the
-example's actual World entries, Commands, and presenters turn inputs into the expected transcript
-(with live Command state), Speaking panel state and World state. They import no Gradio, so they
-need only the core deps.
+then `start()` — playing the UI's role themselves (a `TranscriptLog`, a `PromptLog` and a
+`SpeakingSlot` of their own, exactly what `build_ui` would create), against a scripted fake config,
+and assert the example's actual World entries, Commands, and presenters turn inputs into the
+expected transcript (with live Command state), prompt history, Speaking panel state and World
+state. They build no Gradio page, but the presenters come from `wica.contrib.gradio`, so the
+`dev` group's Gradio is needed to import them.
 
-See specs/conversation-demo.md and specs/fake-provider.md.
+See specs/conversation-demo.md, specs/gradio-contrib.md and specs/fake-provider.md.
 """
 
 from __future__ import annotations
@@ -24,9 +25,9 @@ import pytest
 from examples.conversation_demo import app
 from examples.conversation_demo.app import build_system, display_entry, wire
 from examples.conversation_demo.speaking import SpeakingSlot
-from examples.conversation_demo.transcript import TranscriptLog
 from wica import Wica, World
 from wica.config import WicaConfig
+from wica.contrib.gradio import PromptLog, TranscriptLog
 
 WAIT_TIMEOUT = 5.0
 
@@ -79,11 +80,12 @@ def fast_say(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @dataclass(frozen=True)
 class Stack:
-    """The stood-up demo: the running Wica, its World, and the two presenters the test owns."""
+    """The stood-up demo: the running Wica, its World, and the presenters the test owns."""
 
     wica: Wica
     world: World
     transcript: TranscriptLog
+    prompts: PromptLog
     speaking: SpeakingSlot
 
 
@@ -92,10 +94,17 @@ def stand_up(config: WicaConfig) -> Stack:
     wica, world, config_error = build_system(config)
     assert wica is not None and config_error is None  # fake provider needs no key
     transcript = TranscriptLog(wica, display_entry)
+    prompts = PromptLog(wica, display_entry)
     speaking = SpeakingSlot()
     wire(wica, transcript, speaking)
     wica.start()
-    return Stack(wica=wica, world=world, transcript=transcript, speaking=speaking)
+    return Stack(
+        wica=wica,
+        world=world,
+        transcript=transcript,
+        prompts=prompts,
+        speaking=speaking,
+    )
 
 
 def test_speech_input_drives_say_action_and_world_state(fast_say: None):
@@ -166,13 +175,21 @@ def test_speech_input_drives_say_action_and_world_state(fast_say: None):
         assert speaking.text == "hi there"
         assert (speaking.spoken, speaking.state) == (2, "complete")
 
-        # The prompt panel captured this step's prompt, labelled by the speech trigger.
-        assert snap.prompt_count >= 1
-        assert '🗣️ "hello"' in snap.prompt_choices[0][0]
+        # The prompt history captured this step's prompt, labelled by the speech trigger, and
+        # the prompt text carries the rendered World (the speech entry the model saw).
+        prompts = handle.prompts.snapshot()
+        assert prompts.count >= 1
+        assert prompts.choices[0][0].endswith('— 🗣️ "hello"')
+        assert "hello" in (handle.prompts.text(0) or "")
 
-        # `say` completing re-triggered a second step (ended by noop), so a second prompt appears.
-        wait_until(lambda: transcript.snapshot().prompt_count >= 2)
-        assert items_titled(transcript.snapshot().conversation, "🚫 noop")
+        # `say` completing re-triggered a second step (ended by noop), so a second prompt appears,
+        # labelled by the Command's completion.
+        wait_until(lambda: handle.prompts.snapshot().count >= 2)
+        assert handle.prompts.snapshot().choices[1][0].endswith("— 🗣️ say finished")
+        # The prompt fires before the model call, so the noop item lands a moment later.
+        wait_until(
+            lambda: bool(items_titled(transcript.snapshot().conversation, "🚫 noop"))
+        )
     finally:
         handle.wica.close()
 

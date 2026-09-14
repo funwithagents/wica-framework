@@ -26,14 +26,18 @@ the `Robot` whose methods are the Commands, and the composition — in this orde
 framework's output wiring exists to allow (specs/wica.md, "Output wiring is delegated"):
 
     1. build_system(config)         → the Wica (or a World-only fallback), entries registered
-    2. build_ui(wica, world, …)     → the Gradio page, which owns its presenters (app_ui.py)
+    2. build_ui(wica, world, …)     → the Gradio page, which owns its presenters (app_ui.py):
+                                      the contrib's TranscriptLog + PromptLog and the Speaking slot
     3. wire(wica, transcript, slot) → the Robot over the World + the UI's Speaking slot; output
                                       sink + `say` output Command set on the Wica; Commands registered
     4. wica.start(); blocks.launch()
 
 Nothing is bound late: every object is built after the ones it needs, and everything is wired
-before `start()`. Steps 1 and 3 are Gradio-free, so the tests run the same wiring against a
-transcript and slot they build themselves (tests-e2e/test_example_flow.py).
+before `start()`. Steps 1 and 3 build no Gradio page, so the tests run the same wiring against a
+transcript and slot they build themselves (tests-e2e/test_example_flow.py). The transcript, the
+World table and the prompt history are the package's reusable `wica.contrib.gradio` components
+(specs/gradio-contrib.md); what is the demo's own is the persona: the entries, the `display_entry`
+hook, the Robot and the Speaking panel.
 """
 
 from __future__ import annotations
@@ -45,17 +49,18 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from wica import Content, TextPart, Wica, World, WorldEntry
-from wica.agent import CommandExecution
+from examples.conversation_demo.app_ui import build_ui
+from wica import CommandExecution, Content, TextPart, Wica, World, WorldEntry
 from wica.config import MissingEnvError, WicaConfig
+from wica.contrib.gradio import EntryDisplay, TranscriptLog
 
 from examples.conversation_demo.speaking import SpeakingSlot
-from examples.conversation_demo.transcript import EntryDisplay, TranscriptLog
 
 # Importing this module has no side effects: it only defines the World entries, the Robot, and the
-# standup functions. Logging config and the Gradio UI import live in `main()`, so tests can import
-# the wiring and stand it up against any config (e.g. a fake provider) without pulling in the
-# demo-only Gradio dependency or configuring the root logger.
+# standup functions. Logging config and the page build live in `main()`, so tests can import the
+# wiring and stand it up against any config (e.g. a fake provider) without building a Gradio page
+# or configuring the root logger. (The `wica.contrib.gradio` import above does pull Gradio, which
+# the `dev` group provides — see specs/gradio-contrib.md "Packaging".)
 
 # --- Configuration -------------------------------------------------------------------
 
@@ -106,7 +111,7 @@ def display_entry(entry: WorldEntry) -> EntryDisplay | None:
     serialize_fns above (the same per-entry knowledge, rendered for a human instead of the model).
     This is the one hook the generic transcript takes; anything it doesn't recognise returns None
     and gets the generic default (`⚡ key = value`, `🦾 name(args)` for a Command). See
-    specs/conversation-demo.md ("A reusable transcript")."""
+    specs/conversation-demo.md ("Reused from the Gradio contrib")."""
     value = entry.current.value
     if entry.key == "speech_input":
         return EntryDisplay(f'🗣️ "{value}"')
@@ -237,9 +242,6 @@ def main() -> None:
     # third-party logs quiet and show wica.* at INFO (raise to logging.DEBUG for the full trace).
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger("wica").setLevel(logging.INFO)
-
-    # Import the Gradio UI lazily so importing this module needs only core deps (see module docstring).
-    from examples.conversation_demo.app_ui import build_ui
 
     wica, world, config_error = build_system(WicaConfig.from_json_file(CONFIG_PATH))
     ui = build_ui(wica, world, display_entry, config_error)

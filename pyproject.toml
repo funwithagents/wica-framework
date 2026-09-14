@@ -17,6 +17,9 @@ dependencies = [
 anthropic = ["langchain-anthropic>=1.0"]
 openai = ["langchain-openai>=1.0"]
 huggingface-hub = ["langchain-huggingface>=1.2"]
+# Not a provider: the opt-in Gradio observability panels in `wica.contrib.gradio`
+# (specs/gradio-contrib.md, "Packaging"). Core never imports Gradio.
+gradio = ["gradio>=5.0.0"]
 
 [build-system]
 requires = ["uv_build>=0.11.29,<0.12.0"]
@@ -27,6 +30,9 @@ build-backend = "uv_build"
 # serve in-repo work — see specs/project.md).
 [dependency-groups]
 dev = [
+    # The contrib imports Gradio at module top; pyright (which includes `src`) and the fast
+    # test tier (`tests/contrib/`) need it installed.
+    "gradio>=5.0.0",
     "langchain-anthropic>=1.0",
     "langchain-openai>=1.0",
     "langchain-huggingface>=1.2",

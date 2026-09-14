@@ -1,6 +1,6 @@
 import logging
 
-from wica.agent import Agent, CommandIssued
+from wica.agent import Agent, CommandExecution, CommandIssued
 from wica.command import Command
 from wica.config import (
     AgentConfig,
@@ -23,6 +23,7 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "Command",
+    "CommandExecution",
     "CommandIssued",
     "ConfigError",
     "Content",

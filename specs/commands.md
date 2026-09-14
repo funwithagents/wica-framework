@@ -104,6 +104,8 @@ The value stored in the entry is an immutable `CommandExecution` snapshot:
 | `result` | Stringified result on `complete`, else `None` |
 | `error` | Error message on `failed`, else `None` |
 
+`CommandExecution` is **public API**, re-exported from `wica` alongside `CommandIssued`: a World-rendering consumer — a UI panel, a transcript, an application's per-entry display hook — recognizes a Command's execution entry by `isinstance(value, CommandExecution)` and reads its state, so the value model is part of the documented shape of a Command entry (first consumer: [gradio-contrib.md](gradio-contrib.md)).
+
 ## Generic call description (no command cooperation)
 
 The Agent always has a Command's **name**, its **args** (from the call), and its **result** (stringified). So it can always describe an execution — `add(a=1, b=2) → 3` — with zero cooperation from the backing tool. A future per-registration rendering override could provide a nicer result summary, but no such hook exists in v1 and no Command cooperation is required.

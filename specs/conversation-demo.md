@@ -1,7 +1,6 @@
 ---
 code:
   - examples/conversation_demo/app.py
-  - examples/conversation_demo/transcript.py
   - examples/conversation_demo/speaking.py
   - examples/conversation_demo/app_ui.py
   - examples/conversation_demo/prompts/wica.md
@@ -27,7 +26,11 @@ as a manual smoke-test harness that drives the library through its public API on
 
 This spec describes the **product** — what the user sees and does, and how the simulated robot
 behaves. The wiring (Gradio, the `Wica` facade, the instrumentation `Event`s the panels subscribe
-to) is an implementation concern, covered by the plan, not here.
+to) is an implementation concern, covered by the plan, not here. The three surfaces that show
+*the framework* rather than the robot — the conversation transcript, the World-state view and the
+prompt history — are the package's reusable Gradio components
+([gradio-contrib.md](gradio-contrib.md)); the demo is their reference consumer and specifies here
+only how it uses them.
 
 Scope is deliberately small: it demonstrates the **v1 Agent** (single reasoning call in flight at a
 time; one complete spoken reply per step). It is not meant to show off concurrency/interruption or
@@ -74,11 +77,12 @@ Five surfaces:
    that's *dropped* because a reasoning call is already in flight doesn't appear and gets no reply —
    faithful to what actually happened.
 
-   The transcript is **generic**: nothing in it knows the robot. What it renders comes from the
-   framework's uniform signals (a triggering `WorldEntry`, an issued Command and its
-   `CommandExecution` states, the step's prompt and free text), and the only persona-specific
-   knowledge — which icon and wording an entry gets — is injected through one hook (see "A
-   reusable transcript" below). Another application reuses it as is, with its own hook.
+   The transcript is **generic**: nothing in it knows the robot. It is the contrib's
+   conversation panel ([gradio-contrib.md](gradio-contrib.md), "Component 3"); what it renders
+   comes from the framework's uniform signals (a triggering `WorldEntry`, an issued Command and
+   its `CommandExecution` states, the step's prompt and free text), and the only persona-specific
+   knowledge — which icon and wording an entry gets — is injected through the contrib's one
+   `display_entry` hook, which the demo implements (see "Reused from the Gradio contrib" below).
 2. **Speaking (now).** A small panel directly under the conversation showing the **state of the
    current `say`**: the sentence being spoken with the words already "spoken" set apart from the
    ones still to come, a `spoken/total` word count, and the utterance's state — *speaking*,
@@ -91,13 +95,17 @@ Five surfaces:
    what it heard, who's nearby, how it feels, who it's tracking, and any command currently running.
    It updates in real time as inputs arrive and the robot acts — including a short-lived command
    entry (e.g. a `say` that is "running" only while it speaks), so a fleeting action still shows.
+   This is the contrib's World-state panel over the demo's World
+   ([gradio-contrib.md](gradio-contrib.md), "Component 1").
 4. **Prompt.** The exact prompt sent to the model, shown as read-only text — so the user can see
    *how* World state becomes an LLM prompt, the core idea of WICA. Every reasoning step's prompt is
    kept, not just the last one: a dropdown above the text lists them (labelled by time and the
    trigger that caused the step, e.g. `14:03:12 — 🗣️ "hello"`) so the user can scroll back through
    the history. When a new step runs, its prompt is appended and **automatically shown** — the view
    always snaps to the newest, even if the user had an older one selected. Between steps the user is
-   free to browse earlier prompts.
+   free to browse earlier prompts. This is the contrib's prompt-history panel
+   ([gradio-contrib.md](gradio-contrib.md), "Component 2"), labelling triggers through the same
+   `display_entry` hook as the transcript.
 5. **Inputs.** Buttons that inject sensor-style events into the World (below), simulating a robot's
    perception without real hardware.
 
@@ -166,37 +174,32 @@ robot reasoning from the `closest_user` perception (which triggers a step when i
 when it clears to "no one") and issuing the `switch_user_tracking` command in response, rather than
 the demo wiring the effect deterministically behind the agent's back.
 
-## A reusable transcript
+## Reused from the Gradio contrib
 
-The conversation surface is built so that another application can reuse it unchanged, and only
-the demo-specific bits — the sensor icons, the voice, the Speaking panel — live in the demo.
+The conversation, World-state and prompt surfaces are not the demo's code: they are the three
+components of `wica.contrib.gradio` ([gradio-contrib.md](gradio-contrib.md)) — `TranscriptLog` +
+`conversation_panel`, `world_state_panel`, `PromptLog` + `prompt_panel` — and the demo uses them
+exactly as any application would. What the demo contributes is the persona side of the seam:
 
-- **One generic transcript log.** A single presenter object (`TranscriptLog`, in
-  `examples/conversation_demo/transcript.py`), built over a `Wica`, subscribes in its constructor
-  to the framework's instrumentation
-  (`on_agent_trigger`, `on_agent_prompt`, `on_agent_command`, and its `output_sink` method, which
-  the application sets on the `Wica`) and, for every
-  issued Command, listens to its `agent:command:<call_id>` World entry so the item's state follows
-  the execution (`running` → `complete`/`failed`/`cancelled`). It knows the framework's own names
-  — `noop` (rendered `🚫 noop`, never through the hook since no entry exists) and the configured
-  output Command (labelled 🗣️ by default, read live from the Agent, so it is correct whichever
-  is wired first) — and nothing about the application.
-  It also keeps the prompt history the Prompt panel browses.
-- **One hook for what is application-specific: `display_entry(entry: WorldEntry)`.** Every
-  transcript item that comes from a World entry is rendered through this function, which returns an
+- **The `display_entry(entry: WorldEntry)` hook.** The contrib renders every transcript item and
+  prompt label that comes from a World entry through this function, which returns an
   `EntryDisplay(label, detail)` — `label` is the one-line text with its icon (the input side's
   message, or a Command item's title), `detail` the Command item's body — or `None` to fall back
-  to the generic default (`⚡ key = value` for an entry; `🦾 name` / `name(args)` for a Command
-  execution, whose value is a `CommandExecution`). Because a Command's execution *is* a World entry,
-  the same hook customises both sides: the demo's hook turns `speech_input` into `🗣️ "hello"`,
-  `closest_user` into `👤 Closest user detected: alice`, and a running `say` into `🗣️ say` with the
-  spoken text as body. The hook lives in the demo next to the entries' `serialize_fn`s — the same
-  per-entry knowledge, rendered for a person instead of for the model. The transcript adds the
-  generic parts around it: reaction groups, the state suffix and spinner, result/error and
-  duration.
-- **The Speaking panel is not part of the transcript.** `say` reports its word-by-word progress to
-  the Speaking slot the UI owns (handed to the robot at wiring — see "Composition" below); the
-  transcript only ever sees `say` as a Command with a state, like the others.
+  to the contrib's generic default (`⚡ key = value` for an entry; `🦾 name` / `name(args)` for a
+  Command execution, whose value is a `CommandExecution`). Because a Command's execution *is* a
+  World entry, the same hook customises both sides: the demo's hook turns `speech_input` into
+  `🗣️ "hello"`, `closest_user` into `👤 Closest user detected: alice`, and a running `say` into
+  `🗣️ say` with the spoken text as body. The hook lives in the demo next to the entries'
+  `serialize_fn`s — the same per-entry knowledge, rendered for a person instead of for the model.
+  The demo passes the one hook to both presenters (`TranscriptLog(wica, display_entry)`,
+  `PromptLog(wica, display_entry)`) so the transcript and the prompt labels agree.
+- **The Speaking panel is the demo's, not the transcript's.** `say` reports its word-by-word
+  progress to the Speaking slot the UI owns (handed to the robot at wiring — see "Composition"
+  below); the transcript only ever sees `say` as a Command with a state, like the others. The
+  slot (`examples/conversation_demo/speaking.py`) and its HTML rendering stay in the demo.
+- **The framework names the contrib knows** — `noop` (rendered `🚫 noop`, never through the hook
+  since no entry exists) and the configured output Command (labelled 🗣️ by default, read live
+  from the Agent, so it is correct whichever is wired first) — need nothing from the demo.
 
 ## Composition: build, then wire, then start
 
@@ -205,9 +208,11 @@ output wiring exists to allow (see [wica.md](wica.md), "Output wiring is delegat
 
 1. **Build the Wica** from the config (or, without a key, the World-only fallback — see
    "Configuration"), and register the demo's World entries on its World.
-2. **Build the UI on top of it.** The UI owns its presenters: it constructs the generic transcript
-   (subscribed to the Wica's `Event`s in its constructor) and the Speaking slot, and exposes both.
-   The presenters themselves are Gradio-free objects.
+2. **Build the UI on top of it.** The UI owns its presenters: it constructs the contrib's
+   `TranscriptLog` and `PromptLog` (each subscribed to the Wica's `Event`s in its constructor, both
+   given the demo's `display_entry` hook) and the Speaking slot, places the three contrib panels
+   plus its own Speaking panel and sensor inputs, and exposes the transcript and the slot for
+   wiring.
 3. **Wire the robot to the UI.** The robot's Commands are built over the Wica's World and the UI's
    Speaking slot (`say` drives it). The app sets the transcript's `output_sink` and `say` as the
    output Command on the Wica, and registers the other Commands. This step is Gradio-free and takes
