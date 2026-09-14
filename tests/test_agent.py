@@ -1951,3 +1951,146 @@ def test_on_command_fires_once_the_execution_entry_exists_and_carries_its_call_i
     assert registered_at_emit == [True]
     assert states == ["running", "complete"]
     agent.stop()
+
+
+def test_command_with_triggers_on_completion_false_does_not_retrigger(
+    loop, world, sink
+):
+    """The completion wakes no step, but its outcome is not lost: the next input-driven step
+    observes the terminal entry (rendered into its prompt) and retires it."""
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("ping", {}, "p1")]),
+            text_response("second step"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    terminal = threading.Event()
+
+    async def on_update(entry) -> None:
+        if entry.current.value.is_terminal():
+            terminal.set()
+
+    agent.on_command.subscribe(
+        lambda c: world.add_listener(f"agent:command:{c.call_id}", on_update)
+    )
+
+    async def ping() -> str:
+        """Ping."""
+        return "pong"
+
+    agent.register_command(Command(ping, triggers_on_completion=False))
+    agent.start()
+    world.update("input", "ping it")
+    assert terminal.wait(timeout=WAIT_TIMEOUT)
+    time.sleep(0.2)  # give any (erroneous) re-trigger a chance to fire
+    assert len(model.calls) == 1
+
+    world.update("input", "anything else?")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert len(model.calls) == 2
+    humans = [m for m in model.calls[1] if isinstance(m, HumanMessage)]
+    assert any("Called ping() → pong" in str(m.content) for m in humans)
+    assert not any(
+        e.key.startswith("agent:command:") for e in world.get_prompt_entries()
+    )
+    agent.stop()
+
+
+@pytest.mark.parametrize("explicit_false", [False, True])
+def test_output_command_retrigger_follows_its_own_flag_or_the_default(
+    loop, world, sink, explicit_false
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    spoke = threading.Event()
+
+    async def speak(text: str) -> str:
+        """Say something to the user."""
+        spoke.set()
+        return "spoken"
+
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("speak", {"text": "hello"}, "s1")]),
+            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    if explicit_false:
+        agent.set_output_command(Command(speak, triggers_on_completion=False))
+    else:
+        agent.set_output_command(speak)  # bare callable: the module default (True)
+    agent.start()
+    world.update("input", "greet")
+    assert spoke.wait(timeout=WAIT_TIMEOUT)
+    if explicit_false:
+        time.sleep(0.2)
+        assert len(model.calls) == 1  # speak -> idle
+    else:
+        wait_until(lambda: len(model.calls) == 2)  # speak re-triggered, ended by noop
+    agent.stop()
+
+
+def test_on_text_fires_with_the_step_text_before_the_sink(loop, world):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    seen: list[str] = []
+    delivered = threading.Event()
+
+    async def ordered_sink(text: str) -> None:
+        seen.append(f"sink:{text}")
+        delivered.set()
+
+    model = ProgrammableChatModel(
+        respond=sequence(text_response("hello"), text_response(""))
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=ordered_sink)
+    agent.on_text.subscribe(lambda text: seen.append(f"event:{text}"))
+    agent.start()
+    world.update("input", "hi")
+    assert delivered.wait(timeout=WAIT_TIMEOUT)
+    assert seen == ["event:hello", "sink:hello"]
+    # An empty response emits nothing.
+    world.update("input", "again")
+    wait_until(lambda: len(model.calls) == 2 and not agent._busy)
+    assert seen == ["event:hello", "sink:hello"]
+    agent.stop()
+
+
+def test_on_text_fires_even_when_the_sink_raises(loop, world, caplog):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    texts: list[str] = []
+    got = threading.Event()
+
+    async def bad_sink(text: str) -> None:
+        raise RuntimeError("sink broke")
+
+    agent = make_agent(
+        ProgrammableChatModel(respond=text_response("still observed")),
+        world=world,
+        loop=loop,
+        output_sink=bad_sink,
+    )
+
+    def record(text: str) -> None:
+        texts.append(text)
+        got.set()
+
+    agent.on_text.subscribe(record)
+    agent.start()
+    with caplog.at_level(logging.ERROR, logger="wica.agent"):
+        world.update("input", "hi")
+        assert got.wait(timeout=WAIT_TIMEOUT)
+        wait_until(
+            lambda: any("output sink raised" in r.message for r in caplog.records)
+        )
+    assert texts == ["still observed"]
+    agent.stop()

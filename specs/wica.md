@@ -38,6 +38,7 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 | `wica.on_agent_trigger` | `Event[WorldEntry]` | The Agent's **filtered** trigger — fires once per trigger a run-to-completion step actually observes (= `agent.on_trigger`). |
 | `wica.on_agent_prompt` | `Event[list[BaseMessage]]` | Fires with the exact rendered messages before each model call (= `agent.on_prompt`). |
 | `wica.on_agent_command` | `Event[CommandIssued]` | Fires with each Command the model issues, at dispatch time (= `agent.on_command`). |
+| `wica.on_agent_text` | `Event[str]` | Fires with the model's complete free text for a step, right before the output sink receives it (= `agent.on_text`). Observation only — the sink stays the delivery slot. |
 
 The **asymmetry is deliberate**: command registration and output wiring are mirrored onto `Wica` because they're part of everyday setup, but the World's own API (registering and updating entries) stays on `wica.world`. Duplicating the entire World surface onto `Wica` would be churn with no payoff — `wica.world.register(...)` / `wica.world.update(...)` reads clearly and keeps `World` the single home for its own concept.
 
@@ -47,7 +48,7 @@ The **asymmetry is deliberate**: command registration and output wiring are mirr
 
 1. Creates the single asyncio event **loop** the whole system runs on (or adopts one passed in — see "The event loop, restartable `start()`/`stop()`, and terminal `close()`").
 2. Builds a fresh `World(loop)` (no global — see [world.md](world.md)).
-3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`.
+3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`, `self.on_agent_text = self.agent.on_text`.
 
 `init` **does not configure logging** — WICA is a library, so it only emits under the `wica.*` loggers and leaves handlers/levels to the embedding application (see [config.md](config.md), "Logging is not framework config").
 
@@ -114,6 +115,7 @@ The World and the Agent each own their instrumentation as `Event`s (see [world.m
 | `wica.on_agent_trigger` | `agent.on_trigger` | `Event[WorldEntry]` — **filtered** trigger, per trigger a step observed |
 | `wica.on_agent_prompt` | `agent.on_prompt` | `Event[list[BaseMessage]]` — the rendered messages before each model call |
 | `wica.on_agent_command` | `agent.on_command` | `Event[CommandIssued]` — each Command issued, at dispatch |
+| `wica.on_agent_text` | `agent.on_text` | `Event[str]` — the step's complete free text, before the sink receives it |
 
 **Two triggers, on purpose.** `on_world_trigger` and `on_agent_trigger` are kept distinct because they answer different questions: the World's is "an input qualified to wake the agent" (fires even for triggers the busy single-in-flight loop later drops); the Agent's is "a step actually processed this trigger." A consumer showing every incoming input uses the former; one showing only what the robot reacted to uses the latter. The demo uses `on_agent_trigger` for its input panel (matching today's behavior).
 

@@ -25,6 +25,7 @@ class Command:
         Command(walk_to)                       # plain callable
         Command(add, name="sum", description=…)  # overrides
         Command(existing_tool)                  # off-the-shelf BaseTool, unmodified
+        Command(set_led, triggers_on_completion=False)  # completion wakes no step
     """
 
     def __init__(
@@ -33,7 +34,10 @@ class Command:
         *,
         name: str | None = None,
         description: str | None = None,
+        triggers_on_completion: bool = True,
     ) -> None:
+        # A WICA registration option, not tool metadata: accepted for a wrapped BaseTool too.
+        self._triggers_on_completion = triggers_on_completion
         if isinstance(fn, BaseTool):
             # An already-built tool carries its own name/description; overriding them here would be
             # silently ineffective, so reject it explicitly rather than mislead the caller.
@@ -59,3 +63,11 @@ class Command:
     def name(self) -> str:
         """The Command's name (the backing tool's name)."""
         return self._tool.name
+
+    @property
+    def triggers_on_completion(self) -> bool:
+        """Whether this Command's terminal completion wakes a reasoning step (default True).
+        The per-Command form of the output Command's re-trigger knob; False removes only the
+        trigger — the execution entry still exists and is observed by the next step. See
+        specs/commands.md ("The `Command` object")."""
+        return self._triggers_on_completion

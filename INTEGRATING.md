@@ -14,7 +14,7 @@ You talk to **one object — `Wica`** — the single entry point. `Wica.init(con
 
 “Multimodal” spans both sides differently: Inputs serialize perception into provider-neutral `Content`, while Commands produce speech, movement, display changes, API effects, and other physical or digital outputs. The conversational sink is one complete text response per reasoning step; it is not the full output surface.
 
-- **Wica**: the entry point. `Wica.init(config)` builds and wires everything; `wica.set_output_sink(...)` / `wica.set_output_command(...)` wire the output channel afterwards (so the objects they belong to can be built against the Wica first — build, then wire, then start); `wica.start()` / `wica.stop()` run a restartable shared lifecycle, and `wica.close()` performs terminal teardown. `wica.world` is the World; `wica.register_command(...)` adds Commands; four `Event`s surface what the loop is doing.
+- **Wica**: the entry point. `Wica.init(config)` builds and wires everything; `wica.set_output_sink(...)` / `wica.set_output_command(...)` wire the output channel afterwards (so the objects they belong to can be built against the Wica first — build, then wire, then start); `wica.start()` / `wica.stop()` run a restartable shared lifecycle, and `wica.close()` performs terminal teardown. `wica.world` is the World; `wica.register_command(...)` adds Commands; its `Event`s surface what the loop is doing.
 - **W — World** (`wica.world`): you `register()` a key with a type + a `serialize_fn` (value → [`Content`](specs/content.md)), then `update()` it as data changes. Values must be deep-copyable: the World copies on ingress and on outward getters/callbacks so only `update()` can change versioned state. `update()` is callable from any thread, but only **while the system is running** (between `start()` and `stop()`); `register`/`get` work any time.
 - **I — Inputs**: not a class — a *role* a World entry plays when an external producer feeds it. A registered entry marked `triggers_llm_call=True` wakes the Agent when updated. The producer can run on any thread.
 - **C — Commands**: the agent's unit of action. Register a plain function (or an off-the-shelf LangChain tool wrapped as `Command(tool)`) with `wica.register_command`; the Agent binds it as a native model tool. Each runs as a cancellable `asyncio` task, tracked as a World entry.
@@ -26,7 +26,7 @@ Everything below is re-exported from the top-level `wica` package ([`src/wica/__
 
 | Import | Kind | Use |
 |---|---|---|
-| `Wica` | class | The single entry point (`init`/`start`/`stop`/`register_command`, `wica.world`, four Events) |
+| `Wica` | class | The single entry point (`init`/`start`/`stop`/`register_command`, `wica.world`, the instrumentation Events) |
 | `World` | class | The state registry (`register`/`update`/`get`/`unregister`, `start`/`stop`/`is_running`); reached as `wica.world` |
 | `TextPart`, `ImagePart` | dataclass | Multimodal content parts; `Content` is a `list` of them |
 | `Content`, `ContentPart` | type alias | What a `serialize_fn` returns |
@@ -34,12 +34,12 @@ Everything below is re-exported from the top-level `wica` package ([`src/wica/__
 | `Command` | class | Definition wrapper for a callable or an off-the-shelf LangChain tool; use it to override callable metadata or wrap an existing tool |
 | `CommandIssued` | dataclass | Payload of `wica.on_agent_command` (`name`, `args`, `call_id` — the `agent:command:<call_id>` entry's key suffix; the Event fires once that entry is registered, so a handler may `add_listener` on it) |
 | `CommandExecution` | dataclass | Value of an `agent:command:<call_id>` World entry (`name`, `args`, `state`, `result`, `error`); `isinstance` against it to recognize a Command execution when reading the World or writing a `display_entry` hook (recipe 4) |
-| `Event` | class | The pub/sub primitive the four instrumentation signals use (`subscribe`/`unsubscribe`) |
+| `Event` | class | The pub/sub primitive the instrumentation signals use (`subscribe`/`unsubscribe`) |
 | `WicaConfig`, `AgentConfig` | dataclass | Plain configuration objects; construct directly or parse strictly from a dictionary, a JSON string, or a JSON file |
 | `ConfigError`, `MissingEnvError` | exception | Invalid parsed config or a reference that cannot be resolved when the Agent is built |
 | `WorldEntry`, `WorldEntryConfig`, `WorldEntryVersion` | dataclass | Entry introspection (rarely needed directly) |
 
-Instrumentation is four `Event`s you `.subscribe(...)` on — multi-consumer, so panels, a logger, and a metrics sink can all watch the same signal:
+Instrumentation is a set of `Event`s you `.subscribe(...)` on — multi-consumer, so panels, a logger, and a metrics sink can all watch the same signal:
 
 | Event | Payload | Fires |
 |---|---|---|
@@ -47,6 +47,7 @@ Instrumentation is four `Event`s you `.subscribe(...)` on — multi-consumer, so
 | `wica.on_agent_trigger` | `WorldEntry` | **filtered** — once per trigger a run-to-completion step actually observed |
 | `wica.on_agent_prompt` | `list[BaseMessage]` | the exact rendered messages before each model call |
 | `wica.on_agent_command` | `CommandIssued` | each Command the model issues, at dispatch |
+| `wica.on_agent_text` | `str` | the step's complete free text, right before the output sink receives it (observe the free-text channel without taking the sink slot) |
 
 Signatures you'll actually call:
 
@@ -62,7 +63,7 @@ wica.set_output_command(fn_or_command | None)  # the user-facing output Command 
 wica.register_command(fn_or_command)   # plain callable, or Command(...) for metadata/tool wrapping
 wica.start(); wica.stop(); wica.start()   # stop is a reversible pause
 wica.close()                              # terminal; releases an owned event loop
-wica.on_world_trigger / on_agent_trigger / on_agent_prompt / on_agent_command   # .subscribe(handler)
+wica.on_world_trigger / on_agent_trigger / on_agent_prompt / on_agent_command / on_agent_text   # .subscribe(handler)
 
 world.register(key: str, type: type[T], *,
                serialize_fn: Callable[[T | None, T | None], Content],  # (value, previous) -> Content

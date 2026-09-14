@@ -206,10 +206,11 @@ _NOOP_ACK = "Acknowledged — no action taken."
 # reserved").
 _RESERVED_COMMAND_NAMES = frozenset({_CANCEL_COMMAND_NAME, _NOOP_COMMAND_NAME})
 
-# Whether a completed output Command re-triggers a reasoning step. True (default) lets the model
+# The *default* re-trigger flag for the output Command — applied when set_output_command is handed
+# a bare callable (an explicit Command keeps its own triggers_on_completion). True lets the model
 # chain utterances / self-continue (ended by noop), at ~2 LLM calls per utterance; False makes
-# speaking go straight to idle. Flipping it is deliberately a one-line change. See
-# specs/commands.md ("The output Command").
+# speaking go straight to idle. Flipping the framework-wide default is deliberately a one-line
+# change. See specs/commands.md ("The output Command").
 _TRIGGER_ON_OUTPUT_COMMAND_COMPLETION = True
 
 # The WICA runtime primer appended to the configured persona (see specs/agent.md, "System prompt
@@ -404,9 +405,12 @@ class Agent:
         #  - on_prompt(messages):  the exact rendered messages just before each model call.
         #  - on_command(command):  each Command the model issues, when issued — including noop
         #                           (which is observable but not a World action; filter by name).
+        #  - on_text(text):        the step's complete free text, right before the sink receives
+        #                           it (observation; the sink is delivery).
         self.on_trigger: Event[WorldEntry] = Event()
         self.on_prompt: Event[list[BaseMessage]] = Event()
         self.on_command: Event[CommandIssued] = Event()
+        self.on_text: Event[str] = Event()
 
         # name -> the registered Command (which holds the backing LangChain tool — see commands.md)
         self._commands: dict[str, Command] = {}
@@ -475,7 +479,13 @@ class Agent:
         if fn is None:
             command = None
         else:
-            command = fn if isinstance(fn, Command) else Command(fn)
+            command = (
+                fn
+                if isinstance(fn, Command)
+                else Command(
+                    fn, triggers_on_completion=_TRIGGER_ON_OUTPUT_COMMAND_COMPLETION
+                )
+            )
             if command.name in _RESERVED_COMMAND_NAMES:
                 raise ValueError(
                     f"output command may not be named {command.name!r}: "
@@ -785,6 +795,10 @@ class Agent:
         )
         if text:
             self._history.append(AssistantTextRecord(text))
+            # Observation first, delivery second: the Event carries the same string the sink is
+            # about to receive, so a watcher never has to occupy the single sink slot. A raising
+            # sink below does not affect the emission. See specs/agent.md ("Instrumentation").
+            self.on_text.emit(text)
             try:
                 await self._output_sink(text)
             except Exception:
@@ -837,14 +851,16 @@ class Agent:
         )
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         self._command_keys.add(key)
-        # The output Command is the one Command whose completion may deliberately not re-trigger:
-        # speaking need not wake a fresh step. include_in_prompt stays True either way so a
-        # concurrent step can observe running speech and cancel it (barge-in). Every other Command
-        # re-triggers on completion (the uniform model). See specs/commands.md ("The output Command").
+        # Every Command re-triggers on completion by default (the uniform model). One registered
+        # with triggers_on_completion=False (the output Command's default comes from the module
+        # constant) completes without waking a step; its terminal entry is then observed and
+        # retired by the next step that runs for any other reason. include_in_prompt stays True
+        # either way, so a concurrent step can observe running work and cancel it (barge-in). A
+        # name matching no registered Command registers with True and then fails in _run_command.
+        # See specs/commands.md ("The `Command` object", "The output Command").
+        registered = self._commands.get(name)
         triggers_llm_call = (
-            _TRIGGER_ON_OUTPUT_COMMAND_COMPLETION
-            if name == self._output_command_name
-            else True
+            registered.triggers_on_completion if registered is not None else True
         )
         self._world.register(
             key,

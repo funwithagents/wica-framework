@@ -68,3 +68,24 @@ def test_undocumented_callable_without_description_raises():
     # ...but an explicit description lets an undocumented callable through.
     command = Command(bare, description="Bare tool.")
     assert command.tool.description == "Bare tool."
+
+
+def test_triggers_on_completion_defaults_true_and_is_settable_for_callables_and_tools():
+    def ping() -> str:
+        """Ping."""
+        return "pong"
+
+    @tool
+    def existing(a: int) -> int:
+        """An existing tool."""
+        return a
+
+    assert Command(ping).triggers_on_completion is True
+    assert Command(ping, triggers_on_completion=False).triggers_on_completion is False
+    # A WICA registration option, not tool metadata: accepted on a wrapped tool, unlike
+    # name/description overrides.
+    assert (
+        Command(existing, triggers_on_completion=False).triggers_on_completion is False
+    )
+    with pytest.raises(ValueError):
+        Command(existing, name="renamed")

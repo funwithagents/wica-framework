@@ -55,6 +55,7 @@ class Wica:
         self.on_agent_trigger: Event[WorldEntry] = agent.on_trigger
         self.on_agent_prompt: Event[list[BaseMessage]] = agent.on_prompt
         self.on_agent_command: Event[CommandIssued] = agent.on_command
+        self.on_agent_text: Event[str] = agent.on_text
 
     @classmethod
     def init(

@@ -167,6 +167,8 @@ def test_input_drives_world_and_agent_triggers_and_a_command_event(wica_factory)
     world_triggers: list[str] = []
     agent_triggers: list[str] = []
     commands: list[CommandIssued] = []
+    texts: list[str] = []
+    wica.on_agent_text.subscribe(texts.append)
     wica.on_world_trigger.subscribe(lambda e: world_triggers.append(e.key))
     wica.on_agent_trigger.subscribe(lambda e: agent_triggers.append(e.key))
     wica.on_agent_command.subscribe(commands.append)
@@ -185,6 +187,8 @@ def test_input_drives_world_and_agent_triggers_and_a_command_event(wica_factory)
     assert "speech" in agent_triggers
     # The model issued the wave Command; on_agent_command carried a CommandIssued at dispatch.
     assert [(c.name, c.args) for c in commands] == [("wave", {})]
+    # The step's free text was observable on on_agent_text as well as delivered to the sink.
+    assert texts == ["hi"]
 
 
 def test_multiple_subscribers_fire_and_a_raising_one_does_not_block_others(

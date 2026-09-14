@@ -26,7 +26,7 @@ The name is the model:
 
 ### The entry point — `Wica`
 
-You talk to one object. `Wica.init(config)` stands up the whole system from a config — it owns a single event loop and a **World** + **Agent** pair that both run on it — and surfaces everything you need: `wica.world` for state, `wica.register_command(...)` for actions, restartable `wica.start()`/`wica.stop()` cycles, terminal `wica.close()`, and four `Event`s to observe the loop.
+You talk to one object. `Wica.init(config)` stands up the whole system from a config — it owns a single event loop and a **World** + **Agent** pair that both run on it — and surfaces everything you need: `wica.world` for state, `wica.register_command(...)` for actions, restartable `wica.start()`/`wica.stop()` cycles, terminal `wica.close()`, and `Event`s to observe the loop.
 
 ### The World — state that becomes a prompt
 
