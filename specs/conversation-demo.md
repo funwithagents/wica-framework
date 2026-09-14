@@ -2,6 +2,7 @@
 code:
   - examples/conversation_demo/app.py
   - examples/conversation_demo/app_state.py
+  - examples/conversation_demo/transcript.py
   - examples/conversation_demo/app_ui.py
   - examples/conversation_demo/prompts/wica.md
   - examples/conversation_demo/agent.config.json
@@ -40,7 +41,7 @@ deployment can change who the robot *is* without touching the demo.
 
 ## What the user sees
 
-Four surfaces, side by side:
+Five surfaces:
 
 1. **Conversation.** A chat transcript that doubles as a trace of the reasoning loop. The user
    types an utterance (their "speech"); more broadly, whatever World entry triggers a reasoning
@@ -50,30 +51,54 @@ Four surfaces, side by side:
    group its outputs appear in order, each **labelled by the framework channel it came from** — so
    the demo makes the **output Command** feature concrete (see [agent.md](agent.md), "Output"):
    - **🗣️ say** — the robot's spoken reply, delivered through the `say` **output Command** (what the
-     person actually hears), not free text;
+     person actually hears), not free text; the item shows the full text the robot set out to say;
    - **💭 output sink** — the model's free text for the step, which an output Command turns into
      private reasoning (delivered to the `output_sink`), shown apart from the voice;
-   - **🦾** command calls — its other actions like `dance`, italicised;
+   - **🦾** command calls — its other actions like `dance`;
    - **🚫 noop** — the robot explicitly *choosing not to react* (the auto-registered `noop`
      Command); it commonly ends a turn, since speaking through the output Command re-triggers the
      agent and the model then declines to add more.
 
+   **Every Command item carries its execution state, live.** A `say`/🦾 item appears the moment
+   the robot issues the Command, marked *in progress* (a spinner on its title); when the Command
+   ends, the same item is updated in place: **✅ complete** (with its result), **❌ failed** (with
+   the error) or **⏹ cancelled**, plus how long it ran. A finished item **stays open** — the
+   spinner goes, the body (e.g. what was said) remains readable without expanding it. So a 10-second dance is visibly "running"
+   in the transcript until it finishes, and a barge-in reads as a `🦾 cancel_command` item followed
+   by the interrupted `🗣️ say` flipping to *cancelled*. This is the transcript's view of the
+   `agent:command:<call_id>` lifecycle ([commands.md](commands.md), "Command execution as a World
+   entry"): the World-state panel (3.) only shows a command entry while it exists, and a finished
+   one is retired at the very next step, so the transcript is where the outcome stays visible.
+
    So a turn reads as "input → (the robot thinks…) → the robot says X → the robot does Y". An input
    that's *dropped* because a reasoning call is already in flight doesn't appear and gets no reply —
    faithful to what actually happened.
-2. **World state.** A live view of the current World — every entry the demo tracks, shown as raw
+
+   The transcript is **generic**: nothing in it knows the robot. What it renders comes from the
+   framework's uniform signals (a triggering `WorldEntry`, an issued Command and its
+   `CommandExecution` states, the step's prompt and free text), and the only persona-specific
+   knowledge — which icon and wording an entry gets — is injected through one hook (see "A
+   reusable transcript" below). Another application reuses it as is, with its own hook.
+2. **Speaking (now).** A small panel directly under the conversation showing the **state of the
+   current `say`**: the sentence being spoken with the words already "spoken" set apart from the
+   ones still to come, a `spoken/total` word count, and the utterance's state — *speaking*,
+   *complete*, or *cancelled*. It updates word by word while the robot speaks and keeps showing the
+   last utterance (as complete or cancelled) until the next one starts. This is the demo's
+   **simulated TTS** made visible on its own, away from the transcript — the one surface that is
+   specific to this robot's voice rather than to the framework.
+3. **World state.** A live view of the current World — every entry the demo tracks, shown as raw
    values (key, value, when it last changed). This is the robot's whole mind laid bare:
    what it heard, who's nearby, how it feels, who it's tracking, and any command currently running.
    It updates in real time as inputs arrive and the robot acts — including a short-lived command
    entry (e.g. a `say` that is "running" only while it speaks), so a fleeting action still shows.
-3. **Prompt.** The exact prompt sent to the model, shown as read-only text — so the user can see
+4. **Prompt.** The exact prompt sent to the model, shown as read-only text — so the user can see
    *how* World state becomes an LLM prompt, the core idea of WICA. Every reasoning step's prompt is
    kept, not just the last one: a dropdown above the text lists them (labelled by time and the
    trigger that caused the step, e.g. `14:03:12 — 🗣️ "hello"`) so the user can scroll back through
    the history. When a new step runs, its prompt is appended and **automatically shown** — the view
    always snaps to the newest, even if the user had an older one selected. Between steps the user is
    free to browse earlier prompts.
-4. **Inputs.** Buttons that inject sensor-style events into the World (below), simulating a robot's
+5. **Inputs.** Buttons that inject sensor-style events into the World (below), simulating a robot's
    perception without real hardware.
 
 ## Interaction model
@@ -88,10 +113,11 @@ Four surfaces, side by side:
   shown apart from the voice (see [agent.md](agent.md), "Output"). One (or a short chain of)
   utterance(s) per turn. The demo configures `say` via `Wica.init(output_command=…)`; without an
   output Command the free text would itself be the voice. **The demo simulates speaking**: `say`
-  takes time and reveals its words one by one, streaming them into the transcript while the Command
-  stays `running` (and cancellable) in the World. This is a *demo* effect — a slow backing function
-  updating its own UI message — **not** framework token streaming (which is post-v1; see
-  [agent.md](agent.md), "Future improvements").
+  takes time and reveals its words one by one in the **Speaking panel** while the Command stays
+  `running` (and cancellable) in the World; the transcript shows the `say` item with its full text
+  and its live state (in progress → complete/cancelled), like any other Command. This is a *demo*
+  effect — a slow backing function updating its own panel — **not** framework token streaming
+  (which is post-v1; see [agent.md](agent.md), "Future improvements").
 - **Acting.** The robot may perform robot actions (Commands, below) alongside a spoken reply.
   Their effects show up in the World state view, and a longer action remains visible while it runs.
 
@@ -124,8 +150,8 @@ and the point is to watch the model choose them in context.
 
 | Action | What it does | Notable |
 |---|---|---|
-| **Say `<text>`** | Speaks to the person. | The **output Command** (`Wica.init(output_command=…)`): the robot's voice, shown in the transcript labelled **🗣️ say**. Because it is a Command, the model's own free text becomes private reasoning (the **💭 output sink**) instead of speech. |
-| **Dance** | Performs a ~10-second dance. | Long-running: visibly "in progress" in the World state for its whole duration. New inputs may start reasoning while it runs, letting the model observe or cancel the action. |
+| **Say `<text>`** | Speaks to the person. | The **output Command** (`Wica.init(output_command=…)`): the robot's voice, shown in the transcript labelled **🗣️ say** (full text, live state) and word by word in the Speaking panel. Because it is a Command, the model's own free text becomes private reasoning (the **💭 output sink**) instead of speech. |
+| **Dance** | Performs a ~10-second dance. | Long-running: visibly "in progress" in the transcript and the World state for its whole duration. New inputs may start reasoning while it runs, letting the model observe or cancel the action. |
 | **Set emotion `<emotion>`** | Sets the robot's current emotional state. | Reflected in World state and in the robot's subsequent prompt/behaviour. |
 | **Switch tracking to user `<id>` (or nobody)** | Follows one specific person, or stops tracking when called with no user. | The robot follows **at most one** person at a time — a single `tracked_user` entry, not a set. Passing no user (null) clears it. |
 
@@ -139,6 +165,35 @@ stops tracking (switches to nobody). This is LLM-driven, not a hard rule — it 
 robot reasoning from the `closest_user` perception (which triggers a step when it changes, including
 when it clears to "no one") and issuing the `switch_user_tracking` command in response, rather than
 the demo wiring the effect deterministically behind the agent's back.
+
+## A reusable transcript
+
+The conversation surface is built so that another application can reuse it unchanged, and only
+the demo-specific bits — the sensor icons, the voice, the Speaking panel — live in the demo.
+
+- **One generic transcript log.** A single presenter object (`TranscriptLog`, in
+  `examples/conversation_demo/transcript.py`) subscribes to the framework's instrumentation
+  (`on_agent_trigger`, `on_agent_prompt`, `on_agent_command`, the `output_sink`) and, for every
+  issued Command, listens to its `agent:command:<call_id>` World entry so the item's state follows
+  the execution (`running` → `complete`/`failed`/`cancelled`). It knows the framework's own names
+  — `noop` (rendered `🚫 noop`, never through the hook since no entry exists) and the configured
+  output Command (labelled 🗣️ by default, read from the Agent) — and nothing about the application.
+  It also keeps the prompt history the Prompt panel browses.
+- **One hook for what is application-specific: `display_entry(entry: WorldEntry)`.** Every
+  transcript item that comes from a World entry is rendered through this function, which returns an
+  `EntryDisplay(label, detail)` — `label` is the one-line text with its icon (the input side's
+  message, or a Command item's title), `detail` the Command item's body — or `None` to fall back
+  to the generic default (`⚡ key = value` for an entry; `🦾 name` / `name(args)` for a Command
+  execution, whose value is a `CommandExecution`). Because a Command's execution *is* a World entry,
+  the same hook customises both sides: the demo's hook turns `speech_input` into `🗣️ "hello"`,
+  `closest_user` into `👤 Closest user detected: alice`, and a running `say` into `🗣️ say` with the
+  spoken text as body. The hook lives in the demo next to the entries' `serialize_fn`s — the same
+  per-entry knowledge, rendered for a person instead of for the model. The transcript adds the
+  generic parts around it: reaction groups, the state suffix and spinner, result/error and
+  duration.
+- **The Speaking panel is not part of the transcript.** `say` reports its word-by-word progress to
+  a small demo-owned state object the panel renders; the transcript only ever sees `say` as a
+  Command with a state, like the others.
 
 ## Configuration
 

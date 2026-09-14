@@ -21,9 +21,10 @@ This is the first runnable example (see specs/conversation-demo.md). It drives W
 its public API: speech and sensor events enter the World; the Agent reasons over the World, issues
 Commands, and replies; the UI shows the live World state and the exact prompt sent to the model.
 
-This file is the **app**: the World entries and robot Commands, plus the standup that wires WICA to
-the presenter and UI. The transcript/prompt state the agent callbacks and UI share lives in
-`app_state.DemoState`; the Gradio surfaces live in `app_ui.build_ui`.
+This file is the **app**: the World entries (and how each shows to the model and to the person),
+the robot Commands, plus the standup that wires WICA to the presenter and UI. The generic
+transcript lives in `transcript.TranscriptLog`; the demo-specific state it composes with (the
+Speaking panel's slot) in `app_state.DemoState`; the Gradio surfaces in `app_ui.build_ui`.
 """
 
 from __future__ import annotations
@@ -35,10 +36,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from wica import Content, TextPart, Wica, World
+from wica import Content, TextPart, Wica, World, WorldEntry
+from wica.agent import CommandExecution
 from wica.config import MissingEnvError, WicaConfig
 
 from examples.conversation_demo.app_state import DemoState
+from examples.conversation_demo.transcript import EntryDisplay
 
 # Importing this module has no side effects: it only defines the World entries, Commands, and the
 # `build_app` standup. Logging config and the Gradio UI import live in `main()`, so tests can import
@@ -94,17 +97,38 @@ def register_world() -> None:
     world.register("tracked_user", str, serialize_fn=_tracked_user)
 
 
+def display_entry(entry: WorldEntry) -> EntryDisplay | None:
+    """How the demo's entries show in the transcript — the person-facing counterpart of the
+    serialize_fns above (the same per-entry knowledge, rendered for a human instead of the model).
+    This is the one hook the generic transcript takes; anything it doesn't recognise returns None
+    and gets the generic default (`⚡ key = value`, `🦾 name(args)` for a Command). See
+    specs/conversation-demo.md ("A reusable transcript")."""
+    value = entry.current.value
+    if entry.key == "speech_input":
+        return EntryDisplay(f'🗣️ "{value}"')
+    if entry.key == "closest_user":
+        return EntryDisplay(
+            "👤 Closest user gone"
+            if value is None
+            else f"👤 Closest user detected: {value}"
+        )
+    if isinstance(value, CommandExecution) and value.name == "say":
+        # The voice: title it by channel and show what the robot set out to say as the body.
+        return EntryDisplay("🗣️ say", str(value.args.get("text", "")))
+    return None
+
+
 # --- Commands (the robot's fake actions) --------------------------------------------
 
-# The presenter holds the transcript/prompt state the agent callbacks and UI share; `say` grows its
-# spoken bubble through it. Bound by build_app() (like `world`), so a test can stand the app up with
-# a fresh presenter; the commands reference it at call time, always after that binding.
+# The presenter the UI reads: the generic transcript plus the Speaking slot `say` drives. Bound by
+# build_app() (like `world`), so a test can stand the app up with a fresh presenter; the commands
+# reference it at call time, always after that binding.
 state: DemoState
 
 # Simulated per-word speaking pace. Because `say` is a real Command, taking time here means it stays
-# "running" (and cancellable — barge-in) in the World for its whole duration, and the demo streams
-# the words into the transcript as they're "spoken". This is a demo simulation, not framework token
-# streaming (which is post-v1 — see specs/agent.md "Future improvements").
+# "running" (and cancellable — barge-in) in the World for its whole duration, and the Speaking panel
+# shows the words as they're "spoken". This is a demo simulation, not framework token streaming
+# (which is post-v1 — see specs/agent.md "Future improvements").
 _SAY_WORD_DELAY_S = 0.3
 
 
@@ -114,24 +138,19 @@ async def say(text: str) -> str:
     words = text.split()
     if not words:
         return "Said it."
-    # Capture the reaction this utterance belongs to *before* the first await: `say` streams in the
-    # background, so a later step (e.g. a fast command completing in the same reaction) can open a
-    # newer reaction group while we sleep. Binding the parent now keeps the spoken words in their
-    # originating group rather than adopting the newer one.
-    reaction_id = state.current_reaction_id()
-    # Open the say bubble once (the presenter enqueues it), then grow its content word by word:
-    # tick appends this exact dict to the transcript, so mutating its content in place streams the
-    # words into the UI. Simulating speech as a slow async loop also keeps the Command "running"
-    # (cancellable) while it speaks.
-    message: dict[str, Any] | None = None
-    spoken: list[str] = []
-    for word in words:
-        await asyncio.sleep(_SAY_WORD_DELAY_S)
-        spoken.append(word)
-        if message is None:
-            message = state.open_say_bubble(word, reaction_id)
-        else:
-            message["content"] = " ".join(spoken)
+    # `say` only drives the Speaking panel: the transcript shows this utterance as a Command item
+    # (full text, live state) through the generic log, like any other Command. Simulating speech as
+    # a slow async loop keeps the Command "running" (cancellable) while it speaks; a cancellation
+    # lands at the sleep, and the slot records it before the CancelledError propagates.
+    token = state.speaking.start(text)
+    try:
+        for _ in words:
+            await asyncio.sleep(_SAY_WORD_DELAY_S)
+            state.speaking.advance(token)
+    except asyncio.CancelledError:
+        state.speaking.cancelled(token)
+        raise
+    state.speaking.complete(token)
     return "Said it."
 
 
@@ -184,19 +203,22 @@ def build_app(config: WicaConfig) -> AppHandle:
 
     Wica owns the single event loop in a daemon thread and the World is thread-safe, so the Gradio
     side stays fully synchronous: sensor events call world.update(...) directly, and the Agent's
-    instrumentation Events (emitted on the loop) reach the presenter's callbacks, which push chat
-    events onto its thread-safe queue that the UI's timer drains into the transcript. The demo's
-    panels subscribe to the surfaced instrumentation Events (multi-consumer): the prompt panel to
-    on_agent_prompt, the input side to on_agent_trigger (what the robot actually observed), the
-    assistant side to on_agent_command.
+    instrumentation Events (emitted on the loop) reach the transcript's callbacks, which push chat
+    items onto its thread-safe queue that the UI's timer drains. `TranscriptLog.attach` subscribes
+    the surfaced Events (multi-consumer) — on_agent_prompt for the prompt panel and reaction
+    groups, on_agent_trigger for the input side (what the robot actually observed),
+    on_agent_command for the assistant side, where each Command item then follows its
+    agent:command:<call_id> World entry through a listener.
 
     The api key resolves at Agent build inside Wica.init, so that's what we guard: an unset
     api_key_env raises MissingEnvError there, and we degrade to a World-only system. See
     specs/config.md, specs/wica.md."""
     global world, state
-    state = DemoState()
+    state = DemoState(display_entry)
     try:
-        wica = Wica.init(config, output_sink=state.output_sink, output_command=say)
+        wica = Wica.init(
+            config, output_sink=state.transcript.output_sink, output_command=say
+        )
     except MissingEnvError as exc:
         # Explore-only: a World-only system (no Agent) on its own loop, so the panel and sensor
         # inputs still work while nothing reasons over them.
@@ -212,9 +234,7 @@ def build_app(config: WicaConfig) -> AppHandle:
     register_world()
     for command in COMMANDS:
         wica.register_command(command)
-    wica.on_agent_prompt.subscribe(state.on_prompt)
-    wica.on_agent_trigger.subscribe(state.on_trigger)
-    wica.on_agent_command.subscribe(state.on_command)
+    state.transcript.attach(wica)
     wica.start()
     return AppHandle(wica=wica, world=world, state=state, config_error=None)
 

@@ -1,9 +1,10 @@
 """The Gradio UI for the WICA conversation demo.
 
-`build_ui(state, world, config_error)` assembles the four surfaces (Conversation / World state /
-Prompt / Sensor inputs) and wires their handlers and refresh timers. It reads live World state
-directly (via `world`) and the transcript/prompt history through the `DemoState` presenter — it
-never owns framework state of its own beyond a little tick-local bookkeeping. The app file
+`build_ui(state, world, config_error)` assembles the five surfaces (Conversation / Speaking /
+World state / Prompt / Sensor inputs) and wires their handlers and refresh timers. It reads live
+World state directly (via `world`), the transcript/prompt history through the generic
+`TranscriptLog` and the Speaking panel's state through the `SpeakingSlot` (both on `DemoState`) —
+it never owns framework state of its own beyond a little tick-local bookkeeping. The app file
 (`app.py`) stands the system up and calls this.
 """
 
@@ -17,9 +18,54 @@ import gradio as gr
 from wica import World, WorldEntry
 from wica.agent import CommandExecution
 
-from examples.conversation_demo.app_state import DemoState
+from examples.conversation_demo.app_state import DemoState, Speaking
 
 _NO_PROMPT_YET = "(no prompt sent to the model yet)"
+
+# --- Speaking panel ------------------------------------------------------------------
+#
+# The simulated TTS's state, rendered on its own under the conversation: the words already
+# "spoken" set apart from the ones still to come, a spoken/total count and the utterance's state.
+# The transcript shows the same `say` only as a Command item (full text + live state), so this is
+# the one place the word-by-word progress is visible — and the one surface specific to this
+# robot's voice rather than to the framework. See specs/conversation-demo.md ("What the user
+# sees" 2.).
+_SPEAKING_BADGES = {
+    "speaking": "🔊 speaking…",
+    "complete": "✅ complete",
+    "cancelled": "⏹ cancelled",
+}
+
+
+def _speaking_html(speaking: Speaking | None) -> str:
+    style = (
+        "<style>"
+        ".speaking{border:1px solid var(--border-color-primary,#ccc);border-radius:6px;"
+        "padding:6px 10px;font-size:14px;min-height:2.6em}"
+        ".speaking .badge{font-size:12px;color:var(--body-text-color-subdued,#666);"
+        "margin-bottom:2px}"
+        ".speaking .spoken{font-weight:600}"
+        ".speaking .remaining{color:var(--body-text-color-subdued,#999)}"
+        ".speaking .idle{color:var(--body-text-color-subdued,#999);font-style:italic}"
+        "</style>"
+    )
+    if speaking is None:
+        return (
+            f"<div class='speaking'>{style}"
+            "<div class='badge'>🗣️ say</div>"
+            "<div class='idle'>(the robot hasn't spoken yet)</div></div>"
+        )
+    spoken = " ".join(html.escape(w) for w in speaking.words[: speaking.spoken])
+    remaining = " ".join(html.escape(w) for w in speaking.words[speaking.spoken :])
+    badge = _SPEAKING_BADGES[speaking.state]
+    return (
+        f"<div class='speaking'>{style}"
+        f"<div class='badge'>🗣️ say · {badge} · {speaking.spoken}/{len(speaking.words)} words"
+        "</div><div class='words'>"
+        f"<span class='spoken'>{spoken}</span> <span class='remaining'>{remaining}</span>"
+        "</div></div>"
+    )
+
 
 # --- World state table ---------------------------------------------------------------
 #
@@ -86,20 +132,27 @@ def _world_html(world: World) -> str:
 
 def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blocks:
     """Assemble the demo UI. Input handlers only touch the World; the transcript is fed by the
-    agent's callbacks via `state` (a trigger shows up on the right once it actually starts a step —
-    a trigger dropped by the busy single-in-flight loop simply won't appear, and no reply follows
-    it)."""
+    agent's callbacks via `state.transcript` (a trigger shows up on the right once it actually
+    starts a step — a trigger dropped by the busy single-in-flight loop simply won't appear, and
+    no reply follows it), and the Speaking panel by `say` via `state.speaking`."""
+    transcript = state.transcript
 
     # Tick-local UI bookkeeping (not framework state): how many prompts the view has shown, and the
     # signature of the transcript last pushed to the chatbot. Held as closure state so tick can
     # update them across timer fires without module globals.
     last_shown_count = 0
-    # The conversation timer fires every 0.2s, but re-sending an unchanged transcript re-triggers
-    # gr.Chatbot's autoscroll and keeps yanking the view to the bottom while the user tries to scroll
-    # up. So tick pushes a new chatbot value only when this signature changes (new/edited messages,
-    # incl. a `say` bubble growing word by word) and sends a no-op update otherwise — autoscroll then
-    # follows genuinely new content but leaves reading alone.
+    # The chatbot is deliberately NOT an output of the 0.2s timer. Every event that lists a
+    # component as an output flips that component's loading status (pending → complete) even with
+    # show_progress="hidden", and gr.Chatbot's autoscroll effect re-runs on that flip: whenever the
+    # view is within ~100px of the bottom it schedules an unconditional scroll-to-bottom 300ms
+    # later. Driven by a 200ms timer that made scrolling up nearly impossible — the reader was
+    # yanked back before getting clear of the bottom, even with nothing new to show. So the timer
+    # only bumps `transcript_version` (a gr.State) when this signature changes (new messages, or
+    # a Command item's title/status/content edited in place as it runs); Gradio fires the State's
+    # .change only on a real value change, and that event alone pushes the transcript. Autoscroll
+    # then follows genuinely new content and leaves reading alone.
     last_conv_sig: tuple[Any, ...] | None = None
+    conv_version = 0
 
     def on_send(user_text: str) -> str:
         text = user_text.strip()
@@ -118,22 +171,18 @@ def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blo
 
     def on_select_prompt(index: int | None) -> Any:
         """User picked a prompt from the dropdown — show its exact text."""
-        text = state.prompt_text(index)
+        text = transcript.prompt_text(index)
         return gr.update() if text is None else text
 
-    def tick() -> tuple[Any, Any, Any]:
-        nonlocal last_shown_count, last_conv_sig
-        snap = state.snapshot()
+    def tick() -> tuple[int, Any, Any, str]:
+        nonlocal last_shown_count, last_conv_sig, conv_version
+        snap = transcript.snapshot()
 
-        # Push the transcript only when it actually changed; otherwise send a no-op update so
-        # gr.Chatbot's autoscroll isn't re-triggered every 0.2s (which would keep dragging the view
-        # to the bottom and fight the user scrolling up). A genuine change still updates and
-        # autoscroll follows it.
+        # Bump the transcript version only when it actually changed (see the note above); an
+        # unchanged int is a no-op for the gr.State, so the chatbot isn't touched.
         if snap.conv_sig != last_conv_sig:
             last_conv_sig = snap.conv_sig
-            chatbot_update: Any = snap.conversation
-        else:
-            chatbot_update = gr.update()
+            conv_version += 1
 
         # Snap the view to the newest prompt only when a new step has appeared; between steps leave
         # the dropdown and textbox untouched (bare gr.update()) so the user can browse older prompts.
@@ -145,7 +194,18 @@ def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blo
         else:
             selector_update = gr.update()
             prompt_update = gr.update()
-        return chatbot_update, selector_update, prompt_update
+        # The Speaking panel is cheap to re-render whole each tick (like the World table), and its
+        # words advance faster than a diff would be worth.
+        return (
+            conv_version,
+            selector_update,
+            prompt_update,
+            _speaking_html(state.speaking.read()),
+        )
+
+    def push_transcript() -> list[dict[str, Any]]:
+        """Fires on transcript_version.change — i.e. only when the transcript really changed."""
+        return transcript.snapshot().conversation
 
     def tick_world() -> str:
         """Refresh only the World state table, on its own timer. Split off the main tick so the live
@@ -174,12 +234,19 @@ def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blo
             "framework channel it came from: **🗣️ say** (the robot's spoken reply — its `say` output "
             "Command, what the person hears), **💭 output sink** (the model's free text, now private "
             "reasoning), **🦾** command calls, and **🚫 noop** (the robot explicitly choosing not to "
-            "react — often its own re-triggered step, since speaking wakes the agent again)."
+            "react — often its own re-triggered step, since speaking wakes the agent again). "
+            "Every Command item shows its **execution state live**: a spinner while it runs, then "
+            "✅ complete / ❌ failed / ⏹ cancelled with its result and duration. The **Speaking** "
+            "panel under the conversation shows the current `say` word by word."
         )
 
         with gr.Row():
             with gr.Column(scale=3):
                 chatbot = gr.Chatbot(label="Conversation", height=420)
+                # Bumped by the timer only on a real transcript change; its .change feeds the
+                # chatbot (see the autoscroll note in build_ui).
+                transcript_version = gr.State(0)
+                speaking_view = gr.HTML(value=_speaking_html(None))
                 with gr.Row():
                     msg = gr.Textbox(
                         placeholder="Say something to the robot…",
@@ -224,10 +291,17 @@ def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blo
         )
 
         # Two independent timers so the panels don't share one round-trip. The conversation timer
-        # refreshes faster than the per-word speaking pace (_SAY_WORD_DELAY_S) so `say` streams into
-        # the transcript smoothly, roughly one word at a time; it also drives the prompt panel.
+        # refreshes faster than the per-word speaking pace (_SAY_WORD_DELAY_S) so the Speaking
+        # panel advances roughly one word at a time; it also drives the prompt panel and the
+        # transcript version — the chatbot itself is pushed by the version's .change (below).
         timer = gr.Timer(0.2)
-        timer.tick(tick, outputs=[chatbot, prompt_selector, prompt_view])
+        timer.tick(
+            tick,
+            outputs=[transcript_version, prompt_selector, prompt_view, speaking_view],
+        )
+        transcript_version.change(
+            push_transcript, outputs=chatbot, show_progress="hidden"
+        )
 
         # The World table gets its own timer (tick_world) so its liveness isn't bottlenecked by the
         # growing transcript payload the conversation tick re-sends each fire.
