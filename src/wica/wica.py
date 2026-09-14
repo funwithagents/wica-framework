@@ -61,8 +61,6 @@ class Wica:
         cls,
         config: WicaConfig,
         *,
-        output_sink: Callable[[str], Awaitable[None]] | None = None,
-        output_command: Callable[..., Any] | Command | None = None,
         coalesce_window: float = 0.2,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> Wica:
@@ -73,15 +71,16 @@ class Wica:
         included default), Wica creates one and will run it in its own daemon thread on ``start()``;
         otherwise it adopts the injected loop and leaves the thread to the caller.
 
-        Runtime wiring the config object should not express — ``output_sink``, ``output_command``,
-        ``coalesce_window``, and optionally ``loop`` — is supplied through keyword arguments here;
-        the config carries provider/model/key/prompt. ``output_command`` (a callable or a
-        ``Command``) is the user-facing output channel; when set, free text becomes the agent's
-        private reasoning stream (see specs/agent.md, "Output"). Resolution (env key, prompt file)
-        happens inside ``Agent.__init__``, so a
-        ``MissingEnvError`` or unreadable prompt surfaces here, at ``init``. Logging is not
-        configured here: WICA is a library, so it only emits under the ``wica.*`` loggers and
-        leaves handlers/levels to the embedding application. See specs/config.md, specs/wica.md.
+        Runtime values the config object should not express — ``coalesce_window`` and optionally
+        ``loop`` — are keyword arguments here; the config carries provider/model/key/prompt. ``init``
+        takes no application callables: the output sink and the output Command are wired after
+        construction through :meth:`set_output_sink` / :meth:`set_output_command`, so the objects
+        they belong to can be built against this Wica first (build, then wire, then start — see
+        specs/wica.md, "Output wiring is delegated"). Resolution (env key, prompt file) happens
+        inside ``Agent.__init__``, so a ``MissingEnvError`` or unreadable prompt surfaces here, at
+        ``init``. Logging is not configured here: WICA is a library, so it only emits under the
+        ``wica.*`` loggers and leaves handlers/levels to the embedding application. See
+        specs/config.md, specs/wica.md.
         """
         owns_loop = loop is None
         if loop is None:
@@ -92,8 +91,6 @@ class Wica:
                 config.agent,
                 world=world,
                 loop=loop,
-                output_sink=output_sink,
-                output_command=output_command,
                 coalesce_window=coalesce_window,
             )
         except BaseException:
@@ -206,3 +203,18 @@ class Wica:
         delegated"). Command names are unique and ``noop``/``cancel_command`` are reserved: a
         duplicate or reserved name raises ``ValueError`` (see specs/commands.md)."""
         self.agent.register_command(fn)
+
+    def set_output_sink(self, sink: Callable[[str], Awaitable[None]] | None) -> None:
+        """Set (or, with None, clear) the async sink receiving the model's free text each step —
+        delegates verbatim to ``agent.set_output_sink``. A single replaceable slot, wired after
+        ``init`` and, in the intended flow, before ``start()``. See specs/wica.md ("Output wiring is
+        delegated"), specs/agent.md ("Output wiring")."""
+        self.agent.set_output_sink(sink)
+
+    def set_output_command(self, fn: Callable[..., Any] | Command | None) -> None:
+        """Set (or, with None, clear) the user-facing output Command — delegates verbatim to
+        ``agent.set_output_command`` (a callable or a ``Command``; when set, free text becomes the
+        agent's private reasoning stream). A reserved or already-registered name raises
+        ``ValueError``. See specs/wica.md ("Output wiring is delegated"), specs/agent.md ("Output
+        wiring")."""
+        self.agent.set_output_command(fn)

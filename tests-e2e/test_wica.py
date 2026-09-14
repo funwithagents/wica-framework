@@ -56,7 +56,8 @@ def test_plain_text_round_trip(config_path: Path):
     """A live provider, driven through the real entrypoint: Wica.init → register an Input → start →
     an update wakes the Agent, which reasons and speaks to the output sink."""
     sink = RecordingSink()
-    wica = real_wica(config_path, output_sink=sink)
+    wica = real_wica(config_path)
+    wica.set_output_sink(sink)
     wica.world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -75,7 +76,8 @@ def test_real_tool_calling_round_trip(config_path: Path):
     """A live provider issuing a real tool call through Wica: the model calls the registered Command,
     whose execution is tracked as a World entry that goes running → complete."""
     sink = RecordingSink()
-    wica = real_wica(config_path, output_sink=sink)
+    wica = real_wica(config_path)
+    wica.set_output_sink(sink)
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""
@@ -137,7 +139,8 @@ def test_noop_empty_reaction_live(config_path: Path):
         "take no action. Never reply with text unless a response is actually needed."
     )
     sink = RecordingSink()
-    wica = real_wica(config_path, system_prompt=persona, output_sink=sink)
+    wica = real_wica(config_path, system_prompt=persona)
+    wica.set_output_sink(sink)
     wica.world.register(
         "status", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )

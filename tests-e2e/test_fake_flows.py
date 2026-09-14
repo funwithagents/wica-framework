@@ -106,7 +106,8 @@ def test_scripted_flow_through_wica_init():
     )
 
     sink = RecordingSink()
-    wica = Wica.init(config, output_sink=sink, coalesce_window=0.0)
+    wica = Wica.init(config, coalesce_window=0.0)
+    wica.set_output_sink(sink)
     world = wica.world
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -173,7 +174,8 @@ def test_scripted_flow_direct_construction(loop: asyncio.AbstractEventLoop):
         model_kwargs={"script": [{"text": "hello there"}], "delay_s": 0},
     )
     sink = RecordingSink()
-    agent = Agent(config, world=world, loop=loop, output_sink=sink, coalesce_window=0.0)
+    agent = Agent(config, world=world, loop=loop, coalesce_window=0.0)
+    agent.set_output_sink(sink)
 
     agent.start()
     try:
@@ -190,8 +192,8 @@ def test_scripted_flow_direct_construction(loop: asyncio.AbstractEventLoop):
         world.stop()
 
 
-def test_output_command_flow_through_wica_init():
-    """With an output Command configured, the model's free text goes to the sink (private
+def test_output_command_flow_through_the_setters():
+    """With an output Command set (after init, through the facade's setters), the model's free text goes to the sink (private
     reasoning) while the user-facing text is delivered by the Command; its completion re-triggers a
     step that ends the turn with noop."""
     config = WicaConfig.from_dict(
@@ -227,9 +229,9 @@ def test_output_command_flow_through_wica_init():
         return "spoken"
 
     sink = RecordingSink()
-    wica = Wica.init(
-        config, output_sink=sink, output_command=speak, coalesce_window=0.0
-    )
+    wica = Wica.init(config, coalesce_window=0.0)
+    wica.set_output_sink(sink)
+    wica.set_output_command(speak)
     wica.world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -267,7 +269,8 @@ def test_noop_flow_takes_no_action():
     )
 
     sink = RecordingSink()
-    wica = Wica.init(config, output_sink=sink, coalesce_window=0.0)
+    wica = Wica.init(config, coalesce_window=0.0)
+    wica.set_output_sink(sink)
     wica.world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )

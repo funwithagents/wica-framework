@@ -158,13 +158,22 @@ def make_agent(
     world: World,
     loop: asyncio.AbstractEventLoop,
     system_prompt: str = "You are terse.",
+    output_sink: Callable[[str], Awaitable[None]] | None = None,
+    output_command: Callable[..., Any] | Command | None = None,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
     and builds its own model from it; the `model=` override lets these tests supply the bespoke
-    ProgrammableChatModel the loop is driven over. The prompt is carried on the config."""
+    ProgrammableChatModel the loop is driven over. The prompt is carried on the config. The output
+    sink / output Command are not constructor arguments (build, then wire — see specs/agent.md,
+    "Output wiring"); this helper folds the wiring step in for brevity."""
     config = AgentConfig(provider="fake", model="test", system_prompt=system_prompt)
-    return Agent(config, world=world, loop=loop, model=model, **kwargs)
+    agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
+    if output_sink is not None:
+        agent.set_output_sink(output_sink)
+    if output_command is not None:
+        agent.set_output_command(output_command)
+    return agent
 
 
 def human_texts(message: BaseMessage) -> str:
@@ -1499,11 +1508,13 @@ def test_register_command_rejects_duplicate_names(loop, world, sink):
 
 
 @pytest.mark.parametrize("name", ["noop", "cancel_command"])
-def test_output_command_with_reserved_name_is_rejected_at_construction(
-    loop, world, sink, name
-):
+def test_set_output_command_rejects_reserved_names(loop, world, sink, name):
+    agent = _dummy_agent(loop, world, sink)
+    before = agent.system_prompt
     with pytest.raises(ValueError, match="reserved"):
-        _dummy_agent(loop, world, sink, output_command=_named(name))
+        agent.set_output_command(_named(name))
+    assert agent.output_command_name is None
+    assert agent.system_prompt == before
 
 
 def test_register_command_rejects_the_output_commands_name(loop, world, sink):
@@ -1519,6 +1530,129 @@ def test_restart_keeps_exactly_one_of_each_builtin(loop, world, sink):
     agent.stop()
     agent.start()
     assert sorted(agent._commands) == ["cancel_command", "noop", "say", "wave"]
+    agent.stop()
+
+
+# --- Output wiring: set_output_command / set_output_sink (specs/agent.md "Output wiring") -------
+
+
+def test_set_output_command_rejects_an_already_registered_name_unchanged(
+    loop, world, sink
+):
+    agent = _dummy_agent(loop, world, sink)
+    agent.register_command(_named("wave"))
+    before = agent.system_prompt
+    with pytest.raises(ValueError, match="already registered"):
+        agent.set_output_command(_named("wave"))
+    assert agent.output_command_name is None
+    assert agent.system_prompt == before
+    assert list(agent.commands) == ["wave"]
+
+
+def test_set_output_command_after_start_attaches_immediately_and_dispatches(
+    loop, world, sink
+):
+    """Setting while running is permitted: the Command is bound at once, the next step's system
+    prompt carries the output clause, and a call to it dispatches like any Command."""
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    spoken: list[str] = []
+    spoke = threading.Event()
+
+    async def speak(text: str) -> str:
+        """Say something to the user."""
+        spoken.append(text)
+        spoke.set()
+        return "spoken"
+
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("speak", {"text": "hello"}, "s1")]),
+            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+    assert "speak" not in agent.commands
+    assert "ordinary text" in agent.system_prompt
+
+    agent.set_output_command(speak)
+    assert "speak" in agent.commands
+    assert agent.output_command_name == "speak"
+
+    world.update("input", "greet the user")
+    assert spoke.wait(timeout=WAIT_TIMEOUT)
+    assert spoken == ["hello"]
+    # The step's prompt (rendered after the set) names the output Command.
+    system = model.calls[0][0]
+    assert "speak" in system.text and "private reasoning" in system.text
+    agent.stop()
+
+
+def test_replacing_the_output_command_detaches_the_previous_one(loop, world, sink):
+    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+    agent.start()
+    assert "say" in agent.commands
+
+    agent.set_output_command(_named("speak"))
+    assert "say" not in agent.commands
+    assert "speak" in agent.commands
+    assert agent.output_command_name == "speak"
+    assert "speak" in agent.system_prompt and "calling say" not in agent.system_prompt
+    # The old name is free again; the new one is reserved.
+    agent.register_command(_named("say"))
+    with pytest.raises(ValueError, match="output Command"):
+        agent.register_command(_named("speak"))
+    agent.stop()
+
+
+def test_setting_the_same_name_again_swaps_the_command_object(loop, world, sink):
+    first = _named("say")
+    second = _named("say")
+    agent = _dummy_agent(loop, world, sink, output_command=first)
+    agent.start()
+    assert agent.commands["say"] is first
+    agent.set_output_command(second)
+    assert agent.commands["say"] is second
+    assert list(agent.commands).count("say") == 1
+    agent.stop()
+
+
+def test_clearing_the_output_command_restores_free_text_mode(loop, world, sink):
+    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+    agent.start()
+    assert "private reasoning" in agent.system_prompt
+
+    agent.set_output_command(None)
+    assert agent.output_command_name is None
+    assert "say" not in agent.commands
+    assert "ordinary text" in agent.system_prompt
+    assert "private reasoning" not in agent.system_prompt
+    agent.register_command(_named("say"))  # no longer reserved
+    agent.stop()
+
+
+def test_set_output_sink_after_start_takes_effect_next_step_and_none_silences(
+    loop, world
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=text_response("hi"))
+    agent = make_agent(model, world=world, loop=loop, coalesce_window=0)
+    agent.start()
+
+    late = RecordingSink()
+    agent.set_output_sink(late)
+    world.update("input", "one")
+    assert late.event.wait(timeout=WAIT_TIMEOUT)
+    assert late.texts == ["hi"]
+
+    agent.set_output_sink(None)
+    world.update("input", "two")
+    wait_until(lambda: len(model.calls) == 2)
+    assert late.texts == ["hi"]  # the second step's text went to the no-op sink
     agent.stop()
 
 

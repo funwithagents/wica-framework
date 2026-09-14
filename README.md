@@ -110,7 +110,8 @@ config = WicaConfig(
         model_kwargs={"temperature": 0.7},
     )
 )
-wica = Wica.init(config, output_sink=speak)   # owns the loop + World + Agent
+wica = Wica.init(config)                      # owns the loop + World + Agent
+wica.set_output_sink(speak)                   # output wiring comes after init, before start
 
 wica.world.register(
     "speech_input",
@@ -197,7 +198,8 @@ For this path, a relative `system_prompt_file` is automatically located relative
 Every form produces the same type and use the same framework entry point:
 
 ```python
-wica = Wica.init(config, output_sink=speak, coalesce_window=0.2)
+wica = Wica.init(config, coalesce_window=0.2)
+wica.set_output_sink(speak)
 ```
 
 - **API key** — give a literal `api_key`, or an `api_key_env` naming the env var to read at **Agent build** (`Wica.init`), at most one. With neither, the provider's standard env var is used. An env-referenced config carries no secret and is safe to commit; a literal-key config should be git-ignored.

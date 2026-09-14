@@ -1,11 +1,13 @@
 """Deterministic end-to-end tests of the conversation demo, over the `provider: "fake"` model.
 
 Like tests-e2e/test_fake_flows.py these are network-free and key-less, so they **always run** — but
-here the system under test is the *example itself*: they stand up the real demo through
-`examples.conversation_demo.app.build_app` (the same entry point `main()` uses), against a scripted
-fake config, and assert the example's actual World entries, Commands, and presenters turn inputs
-into the expected transcript (with live Command state), Speaking panel state and World state. They
-import no Gradio — `app` keeps the UI import lazy — so they need only the core deps.
+here the system under test is the *example itself*: they stand up the real demo through the same
+Gradio-free steps `main()` uses — `build_system(config)`, then `wire(wica, transcript, speaking)`,
+then `start()` — playing the UI's role themselves (a `TranscriptLog` and a `SpeakingSlot` of their
+own, exactly what `build_ui` would create), against a scripted fake config, and assert the
+example's actual World entries, Commands, and presenters turn inputs into the expected transcript
+(with live Command state), Speaking panel state and World state. They import no Gradio, so they
+need only the core deps.
 
 See specs/conversation-demo.md and specs/fake-provider.md.
 """
@@ -14,12 +16,16 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from examples.conversation_demo import app
-from examples.conversation_demo.app import AppHandle, build_app
+from examples.conversation_demo.app import build_system, display_entry, wire
+from examples.conversation_demo.speaking import SpeakingSlot
+from examples.conversation_demo.transcript import TranscriptLog
+from wica import Wica, World
 from wica.config import WicaConfig
 
 WAIT_TIMEOUT = 5.0
@@ -71,6 +77,27 @@ def fast_say(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app, "_SAY_WORD_DELAY_S", 0.05)
 
 
+@dataclass(frozen=True)
+class Stack:
+    """The stood-up demo: the running Wica, its World, and the two presenters the test owns."""
+
+    wica: Wica
+    world: World
+    transcript: TranscriptLog
+    speaking: SpeakingSlot
+
+
+def stand_up(config: WicaConfig) -> Stack:
+    """Build → (the test as the UI) → wire → start, in the order `main()` uses."""
+    wica, world, config_error = build_system(config)
+    assert wica is not None and config_error is None  # fake provider needs no key
+    transcript = TranscriptLog(wica, display_entry)
+    speaking = SpeakingSlot()
+    wire(wica, transcript, speaking)
+    wica.start()
+    return Stack(wica=wica, world=world, transcript=transcript, speaking=speaking)
+
+
 def test_speech_input_drives_say_action_and_world_state(fast_say: None):
     """A spoken input triggers a reasoning step whose scripted output speaks through the `say`
     output Command and sets an emotion; the completion of `say` re-triggers a step ended by noop.
@@ -88,10 +115,9 @@ def test_speech_input_drives_say_action_and_world_state(fast_say: None):
         ]
     )
 
-    handle: AppHandle = build_app(config)
-    assert handle.wica is not None  # fake provider needs no key: the Agent is live
+    handle = stand_up(config)
     try:
-        transcript = handle.state.transcript
+        transcript = handle.transcript
         handle.world.update("speech_input", "hello")
 
         # The robot spoke the scripted line through `say` (its item flips to complete once the
@@ -135,7 +161,7 @@ def test_speech_input_drives_say_action_and_world_state(fast_say: None):
         assert thought and thought[0]["content"] == "considering the greeting"
 
         # The Speaking panel saw the whole utterance go out.
-        speaking = handle.state.speaking.read()
+        speaking = handle.speaking.read()
         assert speaking is not None
         assert speaking.text == "hi there"
         assert (speaking.spoken, speaking.state) == (2, "complete")
@@ -170,15 +196,14 @@ def test_barge_in_cancels_the_running_say(fast_say: None):
         ]
     )
 
-    handle: AppHandle = build_app(config)
-    assert handle.wica is not None
+    handle = stand_up(config)
     try:
-        transcript = handle.state.transcript
+        transcript = handle.transcript
         handle.world.update("speech_input", "tell me a story")
 
         def say_running() -> bool:
             say = items_titled(transcript.snapshot().conversation, "🗣️ say")
-            speaking = handle.state.speaking.read()
+            speaking = handle.speaking.read()
             return bool(say) and speaking is not None and speaking.spoken >= 1
 
         wait_until(say_running)
@@ -205,7 +230,7 @@ def test_barge_in_cancels_the_running_say(fast_say: None):
         assert cancel["metadata"]["title"] == "🦾 cancel_command ✅"
         assert "fake_call_0_0" in cancel["content"]
 
-        speaking = handle.state.speaking.read()
+        speaking = handle.speaking.read()
         assert speaking is not None
         assert speaking.state == "cancelled"
         assert 1 <= speaking.spoken < 10

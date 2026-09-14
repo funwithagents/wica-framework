@@ -14,7 +14,7 @@ You talk to **one object — `Wica`** — the single entry point. `Wica.init(con
 
 “Multimodal” spans both sides differently: Inputs serialize perception into provider-neutral `Content`, while Commands produce speech, movement, display changes, API effects, and other physical or digital outputs. The conversational sink is one complete text response per reasoning step; it is not the full output surface.
 
-- **Wica**: the entry point. `Wica.init(config, *, output_sink=…)` builds and wires everything; `wica.start()` / `wica.stop()` run a restartable shared lifecycle, and `wica.close()` performs terminal teardown. `wica.world` is the World; `wica.register_command(...)` adds Commands; four `Event`s surface what the loop is doing.
+- **Wica**: the entry point. `Wica.init(config)` builds and wires everything; `wica.set_output_sink(...)` / `wica.set_output_command(...)` wire the output channel afterwards (so the objects they belong to can be built against the Wica first — build, then wire, then start); `wica.start()` / `wica.stop()` run a restartable shared lifecycle, and `wica.close()` performs terminal teardown. `wica.world` is the World; `wica.register_command(...)` adds Commands; four `Event`s surface what the loop is doing.
 - **W — World** (`wica.world`): you `register()` a key with a type + a `serialize_fn` (value → [`Content`](specs/content.md)), then `update()` it as data changes. Values must be deep-copyable: the World copies on ingress and on outward getters/callbacks so only `update()` can change versioned state. `update()` is callable from any thread, but only **while the system is running** (between `start()` and `stop()`); `register`/`get` work any time.
 - **I — Inputs**: not a class — a *role* a World entry plays when an external producer feeds it. A registered entry marked `triggers_llm_call=True` wakes the Agent when updated. The producer can run on any thread.
 - **C — Commands**: the agent's unit of action. Register a plain function (or an off-the-shelf LangChain tool wrapped as `Command(tool)`) with `wica.register_command`; the Agent binds it as a native model tool. Each runs as a cancellable `asyncio` task, tracked as a World entry.
@@ -54,9 +54,10 @@ WicaConfig(agent=AgentConfig(...))
 WicaConfig.from_dict(data, *, base_dir=None)
 WicaConfig.from_json(text, *, base_dir=None)
 WicaConfig.from_json_file(path)
-Wica.init(config: WicaConfig, *, output_sink=None, output_command=None,
-          coalesce_window=0.2, loop=None) -> Wica
+Wica.init(config: WicaConfig, *, coalesce_window=0.2, loop=None) -> Wica
 wica.world            # the World (below); wica.agent — the Agent (rarely needed)
+wica.set_output_sink(async_fn | None)        # receives the model's free text each step
+wica.set_output_command(fn_or_command | None)  # the user-facing output Command (free text → private)
 wica.register_command(fn_or_command)   # plain callable, or Command(...) for metadata/tool wrapping
 wica.start(); wica.stop(); wica.start()   # stop is a reversible pause
 wica.close()                              # terminal; releases an owned event loop
@@ -75,8 +76,8 @@ world.get(key)               # defensive copy of current value (works any time)
 world.unregister(key)
 
 # The direct seam (advanced / tests): construct an Agent yourself instead of via Wica.
-Agent(config: AgentConfig, *, world: World, loop, coalesce_window=0.2,
-      output_sink=None, output_command=None, model=None)
+Agent(config: AgentConfig, *, world: World, loop, coalesce_window=0.2, model=None)
+agent.set_output_sink(...); agent.set_output_command(...)   # same setters as on Wica
 ```
 
 ## Recipes
@@ -134,7 +135,8 @@ config = WicaConfig(
         system_prompt="You are a friendly social robot.",
     )
 )
-wica = Wica.init(config, output_sink=speak)          # owns the loop + World + Agent
+wica = Wica.init(config)                             # owns the loop + World + Agent
+wica.set_output_sink(speak)                          # wire the output after init, before start
 
 # Register entries and Commands against the owned World, then start.
 wica.world.register(
@@ -234,7 +236,8 @@ config = WicaConfig.from_dict({          # or a committed *.config.json, same as
         },
     },
 })
-wica = Wica.init(config, output_sink=my_sink)
+wica = Wica.init(config)
+wica.set_output_sink(my_sink)
 wica.world.register("prompt", str, serialize_fn=..., triggers_llm_call=True)
 wica.register_command(walk_to)
 wica.start()

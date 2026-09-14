@@ -1,11 +1,13 @@
 """Fast, deterministic unit tests for the conversation demo's presenters.
 
-These pin the generic transcript (`examples/conversation_demo/transcript.py`), the demo-specific
-state (`app_state.py`: the Speaking slot) and the demo's `display_entry` hook and `say` Command
+These pin the generic transcript (`examples/conversation_demo/transcript.py`), the Speaking
+panel's model (`speaking.py`) and the demo's `display_entry` hook and the robot's `say` Command
 (`app.py`) — the seam between the agent's instrumentation callbacks and the Gradio UI — without any
-network or Gradio. They need only core deps (wica + langchain_core), so they run in the default
-`tests/` tier. The full end-to-end wiring (World entries + Commands + presenter, driven by a
-scripted fake model) is covered separately in tests-e2e/test_example_flow.py.
+network or Gradio. Where a log needs a `Wica` (to read the output Command's name live, or to bind
+World listeners) the tests build an **unstarted** one over the key-less `provider: "fake"` model.
+They need only core deps (wica + langchain_core), so they run in the default `tests/` tier. The
+full end-to-end wiring (World entries + Commands + presenter, driven by a scripted fake model) is
+covered separately in tests-e2e/test_example_flow.py.
 
 See specs/conversation-demo.md ("A reusable transcript").
 """
@@ -13,6 +15,7 @@ See specs/conversation-demo.md ("A reusable transcript").
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,16 +23,17 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from examples.conversation_demo import app
-from examples.conversation_demo.app import display_entry
-from examples.conversation_demo.app_state import DemoState, SpeakingSlot
+from examples.conversation_demo.app import Robot, display_entry
+from examples.conversation_demo.speaking import SpeakingSlot
 from examples.conversation_demo.transcript import (
     EntryDisplay,
     TranscriptLog,
     _flatten_content,
     _render_message,
 )
-from wica import CommandIssued, WorldEntry, WorldEntryVersion
+from wica import Command, CommandIssued, Wica, WorldEntry, WorldEntryVersion
 from wica.agent import CommandExecution
+from wica.config import WicaConfig
 
 
 def make_entry(key: str, value: Any) -> WorldEntry:
@@ -50,6 +54,40 @@ def command_entry(
     """The agent:command:<call_id> entry snapshot a listener receives at a given state."""
     execution = CommandExecution(name=name, args=args, state=state, **kw)  # type: ignore[arg-type]
     return make_entry(f"agent:command:{call_id}", execution)
+
+
+@pytest.fixture
+def unstarted_wica() -> Iterator[Callable[[str | None], Wica]]:
+    """A factory for an unstarted (no loop thread, no network) `Wica` over the fake provider, with
+    an output Command of the given name set — what a log needs to read the voice's name live and
+    to bind its per-Command World listeners. Closed on teardown."""
+    created: list[Wica] = []
+
+    def _make(output_command_name: str | None) -> Wica:
+        config = WicaConfig.from_dict(
+            {
+                "agent": {
+                    "provider": "fake",
+                    "model": "scripted",
+                    "system_prompt": "You are a test robot.",
+                    "model_kwargs": {"delay_s": 0, "script": [{"text": ""}]},
+                }
+            }
+        )
+        wica = Wica.init(config)
+        if output_command_name is not None:
+
+            def voice(text: str) -> str:
+                """The voice."""
+                return text
+
+            wica.set_output_command(Command(voice, name=output_command_name))
+        created.append(wica)
+        return wica
+
+    yield _make
+    for wica in created:
+        wica.close()
 
 
 def titles(conversation: list[dict[str, Any]]) -> list[str | None]:
@@ -108,8 +146,8 @@ def test_render_message_tool_result_shows_call_id():
 # --- display: the generic default and the demo's hook ---------------------------------
 
 
-def test_default_display_is_generic_for_entries_and_commands():
-    log = TranscriptLog(output_command_name="speak")
+def test_default_display_is_generic_for_entries_and_commands(unstarted_wica):
+    log = TranscriptLog(unstarted_wica("speak"))
     assert log.display(make_entry("temperature", 21)) == EntryDisplay(
         "⚡ temperature = 21"
     )
@@ -128,7 +166,7 @@ def test_hook_overrides_and_none_falls_back_to_default():
             return EntryDisplay(f"🙂 mood is {entry.current.value}")
         return None
 
-    log = TranscriptLog(hook)
+    log = TranscriptLog(None, hook)
     assert log.display(make_entry("mood", "good")).label == "🙂 mood is good"
     assert log.display(make_entry("other", 1)).label == "⚡ other = 1"
 
@@ -154,7 +192,7 @@ def test_demo_display_entry_labels_the_robot_entries():
 
 
 def test_on_trigger_shows_input_on_the_user_side_via_the_hook():
-    log = TranscriptLog(display_entry)
+    log = TranscriptLog(None, display_entry)
     log.on_trigger(make_entry("speech_input", "hi"))
     assert log.snapshot().conversation == [{"role": "user", "content": '🗣️ "hi"'}]
 
@@ -162,7 +200,7 @@ def test_on_trigger_shows_input_on_the_user_side_via_the_hook():
 def test_on_trigger_skips_command_retrigger_but_labels_the_next_prompt():
     """A command-completion re-trigger is not shown on the transcript (its item already carries
     the outcome), but its label is still recorded so the next prompt is tagged with it."""
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     log.on_trigger(command_entry("7", "dance", {}, "complete", result="done"))
     assert log.snapshot().conversation == []  # nothing added on the transcript
 
@@ -172,7 +210,7 @@ def test_on_trigger_skips_command_retrigger_but_labels_the_next_prompt():
 
 
 def test_on_prompt_records_prompt_and_opens_a_reaction_group():
-    log = TranscriptLog(display_entry)
+    log = TranscriptLog(None, display_entry)
     log.on_trigger(make_entry("speech_input", "hello robot"))
     log.on_prompt([HumanMessage(content="hello robot")])
     snap = log.snapshot()
@@ -187,7 +225,7 @@ def test_on_prompt_records_prompt_and_opens_a_reaction_group():
 
 
 def test_output_sink_ignores_blank_and_records_private_reasoning():
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     log.on_prompt([HumanMessage(content="hi")])
     asyncio.run(log.output_sink("   "))
     assert titles(log.snapshot().conversation).count("💭 output sink") == 0
@@ -202,7 +240,7 @@ def test_output_sink_ignores_blank_and_records_private_reasoning():
 
 
 def test_on_command_creates_a_pending_item_under_the_current_reaction():
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     log.on_prompt([HumanMessage(content="hi")])  # opens reaction-1
     log.on_command(CommandIssued(name="dance", args={}, call_id="c1"))
     item = item_titled(log.snapshot().conversation, "🦾 dance")
@@ -215,7 +253,7 @@ def test_on_command_creates_a_pending_item_under_the_current_reaction():
 
 
 def test_noop_is_shown_as_choosing_not_to_react_without_state():
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     log.on_prompt([HumanMessage(content="hi")])
     log.on_command(CommandIssued(name="noop", args={}, call_id="c2"))
     item = item_titled(log.snapshot().conversation, "🚫 noop")
@@ -223,9 +261,16 @@ def test_noop_is_shown_as_choosing_not_to_react_without_state():
     assert "status" not in item["metadata"]  # no execution to follow
 
 
-def test_command_item_follows_running_then_complete():
-    log = TranscriptLog(display_entry, output_command_name="say")
+def test_command_item_follows_running_then_complete(unstarted_wica):
+    """Over a real (unstarted) Wica the log labels the voice by the Agent's output Command and
+    binds a listener on the Command's entry — which the Agent registers before emitting
+    on_command, so the test registers it the same way."""
+    wica = unstarted_wica("say")
+    log = TranscriptLog(wica, display_entry)
     log.on_prompt([HumanMessage(content="hi")])
+    wica.world.register(
+        "agent:command:c1", CommandExecution, serialize_fn=lambda value, previous: []
+    )
     log.on_command(CommandIssued(name="say", args={"text": "hi there"}, call_id="c1"))
 
     asyncio.run(
@@ -257,7 +302,7 @@ def test_command_item_follows_running_then_complete():
 
 
 def test_command_item_shows_failure_and_cancellation():
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     log.on_command(CommandIssued(name="dance", args={}, call_id="c1"))
     log.on_command(CommandIssued(name="say", args={"text": "x"}, call_id="c2"))
 
@@ -283,7 +328,7 @@ def test_command_item_shows_failure_and_cancellation():
 
 
 def test_command_update_for_unknown_or_foreign_entries_is_ignored():
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     log.on_command(CommandIssued(name="dance", args={}, call_id="c1"))
     before = log.snapshot()
     asyncio.run(log.on_command_update(command_entry("zzz", "dance", {}, "complete")))
@@ -293,7 +338,7 @@ def test_command_update_for_unknown_or_foreign_entries_is_ignored():
 
 
 def test_signature_tracks_in_place_state_edits_and_is_stable_otherwise():
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     log.on_command(CommandIssued(name="dance", args={}, call_id="c1"))
     first = log.snapshot()
     assert log.snapshot().conv_sig == first.conv_sig  # nothing changed between ticks
@@ -303,7 +348,7 @@ def test_signature_tracks_in_place_state_edits_and_is_stable_otherwise():
 
 
 def test_prompt_text_indexing():
-    log = TranscriptLog()
+    log = TranscriptLog(None)
     assert log.prompt_text(None) is None
     assert log.prompt_text(0) is None  # nothing captured yet
 
@@ -353,36 +398,36 @@ def test_speaking_slot_ignores_a_stale_utterance():
 
 
 @pytest.fixture
-def demo_state(monkeypatch: pytest.MonkeyPatch) -> DemoState:
-    state = DemoState(display_entry)
-    monkeypatch.setattr(app, "state", state, raising=False)  # bare annotation in app.py
+def robot(monkeypatch: pytest.MonkeyPatch, unstarted_wica) -> Robot:
+    """The robot over an unstarted Wica's World and a fresh Speaking slot — `say` touches only the
+    slot, so nothing needs to run."""
     monkeypatch.setattr(app, "_SAY_WORD_DELAY_S", 0.01)
-    return state
+    return Robot(unstarted_wica(None).world, SpeakingSlot())
 
 
-def test_say_drives_the_speaking_slot_to_complete(demo_state: DemoState):
+def test_say_drives_the_speaking_slot_to_complete(robot: Robot):
     async def run() -> str:
-        return await app.say("hi there friend")
+        return await robot.say("hi there friend")
 
     assert asyncio.run(run()) == "Said it."
-    speaking = demo_state.speaking.read()
+    speaking = robot.speaking.read()
     assert speaking is not None
     assert (speaking.spoken, speaking.state) == (3, "complete")
 
 
-def test_say_marks_the_slot_cancelled_when_cut_off(demo_state: DemoState):
+def test_say_marks_the_slot_cancelled_when_cut_off(robot: Robot):
     """Barge-in: cancelling the say task mid-sentence leaves the words spoken so far and marks
     the utterance cancelled — and the cancellation still propagates to the caller."""
 
     async def run() -> None:
-        task = asyncio.create_task(app.say("one two three four five six"))
+        task = asyncio.create_task(robot.say("one two three four five six"))
         await asyncio.sleep(0.025)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(run())
-    speaking = demo_state.speaking.read()
+    speaking = robot.speaking.read()
     assert speaking is not None
     assert speaking.state == "cancelled"
     assert 0 < speaking.spoken < 6

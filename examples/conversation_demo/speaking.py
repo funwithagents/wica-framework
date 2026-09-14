@@ -1,17 +1,10 @@
-"""Demo-specific presenter state: the generic transcript, plus the Speaking panel's slot.
+"""The Speaking panel's model: the simulated TTS's word-by-word progress.
 
-`DemoState` is what the app stands up and the UI and tests read. It composes two things:
-
-  - `transcript` — the **generic** `TranscriptLog` (`transcript.py`), built with the demo's
-    `display_entry` hook (defined in `app.py`, next to the entries' `serialize_fn`s); it knows
-    nothing about the robot beyond what that hook tells it;
-  - `speaking` — the `SpeakingSlot`, the one piece of state that *is* specific to this robot's
-    voice: the simulated TTS's word-by-word progress that the Speaking panel renders. `say` (in
-    `app.py`) drives it from the agent loop; the UI reads it on its own thread.
-
-Both are the seam between the agent loop and the Gradio thread, so everything they share sits
-behind a lock or a thread-safe queue. See specs/conversation-demo.md ("What the user sees" 2.,
-"A reusable transcript").
+`SpeakingSlot` is the one piece of presenter state that *is* specific to this robot's voice. The
+UI owns it (it is created in `build_ui`, next to the transcript) and hands it to the robot at
+wiring time, so `say` (in `app.py`) drives it from the agent loop while the UI reads it on its
+own thread — hence the lock. Gradio-free, so the default test tier can exercise it. See
+specs/conversation-demo.md ("What the user sees" 2., "Composition").
 """
 
 from __future__ import annotations
@@ -19,8 +12,6 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from typing import Literal
-
-from examples.conversation_demo.transcript import DisplayEntry, TranscriptLog
 
 SpeakingState = Literal["speaking", "complete", "cancelled"]
 
@@ -78,12 +69,3 @@ class SpeakingSlot:
         """The current/last utterance, or None if the robot hasn't spoken yet. UI thread."""
         with self._lock:
             return self._current
-
-
-class DemoState:
-    """What the app hands the UI and the tests: the generic transcript (with the demo's display
-    hook) and the Speaking slot."""
-
-    def __init__(self, display_entry: DisplayEntry | None = None) -> None:
-        self.transcript = TranscriptLog(display_entry)
-        self.speaking = SpeakingSlot()

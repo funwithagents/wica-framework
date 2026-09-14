@@ -27,7 +27,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | [config.py](src/wica/config.py) | Framework config: `AgentConfig`/`WicaConfig` dataclasses, strict JSON loading (`from_dict`/`from_json`), `system_prompt_file`, `api_key`/`api_key_env` resolution | [config.md](specs/config.md) |
 | [command.py](src/wica/command.py) | The `Command` definition object — wraps a `Callable` or an off-the-shelf `BaseTool` and holds the backing tool internally, keeping LangChain off the command-definition surface | [commands.md](specs/commands.md) |
 | [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: built from `AgentConfig` on the injected loop, LangChain-backed inference over the World, snapshot history, async cancellable Commands, output sink + optional output Command, auto-registered `cancel_command`/`noop`, system-prompt runtime primer, `on_trigger`/`on_prompt`/`on_command` Events | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
-| [wica.py](src/wica/wica.py) | The `Wica` facade — single entry point owning the shared loop + a `World`+`Agent` pair, restartable `init`/`start`/`stop` lifecycle plus terminal `close`, `register_command`, and four surfaced instrumentation `Event`s | [wica.md](specs/wica.md) |
+| [wica.py](src/wica/wica.py) | The `Wica` facade — single entry point owning the shared loop + a `World`+`Agent` pair, restartable `init`/`start`/`stop` lifecycle plus terminal `close`, `register_command`, `set_output_sink`/`set_output_command` (output wiring after `init`), and four surfaced instrumentation `Event`s | [wica.md](specs/wica.md) |
 | [fake_model.py](src/wica/fake_model.py) | Deterministic, network-free `FakeChatModel` for tests: a scripted `provider: "fake"` model driving the loop over canned responses; test tooling, not re-exported into the runtime `wica` namespace | [fake-provider.md](specs/fake-provider.md) |
 | [__init__.py](src/wica/__init__.py) | Public API surface — re-exports the names above | — |
 
@@ -104,7 +104,7 @@ Never `echo`/print a key itself; when checking whether one is set, redact the va
 uv run pytest tests-e2e -k fake
 ```
 
-Alongside them, `tests-e2e/test_example_flow.py` is another always-run, key-less scripted-fake test — it stands up the **conversation demo** itself (via `examples.conversation_demo.app.build_app`) over a `provider: "fake"` model and asserts the example's end-to-end wiring (see [specs/conversation-demo.md](specs/conversation-demo.md)). Select it with `-k example`; the demo's fast presenter unit tests live in `tests/test_conversation_demo.py` and run in the default tier. Both need the repo root on `sys.path` to import the `examples` package — provided by `pythonpath = ["."]` in `[tool.pytest.ini_options]`.
+Alongside them, `tests-e2e/test_example_flow.py` is another always-run, key-less scripted-fake test — it stands up the **conversation demo** itself (via `examples.conversation_demo.app.build_system` + `wire`, the same Gradio-free steps `main()` runs) over a `provider: "fake"` model and asserts the example's end-to-end wiring (see [specs/conversation-demo.md](specs/conversation-demo.md)). Select it with `-k example`; the demo's fast presenter unit tests live in `tests/test_conversation_demo.py` and run in the default tier. Both need the repo root on `sys.path` to import the `examples` package — provided by `pythonpath = ["."]` in `[tool.pytest.ini_options]`.
 
 ## Implementation plans
 

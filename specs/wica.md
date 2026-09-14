@@ -25,19 +25,21 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 
 | Member | Kind | Role |
 |---|---|---|
-| `Wica.init(config, *, output_sink=…, output_command=…, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, return the `Wica`. The one construction path. `output_command` (optional, `Callable \| Command`) is the user-facing output channel (see [agent.md](agent.md), "Output"); when set, free text becomes the agent's private reasoning stream. |
+| `Wica.init(config, *, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, return the `Wica`. The one construction path. It takes **no application callables**: the output sink and the output Command are wired afterwards through the two setters below, so the objects they reference can themselves be built against the `Wica` (see "Output wiring is delegated"). |
 | `wica.world` | attribute (`World`) | The owned World — the home for **all** World-schema work (`register`/`update`/`get`/listeners). Not duplicated onto `Wica`. |
 | `wica.agent` | attribute (`Agent`) | The owned Agent. Directly reachable, but the common paths (command registration, lifecycle, instrumentation) are surfaced on `Wica` so a consumer rarely needs it. |
 | `wica.start()` / `wica.stop()` | methods | The restartable shared lifecycle — start or pause the World and Agent together (see "Lifecycle"). |
 | `wica.is_running` | attribute (`bool`) | Read-only flag; `True` between a successful `start()` and `stop()` (mirrors `world.is_running` — see [world.md](world.md), "Lifecycle"). |
 | `wica.close()` | method | Permanently stop the instance and close its owned event loop. Idempotent; a closed instance cannot be restarted. |
-| `wica.register_command(fn)` | method | Delegates to `agent.register_command` — the one convenience method that *is* mirrored onto `Wica`, since it's part of the everyday setup flow. Takes one argument, `fn: Callable \| Command`; override name/description by passing a `Command(fn, name=…, description=…)` (see [commands.md](commands.md), "The `Command` object"). |
+| `wica.register_command(fn)` | method | Delegates to `agent.register_command` — mirrored onto `Wica` since it's part of the everyday setup flow. Takes one argument, `fn: Callable \| Command`; override name/description by passing a `Command(fn, name=…, description=…)` (see [commands.md](commands.md), "The `Command` object"). |
+| `wica.set_output_sink(sink)` | method | Delegates to `agent.set_output_sink` — sets (or, with `None`, clears) the async sink that receives the model's free text each step (see [agent.md](agent.md), "Output"). A single replaceable slot, hence `set_`, not `register_`. |
+| `wica.set_output_command(fn)` | method | Delegates to `agent.set_output_command` — sets (or, with `None`, clears) the user-facing output Command (`Callable \| Command`; see [agent.md](agent.md), "Output"). When set, free text becomes the agent's private reasoning stream. A single replaceable slot. |
 | `wica.on_world_trigger` | `Event[WorldEntry]` | The World's **raw** trigger — fires on every qualifying update, pre-coalescing (= `world.on_trigger`). |
 | `wica.on_agent_trigger` | `Event[WorldEntry]` | The Agent's **filtered** trigger — fires once per trigger a run-to-completion step actually observes (= `agent.on_trigger`). |
 | `wica.on_agent_prompt` | `Event[list[BaseMessage]]` | Fires with the exact rendered messages before each model call (= `agent.on_prompt`). |
 | `wica.on_agent_command` | `Event[CommandIssued]` | Fires with each Command the model issues, at dispatch time (= `agent.on_command`). |
 
-The **asymmetry is deliberate**: command registration is mirrored onto `Wica` because it's part of everyday setup, but the World's own API (registering and updating entries) stays on `wica.world`. Duplicating the entire World surface onto `Wica` would be churn with no payoff — `wica.world.register(...)` / `wica.world.update(...)` reads clearly and keeps `World` the single home for its own concept.
+The **asymmetry is deliberate**: command registration and output wiring are mirrored onto `Wica` because they're part of everyday setup, but the World's own API (registering and updating entries) stays on `wica.world`. Duplicating the entire World surface onto `Wica` would be churn with no payoff — `wica.world.register(...)` / `wica.world.update(...)` reads clearly and keeps `World` the single home for its own concept.
 
 ### Construction: `Wica.init`
 
@@ -45,18 +47,21 @@ The **asymmetry is deliberate**: command registration is mirrored onto `Wica` be
 
 1. Creates the single asyncio event **loop** the whole system runs on (or adopts one passed in — see "The event loop, restartable `start()`/`stop()`, and terminal `close()`").
 2. Builds a fresh `World(loop)` (no global — see [world.md](world.md)).
-3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, output_sink=…, output_command=…, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`.
+3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`.
 
 `init` **does not configure logging** — WICA is a library, so it only emits under the `wica.*` loggers and leaves handlers/levels to the embedding application (see [config.md](config.md), "Logging is not framework config").
 
-The runtime wiring a config object should not express — `output_sink`, `output_command`, `coalesce_window`, and optionally a `loop` — are keyword arguments to `init`. The config carries provider/model/key/prompt; `init`'s kwargs carry callables and runtime objects. `output_command` is a callable (or a `Command`), so like `output_sink` it can only be code-wired, never represented as plain configuration data.
+The runtime values a config object should not express — `coalesce_window` and optionally a `loop` — are keyword arguments to `init`. The config carries provider/model/key/prompt; `init`'s kwargs carry runtime objects that must exist at construction (the loop cannot be injected later). **`init` takes no application callables.** The output sink and the output Command are wired *after* construction through `set_output_sink` / `set_output_command` (see "Output wiring is delegated"), for the same reason Commands are registered after construction: they are code, never configuration data, and the objects they reference — a transcript, a UI, a TTS engine — typically need the `Wica` (its World, its `Event`s, its Agent's output Command name) to be built. Taking them at `init` forced consumers into a construction cycle (build the sink before the `Wica`, then attach the `Wica` to the sink later); the setters let the consumer **build, then wire, then start**.
 
 `init` takes an **already-created `WicaConfig`**, not a path. The caller may construct it directly or obtain it through `WicaConfig.from_dict` / `WicaConfig.from_json` / `WicaConfig.from_json_file` (see [config.md](config.md)). There is deliberately **no `Wica.from_json_file`**: a path-taking convenience would privilege one config source, save only one line, and hide the config object the caller often wants. For a dedicated file, startup remains two honest calls:
 
 ```python
 config = WicaConfig.from_json_file(path)
-wica = Wica.init(config, output_sink=my_sink, coalesce_window=0.2)
+wica = Wica.init(config, coalesce_window=0.2)
 wica.world.register("speech_input", str, serialize_fn=…, triggers_llm_call=True)
+transcript = Transcript(wica)            # application object that needs the Wica to exist
+wica.set_output_sink(transcript.sink)
+wica.set_output_command(speak)
 wica.register_command(dance)
 wica.start()
 ```
@@ -89,7 +94,15 @@ Because the objects never change identity within one `Wica`'s life (there is no 
 
 ### Command registration is delegated
 
-`wica.register_command(fn)` forwards verbatim to `agent.register_command` ([agent.md](agent.md)) — one argument, `fn: Callable | Command`, no `name`/`description` kwargs (override via `Command(fn, name=…, description=…)`; wrap an off-the-shelf tool as `Command(tool)` — see [commands.md](commands.md), "The `Command` object"). It's the single command-side convenience mirrored onto `Wica` because registering the agent's capabilities is part of every setup. Everything else command-related (the auto-registered `cancel_command` and `noop`, the optional output Command, execution-as-World-entry) stays entirely inside the Agent.
+`wica.register_command(fn)` forwards verbatim to `agent.register_command` ([agent.md](agent.md)) — one argument, `fn: Callable | Command`, no `name`/`description` kwargs (override via `Command(fn, name=…, description=…)`; wrap an off-the-shelf tool as `Command(tool)` — see [commands.md](commands.md), "The `Command` object"). It's mirrored onto `Wica` because registering the agent's capabilities is part of every setup. Everything else command-related (the auto-registered `cancel_command` and `noop`, execution-as-World-entry) stays entirely inside the Agent.
+
+### Output wiring is delegated
+
+`wica.set_output_sink(sink)` and `wica.set_output_command(fn)` forward verbatim to `agent.set_output_sink` / `agent.set_output_command`; the rules (validation, prompt recomposition, attach timing, `None` to clear) are specified in [agent.md](agent.md), "Output wiring", and `Wica` adds nothing to them. They are mirrored onto `Wica` for the same reason `register_command` is: wiring the output channel is part of every setup, and it is done at the same point of the flow.
+
+- **They are setters of single slots, not registrations.** An Agent has at most one sink and at most one output Command; calling either again replaces the previous value, and `None` clears it. Hence `set_`, not `register_`.
+- **Wire before `start()`.** Both setters accept a call at any time (a sink change takes effect at the next step; an output Command set while running is attached immediately), but the intended flow is build → wire → start, which is also the only flow the demo uses. Setting while running carries the same caveat as `register_command` while running: the model binding is swapped without a lock, and a step already in flight keeps the binding it captured.
+- **Ordering is the point.** Because neither is a constructor argument, a consumer can build the `Wica` first, build the objects that need it (a transcript subscribed to its `Event`s, a UI that reads its World), and only then hand those objects' callables to the `Wica`. The conversation demo is the reference for this order (see [conversation-demo.md](conversation-demo.md), "Composition: build, then wire, then start").
 
 ### `Event`s are surfaced, not adapted
 
@@ -114,7 +127,7 @@ There is **no `wica.reset()` and no `reset_world()`**. Restarting preserves stat
 
 ```python
 wica.close()
-wica = Wica.init(config, …)   # re-run the setup: register entries, commands, start
+wica = Wica.init(config, …)   # re-run the setup: register entries, wire output, register commands, start
 ```
 
 This was a deliberate simplification. An in-place `reset()` had to answer "what state survives?" (registered entries? commands? history?) and either swap the owned objects (forcing accessor methods so held references don't go stale) or clear them in place (adding a `World.reset()` with subtle timer and loop re-wiring). Recreation sidesteps all of it: the consumer's own setup code is the single source of truth for reconstruction, nothing needs to be "remembered" inside `Wica`, and the objects never change identity mid-life so `wica.world`/`wica.agent` can stay plain attributes. The cost — re-running setup after a reset — is exactly the code the consumer already wrote to stand the system up the first time.

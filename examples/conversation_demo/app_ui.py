@@ -1,24 +1,29 @@
 """The Gradio UI for the WICA conversation demo.
 
-`build_ui(state, world, config_error)` assembles the five surfaces (Conversation / Speaking /
-World state / Prompt / Sensor inputs) and wires their handlers and refresh timers. It reads live
-World state directly (via `world`), the transcript/prompt history through the generic
-`TranscriptLog` and the Speaking panel's state through the `SpeakingSlot` (both on `DemoState`) —
-it never owns framework state of its own beyond a little tick-local bookkeeping. The app file
-(`app.py`) stands the system up and calls this.
+`build_ui(wica, world, display_entry, config_error)` assembles the five surfaces (Conversation /
+Speaking / World state / Prompt / Sensor inputs) and wires their handlers and refresh timers. The
+UI **owns its presenters**: it creates the generic `TranscriptLog` (subscribed to the Wica's
+Events in its constructor) and the Speaking panel's `SpeakingSlot`, and returns both on the
+`DemoUi` handle so the app can wire them into the robot — the transcript's `output_sink` onto
+the Wica, the slot into `say`. Beyond those and a little tick-local bookkeeping it owns no
+framework state; live World state is read directly via `world`. The app file (`app.py`) builds
+the Wica first, calls this, then wires and starts (see specs/conversation-demo.md,
+"Composition").
 """
 
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 from typing import Any
 
 import gradio as gr
 
-from wica import World, WorldEntry
+from wica import Wica, World, WorldEntry
 from wica.agent import CommandExecution
 
-from examples.conversation_demo.app_state import DemoState, Speaking
+from examples.conversation_demo.speaking import Speaking, SpeakingSlot
+from examples.conversation_demo.transcript import DisplayEntry, TranscriptLog
 
 _NO_PROMPT_YET = "(no prompt sent to the model yet)"
 
@@ -130,12 +135,29 @@ def _world_html(world: World) -> str:
 # --- Layout --------------------------------------------------------------------------
 
 
-def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blocks:
-    """Assemble the demo UI. Input handlers only touch the World; the transcript is fed by the
-    agent's callbacks via `state.transcript` (a trigger shows up on the right once it actually
-    starts a step — a trigger dropped by the busy single-in-flight loop simply won't appear, and
-    no reply follows it), and the Speaking panel by `say` via `state.speaking`."""
-    transcript = state.transcript
+@dataclass(frozen=True)
+class DemoUi:
+    """What build_ui() returns: the page, plus the two presenters the UI owns and the app wires
+    into the robot (`transcript.output_sink` → `wica.set_output_sink`, `speaking` → `say`)."""
+
+    blocks: gr.Blocks
+    transcript: TranscriptLog
+    speaking: SpeakingSlot
+
+
+def build_ui(
+    wica: Wica | None,
+    world: World,
+    display_entry: DisplayEntry | None,
+    config_error: str | None,
+) -> DemoUi:
+    """Assemble the demo UI over an already-built (not yet started) Wica. Input handlers only touch
+    the World; the transcript is fed by the agent's Events (a trigger shows up on the right once it
+    actually starts a step — a trigger dropped by the busy single-in-flight loop simply won't
+    appear, and no reply follows it), and the Speaking panel by `say` via the slot. `wica` is None
+    in explore-only mode (no key): the panels still render, nothing reasons."""
+    transcript = TranscriptLog(wica, display_entry)
+    speaking = SpeakingSlot()
 
     # Tick-local UI bookkeeping (not framework state): how many prompts the view has shown, and the
     # signature of the transcript last pushed to the chatbot. Held as closure state so tick can
@@ -200,7 +222,7 @@ def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blo
             conv_version,
             selector_update,
             prompt_update,
-            _speaking_html(state.speaking.read()),
+            _speaking_html(speaking.read()),
         )
 
     def push_transcript() -> list[dict[str, Any]]:
@@ -308,4 +330,4 @@ def build_ui(state: DemoState, world: World, config_error: str | None) -> gr.Blo
         world_timer = gr.Timer(0.2)
         world_timer.tick(tick_world, outputs=world_view)
 
-    return demo
+    return DemoUi(blocks=demo, transcript=transcript, speaking=speaking)

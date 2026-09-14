@@ -48,8 +48,9 @@ def real_wica(
     """Stand up a full Wica (its own loop + World + Agent) from a committed config, through the real
     entrypoint — `Wica.init`. This is what makes the live tier meaningful: it drives the whole
     system the way production does, exercising the real per-provider construction (including
-    `huggingface-hub`'s dedicated non-`init_chat_model` path). The caller passes code-only wiring
-    (`output_sink`, `output_command`, `coalesce_window`) as kwargs. `system_prompt` overrides the
+    `huggingface-hub`'s dedicated non-`init_chat_model` path). Extra kwargs (`coalesce_window`,
+    `loop`) go to `Wica.init`; the output sink / output Command are wired by the caller afterwards
+    (`wica.set_output_sink(...)`, `wica.set_output_command(...)`). `system_prompt` overrides the
     committed persona when a test needs a specific one (replacing the committed persona; the file
     field is cleared so the exactly-one invariant holds). Skips when the config's api_key_env is
     unset — the key resolves at build inside `Wica.init`, so `MissingEnvError -> pytest.skip` lives

@@ -341,8 +341,6 @@ class Agent:
         world: World,
         loop: asyncio.AbstractEventLoop,
         coalesce_window: float = 0.2,
-        output_sink: Callable[[str], Awaitable[None]] | None = None,
-        output_command: Callable[..., Any] | Command | None = None,
         model: BaseChatModel | None = None,
     ) -> None:
         # Config-driven construction *is* the constructor — resolution happens here, at build. The
@@ -355,25 +353,14 @@ class Agent:
         # passed in (the raw-model injection seam — a caller supplying a model no config can express,
         # and the seam the Agent unit tests use to drive the loop over a fully-scripted fake). The
         # system prompt is always config-expressed. See specs/agent.md, specs/wica.md (open q. 2).
-        # The optional application-supplied output Command — the user-facing output channel. Built
-        # into a Command now (before prompt composition) so its name is known. When set, free text
-        # becomes the agent's private reasoning stream and this Command is how it speaks. See
-        # specs/commands.md ("The output Command") and specs/agent.md ("Output").
-        self._output_command: Command | None = (
-            None
-            if output_command is None
-            else output_command
-            if isinstance(output_command, Command)
-            else Command(output_command)
-        )
-        self._output_command_name: str | None = (
-            None if self._output_command is None else self._output_command.name
-        )
-        if self._output_command_name in _RESERVED_COMMAND_NAMES:
-            raise ValueError(
-                f"output_command may not be named {self._output_command_name!r}: "
-                f"{sorted(_RESERVED_COMMAND_NAMES)} are reserved by WICA"
-            )
+        #
+        # Neither the output sink nor the optional output Command is a constructor argument: both
+        # are application callables wired *after* construction through set_output_sink /
+        # set_output_command, so the objects they belong to (a transcript, a UI, a TTS engine) can
+        # be built against this Agent's World and Events first. Until wired: no output Command, and
+        # a no-op sink. See specs/agent.md ("Output wiring").
+        self._output_command: Command | None = None
+        self._output_command_name: str | None = None
         # The two WICA-native control Commands, built once here so start() can re-attach the *same*
         # objects on every cycle (the identity check in _register_builtin then holds across a
         # restart). Building a Command wraps the callable into a tool; it does not touch the model,
@@ -389,18 +376,14 @@ class Agent:
             description=_NOOP_COMMAND_DESCRIPTION,
         )
         # The system prompt the model receives is composed: the resolved persona (verbatim) followed
-        # by the WICA runtime primer (+ the output clause when an output Command is set). Composed
-        # once here so the combined string is stable across the conversation and stays in the cached
-        # deep prefix. See specs/agent.md ("System prompt composition").
-        # perception + acting, then the output-mode clause (how you reply differs by whether an
-        # output Command is set), then the noop clause last.
-        primer = _RUNTIME_PRIMER
-        if self._output_command_name is not None:
-            primer += _OUTPUT_COMMAND_PROMPT.format(name=self._output_command_name)
-        else:
-            primer += _DEFAULT_OUTPUT_PROMPT
-        primer += _NOOP_PROMPT
-        self.system_prompt = resolve_system_prompt(config) + primer
+        # by the WICA runtime primer (+ the output clause when an output Command is set). The persona
+        # is resolved once here (reading the prompt file if that's the form given) and kept, so
+        # set_output_command can recompose the prompt — the only thing that changes its content —
+        # without touching the file again. In the intended flow (wire, then start) the combined
+        # string is fixed before the first step and stays in the cached deep prefix. See
+        # specs/agent.md ("System prompt composition").
+        self._persona = resolve_system_prompt(config)
+        self.system_prompt = self._compose_system_prompt()
         self.model = model if model is not None else build_chat_model(config)
         self._world = world
         # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
@@ -412,9 +395,7 @@ class Agent:
         # single-in-flight loop, dropping the rest). 0 disables it — each trigger fires immediately,
         # the pre-coalescing behavior. See specs/agent.md "Trigger coalescing".
         self._coalesce_window = coalesce_window
-        self._output_sink = (
-            output_sink if output_sink is not None else _noop_output_sink
-        )
+        self._output_sink: Callable[[str], Awaitable[None]] = _noop_output_sink
         # Instrumentation Events — observability only, never control flow. The Agent emits on them
         # at the right points inside the loop; any number of consumers subscribe, and Event.emit's
         # per-subscriber isolation catches+logs a raising subscriber so it can neither abort a step
@@ -457,8 +438,63 @@ class Agent:
 
     @property
     def output_command_name(self) -> str | None:
-        """The output Command's name, or None when no output Command is configured."""
+        """The output Command's name, or None when no output Command is set."""
         return self._output_command_name
+
+    def _compose_system_prompt(self) -> str:
+        """The persona followed by the WICA runtime primer: perception + acting, then the
+        output-mode clause (how you reply differs by whether an output Command is set), then the
+        noop clause last. See specs/agent.md ("System prompt composition")."""
+        primer = _RUNTIME_PRIMER
+        if self._output_command_name is not None:
+            primer += _OUTPUT_COMMAND_PROMPT.format(name=self._output_command_name)
+        else:
+            primer += _DEFAULT_OUTPUT_PROMPT
+        primer += _NOOP_PROMPT
+        return self._persona + primer
+
+    def set_output_sink(self, sink: Callable[[str], Awaitable[None]] | None) -> None:
+        """Set (or, with None, clear) the async sink that receives the model's complete free text
+        each step. A single replaceable slot; read once per step at the delivery point, so a change
+        takes effect at the next step. See specs/agent.md ("Output wiring")."""
+        self._output_sink = sink if sink is not None else _noop_output_sink
+
+    def set_output_command(self, fn: Callable[..., Any] | Command | None) -> None:
+        """Set (or, with None, clear) the application's output Command — the user-facing output
+        channel. When set, free text becomes the agent's private reasoning stream and this Command
+        is how it speaks (see specs/commands.md "The output Command", specs/agent.md "Output").
+
+        A callable is wrapped as ``Command(fn)``; a ``Command`` is used directly. Validation happens
+        before any state changes: a reserved name (``noop``/``cancel_command``) or a name already
+        registered as an application Command raises ``ValueError``. Then the previous output Command
+        (if attached) is detached, the system prompt is recomposed so its output clause names the
+        new one, and the new Command is attached immediately if the Agent is running — otherwise
+        ``start()`` attaches it. An execution of a replaced Command that is still running finishes
+        normally. See specs/agent.md ("Output wiring")."""
+        command: Command | None
+        if fn is None:
+            command = None
+        else:
+            command = fn if isinstance(fn, Command) else Command(fn)
+            if command.name in _RESERVED_COMMAND_NAMES:
+                raise ValueError(
+                    f"output command may not be named {command.name!r}: "
+                    f"{sorted(_RESERVED_COMMAND_NAMES)} are reserved by WICA"
+                )
+            if (
+                command.name in self._commands
+                and command.name != self._output_command_name
+            ):
+                raise ValueError(f"command name {command.name!r} is already registered")
+        previous = self._output_command
+        if previous is not None and self._commands.get(previous.name) is previous:
+            self._detach_command(previous.name)
+        self._output_command = command
+        self._output_command_name = None if command is None else command.name
+        self.system_prompt = self._compose_system_prompt()
+        if command is not None and self._started:
+            self._register_builtin(command)
+        _logger.debug("output command set to %r", self._output_command_name)
 
     def register_command(self, fn: Callable[..., Any] | Command) -> None:
         """Register a Command. Takes one argument: a plain callable (auto-wrapped — name from
@@ -483,10 +519,22 @@ class Agent:
     def _attach_command(self, command: Command) -> None:
         """Store the Command and rebind the model to the full current tool set."""
         self._commands[command.name] = command
-        self._bound_model = self.model.bind_tools(
-            [c.tool for c in self._commands.values()]
-        )
+        self._rebind_model()
         _logger.debug("registered command %r", command.name)
+
+    def _detach_command(self, name: str) -> None:
+        """Remove a Command from the bound set (used when an output Command is replaced or cleared)
+        and rebind. A running execution of it is unaffected: it resolved its Command at dispatch."""
+        del self._commands[name]
+        self._rebind_model()
+        _logger.debug("detached command %r", name)
+
+    def _rebind_model(self) -> None:
+        self._bound_model = (
+            self.model.bind_tools([c.tool for c in self._commands.values()])
+            if self._commands
+            else self.model
+        )
 
     def _register_builtin(self, command: Command) -> None:
         """Idempotent attach for WICA-native Commands and the output Command (used by start(), which
@@ -509,9 +557,9 @@ class Agent:
         #  - noop: declare no reaction (intercepted before dispatch — see _run_step).
         self._register_builtin(self._cancel_command)
         self._register_builtin(self._noop_command)
-        # The optional application-supplied output Command (built in __init__). An ordinary Command
-        # in every respect but its trigger-on-completion flag (see _dispatch_command) and the prompt
-        # clause (see __init__).
+        # The optional application-supplied output Command (set via set_output_command, usually
+        # before this start). An ordinary Command in every respect but its trigger-on-completion flag
+        # (see _dispatch_command) and the prompt clause (see _compose_system_prompt).
         if self._output_command is not None:
             self._register_builtin(self._output_command)
         _logger.info("agent starting (%d command(s) registered)", len(self._commands))

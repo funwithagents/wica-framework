@@ -1,8 +1,8 @@
 ---
 code:
   - examples/conversation_demo/app.py
-  - examples/conversation_demo/app_state.py
   - examples/conversation_demo/transcript.py
+  - examples/conversation_demo/speaking.py
   - examples/conversation_demo/app_ui.py
   - examples/conversation_demo/prompts/wica.md
   - examples/conversation_demo/agent.config.json
@@ -111,7 +111,7 @@ Five surfaces:
 - **Speech out.** The robot speaks by calling a `say` **output Command** — so its user-facing voice
   is a real, observable, cancellable Command, and the model's free text becomes private *thinking*
   shown apart from the voice (see [agent.md](agent.md), "Output"). One (or a short chain of)
-  utterance(s) per turn. The demo configures `say` via `Wica.init(output_command=…)`; without an
+  utterance(s) per turn. The demo configures `say` via `wica.set_output_command(say)`; without an
   output Command the free text would itself be the voice. **The demo simulates speaking**: `say`
   takes time and reveals its words one by one in the **Speaking panel** while the Command stays
   `running` (and cancellable) in the World; the transcript shows the `say` item with its full text
@@ -150,7 +150,7 @@ and the point is to watch the model choose them in context.
 
 | Action | What it does | Notable |
 |---|---|---|
-| **Say `<text>`** | Speaks to the person. | The **output Command** (`Wica.init(output_command=…)`): the robot's voice, shown in the transcript labelled **🗣️ say** (full text, live state) and word by word in the Speaking panel. Because it is a Command, the model's own free text becomes private reasoning (the **💭 output sink**) instead of speech. |
+| **Say `<text>`** | Speaks to the person. | The **output Command** (`wica.set_output_command(say)`): the robot's voice, shown in the transcript labelled **🗣️ say** (full text, live state) and word by word in the Speaking panel. Because it is a Command, the model's own free text becomes private reasoning (the **💭 output sink**) instead of speech. |
 | **Dance** | Performs a ~10-second dance. | Long-running: visibly "in progress" in the transcript and the World state for its whole duration. New inputs may start reasoning while it runs, letting the model observe or cancel the action. |
 | **Set emotion `<emotion>`** | Sets the robot's current emotional state. | Reflected in World state and in the robot's subsequent prompt/behaviour. |
 | **Switch tracking to user `<id>` (or nobody)** | Follows one specific person, or stops tracking when called with no user. | The robot follows **at most one** person at a time — a single `tracked_user` entry, not a set. Passing no user (null) clears it. |
@@ -172,12 +172,15 @@ The conversation surface is built so that another application can reuse it uncha
 the demo-specific bits — the sensor icons, the voice, the Speaking panel — live in the demo.
 
 - **One generic transcript log.** A single presenter object (`TranscriptLog`, in
-  `examples/conversation_demo/transcript.py`) subscribes to the framework's instrumentation
-  (`on_agent_trigger`, `on_agent_prompt`, `on_agent_command`, the `output_sink`) and, for every
+  `examples/conversation_demo/transcript.py`), built over a `Wica`, subscribes in its constructor
+  to the framework's instrumentation
+  (`on_agent_trigger`, `on_agent_prompt`, `on_agent_command`, and its `output_sink` method, which
+  the application sets on the `Wica`) and, for every
   issued Command, listens to its `agent:command:<call_id>` World entry so the item's state follows
   the execution (`running` → `complete`/`failed`/`cancelled`). It knows the framework's own names
   — `noop` (rendered `🚫 noop`, never through the hook since no entry exists) and the configured
-  output Command (labelled 🗣️ by default, read from the Agent) — and nothing about the application.
+  output Command (labelled 🗣️ by default, read live from the Agent, so it is correct whichever
+  is wired first) — and nothing about the application.
   It also keeps the prompt history the Prompt panel browses.
 - **One hook for what is application-specific: `display_entry(entry: WorldEntry)`.** Every
   transcript item that comes from a World entry is rendered through this function, which returns an
@@ -192,8 +195,29 @@ the demo-specific bits — the sensor icons, the voice, the Speaking panel — l
   generic parts around it: reaction groups, the state suffix and spinner, result/error and
   duration.
 - **The Speaking panel is not part of the transcript.** `say` reports its word-by-word progress to
-  a small demo-owned state object the panel renders; the transcript only ever sees `say` as a
-  Command with a state, like the others.
+  the Speaking slot the UI owns (handed to the robot at wiring — see "Composition" below); the
+  transcript only ever sees `say` as a Command with a state, like the others.
+
+## Composition: build, then wire, then start
+
+The demo is composed in one place — the app's `main()` — in a fixed order that the framework's
+output wiring exists to allow (see [wica.md](wica.md), "Output wiring is delegated"):
+
+1. **Build the Wica** from the config (or, without a key, the World-only fallback — see
+   "Configuration"), and register the demo's World entries on its World.
+2. **Build the UI on top of it.** The UI owns its presenters: it constructs the generic transcript
+   (subscribed to the Wica's `Event`s in its constructor) and the Speaking slot, and exposes both.
+   The presenters themselves are Gradio-free objects.
+3. **Wire the robot to the UI.** The robot's Commands are built over the Wica's World and the UI's
+   Speaking slot (`say` drives it). The app sets the transcript's `output_sink` and `say` as the
+   output Command on the Wica, and registers the other Commands. This step is Gradio-free and takes
+   the presenters as arguments, so the tests run the same wiring against a transcript and slot they
+   build themselves.
+4. **Start** the Wica, then launch the UI.
+
+Consequences: no demo state exists before the Wica does, so nothing is bound late — no module
+globals, no two-phase attach, no state object the app builds early and hands to the UI — and
+everything is wired before `start()`, the setters' intended zone.
 
 ## Configuration
 

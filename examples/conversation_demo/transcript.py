@@ -12,14 +12,22 @@ the World entries are, what the Commands do, or what the robot is called. It con
                           `agent:command:<call_id>` World entry (the seam `CommandIssued.call_id`
                           exists for — see specs/agent.md "Instrumentation") and updates the item
                           in place as it goes running → complete / failed / cancelled;
-  - the `output_sink`   → the model's free text for the step (💭).
+  - `output_sink`       → its own async method, which the application sets on the `Wica`
+                          (`wica.set_output_sink(log.output_sink)`): the model's free text for
+                          the step (💭).
+
+A log is built over a `Wica` and subscribes to its Events in the constructor — build the Wica,
+then the log, then wire the sink (see specs/conversation-demo.md, "Composition"). `wica=None`
+is the explore-only case (no Agent runs): nothing subscribes and Command items are never
+followed.
 
 The only application-specific knowledge — which icon and wording a given entry gets — enters
 through one hook, `display_entry(entry: WorldEntry) -> EntryDisplay | None`. Because a Command's
 execution *is* a World entry (value: `CommandExecution`), the same hook customises both sides of
 the transcript; returning `None` falls back to the generic default. The log itself only knows the
 framework's own names: `noop` (no World entry, so never through the hook) and the configured
-output Command (read from the Agent at `attach`, labelled 🗣️ by default).
+output Command (read live from the Agent, labelled 🗣️ by default — live, so the log may be
+built before `set_output_command` runs).
 
 Threading: the handlers run on the agent loop (Events and listeners are dispatched there), the
 UI reads through `snapshot()` / `prompt_text()` on its own thread. Everything shared sits behind
@@ -151,16 +159,15 @@ class TranscriptLog:
     `duration` show a Command item's execution state."""
 
     def __init__(
-        self,
-        display_entry: DisplayEntry | None = None,
-        *,
-        output_command_name: str | None = None,
+        self, wica: Wica | None, display_entry: DisplayEntry | None = None
     ) -> None:
+        """Build the log over a `Wica`: subscribe the three instrumentation Events and keep the
+        World the per-Command listeners are added on. The application then passes `output_sink`
+        to `wica.set_output_sink`. With `wica=None` (explore-only mode, no Agent) nothing
+        subscribes; `on_command` still creates items but nothing follows their state."""
+        self._wica = wica
         self._display_entry = display_entry
-        self._world: World | None = None
-        # Which Command is the voice (labelled 🗣️ by default). `attach` reads it from the Agent;
-        # the keyword serves a log used without a Wica.
-        self._output_command_name = output_command_name
+        self._world: World | None = None if wica is None else wica.world
         # A single ordered queue keeps triggers, Command items and free text interleaved in the
         # exact order they happened; the UI's snapshot drains it into _conversation.
         self._items: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -184,23 +191,16 @@ class TranscriptLog:
         self._command_items: dict[str, dict[str, Any]] = {}
         self._command_started: dict[str, float] = {}
 
-    # --- wiring ------------------------------------------------------------------------
-
-    def attach(self, wica: Wica) -> None:
-        """Wire the log to a running system: subscribe the three instrumentation Events, bind the
-        World the Command listeners are added on, and learn the output Command's name for the
-        default rendering. The application passes `output_sink` to `Wica.init` itself (it is a
-        constructor argument, not an Event). Until attached, on_command still creates items but
-        nothing follows their state (unit tests drive on_command_update directly)."""
-        self._world = wica.world
-        self._output_command_name = wica.agent.output_command_name
-        wica.on_agent_trigger.subscribe(self.on_trigger)
-        wica.on_agent_prompt.subscribe(self.on_prompt)
-        wica.on_agent_command.subscribe(self.on_command)
+        if wica is not None:
+            wica.on_agent_trigger.subscribe(self.on_trigger)
+            wica.on_agent_prompt.subscribe(self.on_prompt)
+            wica.on_agent_command.subscribe(self.on_command)
 
     @property
     def output_command_name(self) -> str | None:
-        return self._output_command_name
+        """Which Command is the voice (labelled 🗣️ by default) — read live from the Agent, so it
+        is right whether the log or `set_output_command` came first."""
+        return None if self._wica is None else self._wica.agent.output_command_name
 
     # --- rendering -----------------------------------------------------------------------
 
@@ -221,7 +221,7 @@ class TranscriptLog:
         return EntryDisplay(f"⚡ {entry.key} = {value!r}")
 
     def _command_icon(self, name: str) -> str:
-        return "🗣️" if name == self._output_command_name else "🦾"
+        return "🗣️" if name == self.output_command_name else "🦾"
 
     def _reaction_child(self, title: str, content: str) -> dict[str, Any]:
         """An assistant transcript item nested under the current reaction group (or top-level if no

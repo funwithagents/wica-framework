@@ -63,8 +63,14 @@ class RecordingSink:
 def wica_factory() -> Iterator[Callable[..., Wica]]:
     created: list[Wica] = []
 
-    def _make(config: WicaConfig, **kwargs: Any) -> Wica:
+    def _make(
+        config: WicaConfig, *, output_sink: RecordingSink | None = None, **kwargs: Any
+    ) -> Wica:
+        # The sink is wired after construction (build, then wire, then start — see specs/wica.md,
+        # "Output wiring is delegated"); the factory just folds that step in for the tests.
         w = Wica.init(config, **kwargs)
+        if output_sink is not None:
+            w.set_output_sink(output_sink)
         created.append(w)
         return w
 
@@ -81,6 +87,50 @@ def test_init_wires_world_and_agent_sharing_one_loop(wica_factory):
     # One loop for the whole system — the World and Agent were handed the same object.
     assert wica.world._loop is wica.agent._loop
     assert wica.agent._world is wica.world
+
+
+def test_output_wiring_is_set_after_init_and_delegated_to_the_agent(wica_factory):
+    """Build, then wire, then start: the sink and the output Command are set on the facade after
+    construction (so the objects they belong to can be built against the Wica first) and reach
+    the Agent — free text goes to the sink as private reasoning, the user-facing text goes
+    through the output Command, and its name is reserved from register_command."""
+    wica = wica_factory(
+        fake_config(
+            [
+                {
+                    "text": "thinking",
+                    "tool_calls": [{"name": "speak", "args": {"text": "hello"}}],
+                },
+                {"tool_calls": [{"name": "noop", "args": {}}]},
+            ]
+        ),
+        coalesce_window=0,
+    )
+    spoken: list[str] = []
+    spoke = threading.Event()
+
+    async def speak(text: str) -> str:
+        """Say something to the user."""
+        spoken.append(text)
+        spoke.set()
+        return "spoken"
+
+    sink = RecordingSink()
+    wica.set_output_sink(sink)
+    wica.set_output_command(speak)
+    assert wica.agent.output_command_name == "speak"
+    with pytest.raises(ValueError, match="output Command"):
+        wica.register_command(speak)
+    wica.world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    wica.world.update("input", "greet")
+
+    assert spoke.wait(timeout=WAIT_TIMEOUT)
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert spoken == ["hello"]
+    assert sink.texts == ["thinking"]
 
 
 def test_surfaced_events_are_the_same_objects(wica_factory):
@@ -289,10 +339,10 @@ def test_injected_loop_wica_can_restart_without_owning_the_loop():
     sink = RecordingSink()
     wica = Wica.init(
         fake_config([{"text": "one"}, {"text": "two"}]),
-        output_sink=sink,
         coalesce_window=0,
         loop=loop,
     )
+    wica.set_output_sink(sink)
     wica.world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )

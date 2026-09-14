@@ -3,7 +3,7 @@
 `Command` wraps either a plain callable or an off-the-shelf LangChain `BaseTool` and holds the
 backing `BaseTool` internally. It is the concrete "registration/wrapper layer" the specs name, and
 the one place `BaseTool` appears at the command-definition surface: `register_command` and
-`Wica.init(output_command=…)` speak `Command | Callable` only, so the command-definition surface
+`set_output_command` speak `Command | Callable` only, so the command-definition surface
 stays LangChain-free even though this module imports LangChain to build the tool. See
 specs/commands.md ("The `Command` object").
 """
