@@ -177,10 +177,11 @@ the demo wiring the effect deterministically behind the agent's back.
 
 ## Reused from the Gradio contrib
 
-The conversation, World-state and prompt surfaces are not the demo's code: they are the three
-components of `wica.contrib.gradio` ([gradio-contrib.md](gradio-contrib.md)) — `TranscriptLog` +
-`conversation_panel`, `world_state_panel`, `PromptLog` + `prompt_panel` — and the demo uses them
-exactly as any application would. What the demo contributes is the persona side of the seam:
+The conversation, World-state and reaction-history surfaces are not the demo's code: they are the
+three components of `wica.contrib.gradio` ([gradio-contrib.md](gradio-contrib.md)) —
+`TranscriptLog` + `conversation_panel`, `world_state_panel`, `ReactionLog` + `reaction_panel` — and
+the demo uses them exactly as any application would. What the demo contributes is the persona side
+of the seam:
 
 - **The `display_entry(entry: WorldEntry)` hook.** The contrib renders every transcript item and
   prompt label that comes from a World entry through this function, which returns an
@@ -193,7 +194,7 @@ exactly as any application would. What the demo contributes is the persona side 
   `🗣️ say` with the spoken text as body. The hook lives in the demo next to the entries'
   `serialize_fn`s — the same per-entry knowledge, rendered for a person instead of for the model.
   The demo passes the one hook to both presenters (`TranscriptLog(wica, display_entry)`,
-  `PromptLog(wica, display_entry)`) so the transcript and the prompt labels agree.
+  `ReactionLog(wica, display_entry)`) so the transcript and the reaction-history labels agree.
 - **The Speaking panel is the demo's, not the transcript's.** `say` reports its word-by-word
   progress to the Speaking slot the UI owns (handed to the robot at wiring — see "Composition"
   below); the transcript only ever sees `say` as a Command with a state, like the others. The
@@ -210,10 +211,10 @@ output wiring exists to allow (see [wica.md](wica.md), "Output wiring is delegat
 1. **Build the Wica** from the config (or, without a key, the World-only fallback — see
    "Configuration"), and register the demo's World entries on its World.
 2. **Build the UI on top of it.** The UI owns its presenters: it constructs the contrib's
-   `TranscriptLog` and `PromptLog` (each subscribed to the Wica's `Event`s in its constructor, both
-   given the demo's `display_entry` hook) and the Speaking slot, places the three contrib panels
-   plus its own Speaking panel and sensor inputs, and exposes the transcript and the slot for
-   wiring.
+   `TranscriptLog` and `ReactionLog` (each subscribed to the Wica's `Event`s in its constructor,
+   both given the demo's `display_entry` hook) and the Speaking slot, places the three contrib
+   panels plus its own Speaking panel and sensor inputs, and exposes the transcript and the slot
+   for wiring.
 3. **Wire the robot to the UI.** The robot's Commands are built over the Wica's World and the UI's
    Speaking slot (`say` drives it). The app sets the transcript's `output_sink` and `say` as the
    output Command on the Wica, and registers the other Commands. This step is Gradio-free and takes

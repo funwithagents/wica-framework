@@ -1,15 +1,15 @@
 """The Gradio UI for the WICA conversation demo.
 
 `build_ui(wica, world, display_entry, config_error)` assembles the five surfaces (Conversation /
-Speaking / World state / Prompt / Sensor inputs). Three of them are the package's reusable
-components (`wica.contrib.gradio`: `conversation_panel`, `world_state_panel`, `prompt_panel` — see
-specs/gradio-contrib.md); the UI **owns their presenters**: it creates the `TranscriptLog` and
-`PromptLog` (each subscribed to the Wica's Events in its constructor, both given the demo's
-`display_entry` hook) and the Speaking panel's `SpeakingSlot`, and returns the transcript and the
-slot on the `DemoUi` handle so the app can wire them into the robot — the transcript's
-`output_sink` onto the Wica, the slot into `say`. The Speaking panel and the sensor inputs are the
-demo's own. The app file (`app.py`) builds the Wica first, calls this, then wires and starts (see
-specs/conversation-demo.md, "Composition").
+Speaking / World state / Reaction history / Sensor inputs). Three of them are the package's
+reusable components (`wica.contrib.gradio`: `conversation_panel`, `world_state_panel`,
+`reaction_panel` — see specs/gradio-contrib.md); the UI **owns their presenters**: it creates the
+`TranscriptLog` and `ReactionLog` (each subscribed to the Wica's Events in its constructor, both
+given the demo's `display_entry` hook) and the Speaking panel's `SpeakingSlot`, and returns the
+transcript and the slot on the `DemoUi` handle so the app can wire them into the robot — the
+transcript's `output_sink` onto the Wica, the slot into `say`. The Speaking panel and the sensor
+inputs are the demo's own. The app file (`app.py`) builds the Wica first, calls this, then wires
+and starts (see specs/conversation-demo.md, "Composition").
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ import gradio as gr
 from wica import Wica, World
 from wica.contrib.gradio import (
     DisplayEntry,
-    PromptLog,
+    ReactionLog,
     TranscriptLog,
     conversation_panel,
-    prompt_panel,
+    reaction_panel,
     world_state_panel,
 )
 
@@ -101,7 +101,7 @@ def build_ui(
     appear, and no reply follows it), and the Speaking panel by `say` via the slot. `wica` is None
     in explore-only mode (no key): the panels still render, nothing reasons."""
     transcript = TranscriptLog(wica, display_entry)
-    prompts = PromptLog(wica, display_entry)
+    reactions = ReactionLog(wica, display_entry)
     speaking = SpeakingSlot()
 
     def on_send(user_text: str) -> str:
@@ -167,7 +167,8 @@ def build_ui(
             with gr.Column(scale=2):
                 gr.Markdown("### World state (live)")
                 world_state_panel(world)
-                prompt_panel(prompts)
+                gr.Markdown("### Reaction history")
+                reaction_panel(reactions)
 
         send.click(on_send, inputs=msg, outputs=msg)
         msg.submit(on_send, inputs=msg, outputs=msg)

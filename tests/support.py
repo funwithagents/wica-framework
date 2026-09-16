@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from wica import CommandExecution, WorldEntry, WorldEntryVersion
+from wica import CommandExecution, ReactionTrace, WorldEntry, WorldEntryVersion
 
 
 def make_entry(key: str, value: Any) -> WorldEntry:
@@ -40,3 +40,30 @@ def item_titled(conversation: list[dict[str, Any]], prefix: str) -> dict[str, An
     ]
     assert len(matches) == 1, titles(conversation)
     return matches[0]
+
+
+def make_reaction_trace(**overrides: Any) -> ReactionTrace:
+    """A hand-built ReactionTrace with sensible defaults (an ordinary, fast, textful reaction), any
+    field overridable by keyword — shared by the reaction-history and (future) other contrib tests
+    that need a fully-formed trace rather than one driven through a live Agent."""
+    t0 = datetime(2026, 9, 16, 12, 0, 0, tzinfo=timezone.utc)
+    defaults: dict[str, Any] = {
+        "reaction_id": 1,
+        "triggers": (),
+        "window_opened_at": t0,
+        "window_closed_at": t0,
+        "prompt_ready_at": t0 + timedelta(seconds=0.05),
+        "model_started_at": t0 + timedelta(seconds=0.05),
+        "model_ended_at": t0 + timedelta(seconds=0.5),
+        "outcome": "ok",
+        "error": None,
+        "text_length": 5,
+        "sink_duration": 0.01,
+        "command_call_ids": (),
+        "noop": False,
+        "usage": None,
+        "ended_at": t0 + timedelta(seconds=0.6),
+        "trace_id": None,
+        "span_id": None,
+    }
+    return ReactionTrace(**{**defaults, **overrides})

@@ -160,7 +160,7 @@ wica.close()
 ### 4. Add a Gradio UI (the three observability panels)
 
 Install `wica[gradio]` and import from `wica.contrib.gradio` (never re-exported from `wica`). The
-package ships three panels — the live World-state table, the prompt history, and the conversation
+package ships three panels — the live World-state table, the reaction history, and the conversation
 transcript — each as a **presenter** built over your `Wica` plus a **panel** function you call
 inside your own `gr.Blocks`. The whole flow is **build → UI → wire → start → launch → close**:
 
@@ -169,8 +169,8 @@ import gradio as gr
 
 from wica import AgentConfig, CommandExecution, TextPart, Wica, WicaConfig, WorldEntry
 from wica.contrib.gradio import (
-    EntryDisplay, PromptLog, TranscriptLog,
-    conversation_panel, prompt_panel, world_state_panel,
+    EntryDisplay, ReactionLog, TranscriptLog,
+    conversation_panel, reaction_panel, world_state_panel,
 )
 
 # 1. Build the Wica and register your World entries.
@@ -197,7 +197,7 @@ def display_entry(entry: WorldEntry) -> EntryDisplay | None:
     return None
 
 transcript = TranscriptLog(wica, display_entry)   # pass the same hook to both presenters
-prompts = PromptLog(wica, display_entry)          # so transcript and prompt labels agree
+reactions = ReactionLog(wica, display_entry)      # so transcript and reaction labels agree
 
 with gr.Blocks() as page:
     with gr.Row():
@@ -206,7 +206,7 @@ with gr.Blocks() as page:
             msg = gr.Textbox(placeholder="Say something…", show_label=False)
         with gr.Column():
             world_state_panel(wica.world)
-            prompt_panel(prompts)
+            reaction_panel(reactions)
     # Input widgets only touch the World; the panels refresh on their own timers.
     msg.submit(lambda text: wica.world.update("speech_input", text) or "", inputs=msg, outputs=msg)
 
@@ -237,19 +237,19 @@ Panel signatures (each owns the `gr.Timer` that keeps it live and returns its co
 
 ```python
 world_state_panel(world, *, refresh_s=0.2) -> gr.HTML
-prompt_panel(prompts, *, refresh_s=0.2, lines=16) -> tuple[gr.Dropdown, gr.Textbox]
+reaction_panel(reactions, *, refresh_s=0.2, lines=16) -> tuple[gr.Dropdown, gr.Textbox, gr.Textbox]
 conversation_panel(transcript, *, refresh_s=0.2, height=420) -> gr.Chatbot
-TranscriptLog(wica, display_entry=None); PromptLog(wica, display_entry=None)   # wica=None → renders empty, subscribes nothing
+TranscriptLog(wica, display_entry=None); ReactionLog(wica, display_entry=None)   # wica=None → renders empty, subscribes nothing
 ```
 
 **The ordering rules behind that sequence** — what is fixed and what is free:
 
-- **Presenters after `Wica.init`.** `TranscriptLog`/`PromptLog` subscribe to the Wica's Events in their constructor, so the Wica must exist first. They are plain objects: build them before or outside the `gr.Blocks` context. Panels, by contrast, create Gradio components and **must** be called inside a `gr.Blocks` context.
+- **Presenters after `Wica.init`.** `TranscriptLog`/`ReactionLog` subscribe to the Wica's Events in their constructor, so the Wica must exist first. They are plain objects: build them before or outside the `gr.Blocks` context. Panels, by contrast, create Gradio components and **must** be called inside a `gr.Blocks` context.
 - **Wire before `start()`.** `set_output_command` recomposes the system prompt to name the Command; setting it after the first step rebuilds the message and drops the cached prefix. `set_output_sink` and `register_command` also belong before `start()`. The order *among* those three calls does not matter, nor does the order between registering World entries and building presenters.
 - **The sink's meaning depends on the output Command.** With an output Command set (as above), the free text the transcript's sink receives is the model's **private reasoning**, shown as the `💭 output sink` item, and the `🗣️` Command item is what the person hears. Without an output Command, that same sink text *is* the utterance. The transcript renders both cases identically; only the reading changes.
 - **Input widgets update the World, which works only while running.** `world.update()` raises while stopped, so start the Wica before `launch()`; a callback that fires after `stop()` fails the same way.
 - **Tear down from the Gradio thread.** `launch()` blocks until the server exits; call `wica.close()` after it returns. Never call `stop()`/`close()` from a sink, a Command, or an Event subscriber — those run on the Wica's loop thread and the call raises `RuntimeError`.
-- **One hook for both presenters.** `display_entry` is optional, but pass the same one to `TranscriptLog` and `PromptLog` so the transcript's input items and the prompt history's labels read alike.
+- **One hook for both presenters.** `display_entry` is optional, but pass the same one to `TranscriptLog` and `ReactionLog` so the transcript's input items and the reaction history's labels read alike.
 
 The layout is yours: the panels are building blocks, not a page. Nor is the inline shape above
 the required one — a larger app can let its layout function build the presenters next to their

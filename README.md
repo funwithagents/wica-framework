@@ -233,21 +233,21 @@ See [specs/conversation-demo.md](specs/conversation-demo.md).
 
 ### Gradio panels for your own app
 
-The demo's three framework-facing surfaces — the live World-state table, the prompt history and the
-conversation transcript — ship in the package as reusable Gradio components behind the `wica[gradio]`
-extra (core `wica` never imports Gradio). Each is a presenter built over your `Wica` plus a panel you
-drop into your own `gr.Blocks`:
+The demo's three framework-facing surfaces — the live World-state table, the reaction history and
+the conversation transcript — ship in the package as reusable Gradio components behind the
+`wica[gradio]` extra (core `wica` never imports Gradio). Each is a presenter built over your `Wica`
+plus a panel you drop into your own `gr.Blocks`:
 
 ```python
-from wica.contrib.gradio import PromptLog, TranscriptLog, conversation_panel, prompt_panel, world_state_panel
+from wica.contrib.gradio import ReactionLog, TranscriptLog, conversation_panel, reaction_panel, world_state_panel
 
 wica = Wica.init(config)                          # 1. build the Wica, register World entries
 transcript = TranscriptLog(wica, display_entry)   # 2. presenters subscribe to the Wica's Events…
-prompts = PromptLog(wica, display_entry)
+reactions = ReactionLog(wica, display_entry)
 with gr.Blocks() as page:                         #    …and panels go inside your Blocks
     conversation_panel(transcript)
     world_state_panel(wica.world)
-    prompt_panel(prompts)
+    reaction_panel(reactions)
 wica.set_output_sink(transcript.output_sink)      # 3. wire: sink, output Command, Commands
 wica.set_output_command(say)
 wica.register_command(dance)

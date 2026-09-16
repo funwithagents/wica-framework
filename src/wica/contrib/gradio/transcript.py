@@ -238,7 +238,7 @@ class TranscriptLog:
         """Open this step's **reaction group** in the transcript so its outputs nest under one
         header, titled by the trigger that caused the step. Fires once per reasoning step, on the
         agent loop, before the model call — so it precedes the step's items. (The prompt itself
-        is kept by `PromptLog`, not here.) Opens *pending* (a spinner while the model thinks);
+        is kept by `ReactionLog`, not here.) Opens *pending* (a spinner while the model thinks);
         `on_reaction_ended` drops it and shows the reaction's duration."""
         self._reaction_count += 1
         self._current_reaction_id = f"reaction-{self._reaction_count}"
