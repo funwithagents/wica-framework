@@ -1191,6 +1191,13 @@ def test_system_prompt_composes_persona_and_runtime_primer_without_output_clause
     # The always-on primer is appended (perception + noop guidance present).
     assert "observations of your World" in prompt
     assert _NOOP_COMMAND_NAME in prompt
+    # …including, in the perception + acting part (before the output-mode clause), that a
+    # response's tool calls run concurrently, so sequencing dependent actions is the model's job.
+    assert "run concurrently" in prompt
+    assert "in a later step" in prompt
+    assert prompt.index("run concurrently") < prompt.index(
+        "write your answer as ordinary text"
+    )
     # No output Command → default text-reply clause, not the private-reasoning one.
     assert "write your answer as ordinary text" in prompt
     assert "private reasoning" not in prompt

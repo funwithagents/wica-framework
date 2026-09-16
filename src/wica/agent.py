@@ -216,7 +216,8 @@ _TRIGGER_ON_OUTPUT_COMMAND_COMPLETION = True
 # The WICA runtime primer appended to the configured persona (see specs/agent.md, "System prompt
 # composition"). Curated: only what changes how the model interprets the prompt or chooses actions —
 # never runtime plumbing (coalescing, rendering, TTLs, the loop) it can't act on. Composed as:
-# perception + acting  →  an output-mode clause (default text OR the output Command)  →  the noop
+# perception + acting (including that a response's tool calls run concurrently, so sequencing is
+# the model's job)  →  an output-mode clause (default text OR the output Command)  →  the noop
 # clause. The output-mode clause is conditional because *how you reply* differs by configuration:
 # with no output Command, free text is the reply; with one, free text is private and the Command
 # speaks. Getting this explicit matters — without a "how to reply" line, some models (gpt-4o
@@ -230,7 +231,11 @@ _RUNTIME_PRIMER = (
     "- To act on the World, call a tool: a tool call is a command that runs asynchronously, and its "
     "immediate result only confirms it was dispatched. The actual outcome appears later as a World "
     "observation (the command's entry turning from running to complete or failed), not in that "
-    "acknowledgement."
+    "acknowledgement.\n"
+    "- Several tool calls in one response all start at once and run concurrently, with no order "
+    "guaranteed between them. When one action must finish before another starts, do not issue "
+    "both together: issue the first, then issue the next in a later step, once you observe the "
+    "first complete."
 )
 # Appended when there is *no* output Command: free text is the reply channel. Without this some
 # models default to a tool (noop) instead of answering. See specs/agent.md ("System prompt
