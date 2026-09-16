@@ -12,6 +12,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from wica import Command, CommandIssued, Wica
 from wica.config import AgentConfig, WicaConfig
 from wica.content import Content, TextPart
+from wica.instrumentation import CommandTrace, ReactionTrace
 from wica.world import WorldEntry
 
 WAIT_TIMEOUT = 2.0
@@ -140,6 +141,54 @@ def test_surfaced_events_are_the_same_objects(wica_factory):
     assert wica.on_agent_trigger is wica.agent.on_trigger
     assert wica.on_agent_prompt is wica.agent.on_prompt
     assert wica.on_agent_command is wica.agent.on_command
+
+
+def test_facade_surfaces_the_instrumentation_events(wica_factory):
+    wica = wica_factory(fake_config())
+    assert wica.on_agent_reaction_ended is wica.agent.on_reaction_ended
+    assert wica.on_agent_trigger_dropped is wica.agent.on_trigger_dropped
+    assert wica.on_agent_command_ended is wica.agent.on_command_ended
+
+
+def test_fake_flow_yields_reaction_and_command_traces(wica_factory):
+    wica = wica_factory(
+        fake_config(
+            [
+                {"tool_calls": [{"name": "add", "args": {"a": 2, "b": 2}}]},
+                {"text": "done"},
+            ]
+        ),
+        coalesce_window=0,
+    )
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    wica.register_command(add)
+    reaction_traces: list[ReactionTrace] = []
+    command_traces: list[CommandTrace] = []
+    done = threading.Event()
+
+    def on_reaction(t: ReactionTrace) -> None:
+        reaction_traces.append(t)
+        if len(reaction_traces) == 2:
+            done.set()
+
+    wica.on_agent_reaction_ended.subscribe(on_reaction)
+    wica.on_agent_command_ended.subscribe(command_traces.append)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+
+    wica.world.update("speech", "add them")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert [t.reaction_id for t in reaction_traces] == [1, 2]
+    assert len(command_traces) == 1
+    assert command_traces[0].reaction_id == 1
+    assert command_traces[0].state == "complete"
 
 
 def test_register_command_reaches_the_agent(wica_factory):

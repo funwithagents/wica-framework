@@ -8,12 +8,38 @@ key-less `provider: "fake"` model. See specs/gradio-contrib.md ("Component 3", "
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
 from tests.support import command_entry, item_titled, make_entry, titles
-from wica import CommandExecution, CommandIssued, WorldEntry
+from wica import CommandExecution, CommandIssued, ReactionTrace, WorldEntry
 from wica.contrib.gradio import EntryDisplay, TranscriptLog
+
+
+def reaction_trace(reaction_id: int, busy_time: float) -> ReactionTrace:
+    """A hand-built ReactionTrace for on_reaction_ended tests — only reaction_id and busy_time
+    (derived from window_closed_at -> ended_at) matter to the transcript."""
+    t0 = datetime(2026, 9, 16, 12, 0, 0, tzinfo=timezone.utc)
+    return ReactionTrace(
+        reaction_id=reaction_id,
+        triggers=(),
+        window_opened_at=t0,
+        window_closed_at=t0,
+        prompt_ready_at=t0,
+        model_started_at=t0,
+        model_ended_at=t0,
+        outcome="ok",
+        error=None,
+        text_length=0,
+        sink_duration=None,
+        command_call_ids=(),
+        noop=False,
+        usage=None,
+        ended_at=t0 + timedelta(seconds=busy_time),
+        trace_id=None,
+        span_id=None,
+    )
 
 
 def robot_hook(entry: WorldEntry) -> EntryDisplay | None:
@@ -87,6 +113,29 @@ def test_on_prompt_opens_a_reaction_group_titled_by_the_trigger():
     assert group[0]["metadata"]["id"] == "reaction-1"
     assert group[0]["metadata"]["title"] == '💬 reaction 1 · 🗣️ "hello robot"'
     assert log.current_reaction_id() == "reaction-1"
+
+
+def test_reaction_group_is_pending_until_the_reaction_ends():
+    log = TranscriptLog(None)
+    log.on_prompt([HumanMessage(content="hi")])
+    group = item_titled(log.snapshot().conversation, "💬 reaction 1")
+    assert group["metadata"]["status"] == "pending"
+
+    log.on_reaction_ended(reaction_trace(1, 1.2))
+    group = item_titled(log.snapshot().conversation, "💬 reaction 1")
+    assert "status" not in group["metadata"]
+    assert group["metadata"]["duration"] == 1.2
+
+
+def test_reaction_ended_for_an_unknown_id_is_ignored():
+    log = TranscriptLog(None)
+    log.on_prompt([HumanMessage(content="hi")])
+    before = log.snapshot()
+
+    log.on_reaction_ended(reaction_trace(7, 1.0))
+
+    after = log.snapshot()
+    assert after.conv_sig == before.conv_sig
 
 
 def test_output_sink_ignores_blank_and_records_private_reasoning():

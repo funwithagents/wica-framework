@@ -11,6 +11,7 @@ from wica.agent import Agent, CommandIssued
 from wica.command import Command
 from wica.config import WicaConfig
 from wica.events import Event
+from wica.instrumentation import CommandTrace, ReactionTrace
 from wica.world import World, WorldEntry
 
 __all__ = ["Wica"]
@@ -56,6 +57,9 @@ class Wica:
         self.on_agent_prompt: Event[list[BaseMessage]] = agent.on_prompt
         self.on_agent_command: Event[CommandIssued] = agent.on_command
         self.on_agent_text: Event[str] = agent.on_text
+        self.on_agent_reaction_ended: Event[ReactionTrace] = agent.on_reaction_ended
+        self.on_agent_trigger_dropped: Event[WorldEntry] = agent.on_trigger_dropped
+        self.on_agent_command_ended: Event[CommandTrace] = agent.on_command_ended
 
     @classmethod
     def init(

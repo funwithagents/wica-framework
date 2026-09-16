@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import re
 import threading
 import time
@@ -992,6 +993,76 @@ def test_keys_lists_registered_keys_in_registration_order(world: World):
     ]  # not filtered to include_in_prompt, unlike prompt reads
     world.unregister("b")
     assert world.keys() == ["a"]
+
+
+# --- Context propagation and the update span (specs/instrumentation.md) ------------------
+
+
+def test_update_runs_listeners_in_the_writers_context(world: World):
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("who", default="nobody")
+    world.register("temp", str, serialize_fn=identity_serialize)
+    seen: list[str] = []
+    done = threading.Event()
+
+    def sync_listener(entry: WorldEntry) -> None:
+        seen.append(var.get())
+        if len(seen) == 2:
+            done.set()
+
+    async def async_listener(entry: WorldEntry) -> None:
+        seen.append(var.get())
+        if len(seen) == 2:
+            done.set()
+
+    world.add_listener("temp", sync_listener)
+    world.add_listener("temp", async_listener)
+
+    token = var.set("writer")
+    try:
+        world.update("temp", "hello")
+    finally:
+        var.reset(token)
+
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert seen == ["writer", "writer"]
+
+
+def test_trigger_subscribers_see_the_writers_context(world: World):
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("who", default="nobody")
+    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    seen: list[str] = []
+    done = threading.Event()
+
+    def subscriber(entry: WorldEntry) -> None:
+        seen.append(var.get())
+        done.set()
+
+    world.on_trigger.subscribe(subscriber)
+
+    token = var.set("writer")
+    try:
+        world.update("temp", "hello")
+    finally:
+        var.reset(token)
+
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert seen == ["writer"]
+
+
+def test_triggering_update_opens_an_update_span(world: World, spans):
+    world.register("temp", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register("passive", str, serialize_fn=identity_serialize)
+
+    world.update("passive", "no span")
+    world.update("temp", "hello")
+
+    finished = spans.get_finished_spans()
+    update_spans = [s for s in finished if s.name == "wica.world.update"]
+    assert len(update_spans) == 1
+    (span,) = update_spans
+    assert span.attributes["wica.key"] == "temp"
+    entry = world.get_entry("temp")
+    assert span.attributes["wica.version_id"] == entry.current.id
 
 
 def test_get_config_reports_the_declared_schema_and_is_a_copy(world: World):

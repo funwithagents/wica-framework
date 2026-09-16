@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -65,6 +66,30 @@ from examples.conversation_demo.speaking import SpeakingSlot
 # --- Configuration -------------------------------------------------------------------
 
 CONFIG_PATH = Path(__file__).parent / "agent.config.json"
+
+_demo_logger = logging.getLogger(__name__)
+
+# Opt-in OpenTelemetry export, off by default (see specs/instrumentation.md "Consumers" —
+# exporters are an application concern; WICA itself never imports the SDK). Set
+# WICA_DEMO_TRACES=console to print every span (wica.world.update, wica.agent.reaction/model/
+# sink/command, plus anything a Command opens) to stdout via the SDK's ConsoleSpanExporter.
+_DEMO_TRACES_ENV = "WICA_DEMO_TRACES"
+
+
+def _maybe_enable_console_traces() -> None:
+    if os.environ.get(_DEMO_TRACES_ENV) != "console":
+        return
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+    _demo_logger.info(
+        "%s=console: exporting OpenTelemetry spans to the console", _DEMO_TRACES_ENV
+    )
+
 
 # --- World entries the demo owns ----------------------------------------------------
 #
@@ -242,6 +267,7 @@ def main() -> None:
     # third-party logs quiet and show wica.* at INFO (raise to logging.DEBUG for the full trace).
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger("wica").setLevel(logging.INFO)
+    _maybe_enable_console_traces()
 
     wica, world, config_error = build_system(WicaConfig.from_json_file(CONFIG_PATH))
     ui = build_ui(wica, world, display_entry, config_error)

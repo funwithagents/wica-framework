@@ -10,6 +10,7 @@ from wica.config import (
 )
 from wica.content import Content, ContentPart, ImagePart, TextPart
 from wica.events import Event
+from wica.instrumentation import CommandTrace, ReactionTrace, TokenUsage, TriggerTrace
 from wica.wica import Wica
 from wica.world import World, WorldEntry, WorldEntryConfig, WorldEntryVersion
 
@@ -25,13 +26,17 @@ __all__ = [
     "Command",
     "CommandExecution",
     "CommandIssued",
+    "CommandTrace",
     "ConfigError",
     "Content",
     "ContentPart",
     "Event",
     "ImagePart",
     "MissingEnvError",
+    "ReactionTrace",
     "TextPart",
+    "TokenUsage",
+    "TriggerTrace",
     "Wica",
     "WicaConfig",
     "World",

@@ -50,9 +50,10 @@ Five surfaces:
    types an utterance (their "speech"); more broadly, whatever World entry triggers a reasoning
    step shows on the **input (right) side** — a typed utterance or a sensor event like a user being
    detected. On the **assistant (left) side**, each **reasoning step (a "reaction") is one
-   collapsible group** (`💬 reaction N`, labelled by the trigger that caused it), and inside that
-   group its outputs appear in order, each **labelled by the framework channel it came from** — so
-   the demo makes the **output Command** feature concrete (see [agent.md](agent.md), "Output"):
+   collapsible group** (`💬 reaction N`, labelled by the trigger that caused it), showing a spinner
+   while the robot thinks and, once it has reacted, its duration; inside that group its outputs
+   appear in order, each **labelled by the framework channel it came from** — so the demo makes the
+   **output Command** feature concrete (see [agent.md](agent.md), "Output"):
    - **🗣️ say** — the robot's spoken reply, delivered through the `say` **output Command** (what the
      person actually hears), not free text; the item shows the full text the robot set out to say;
    - **💭 output sink** — the model's free text for the step, which an output Command turns into
@@ -246,6 +247,11 @@ everything is wired before `start()`, the setters' intended zone.
   config.md, "API key"); the demo catches it, still opens, and clearly says what to set — it just
   can't run the robot's reasoning until the variable is present. Nothing contacts a model without
   credentials.
+- **`WICA_DEMO_TRACES=console`** installs an OpenTelemetry SDK `TracerProvider` with a
+  `ConsoleSpanExporter` before `Wica.init`, printing every span (`wica.world.update`,
+  `wica.agent.reaction`/`model`/`sink`/`command`) to stdout — an example of the exporter wiring
+  [instrumentation.md](instrumentation.md) ("Consumers") leaves to the application. Unset or any
+  other value: no SDK import, no change.
 
 ## Out of scope (for this demo)
 

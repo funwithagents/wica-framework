@@ -199,7 +199,7 @@ carry (now `PromptLog`):
 ```python
 class TranscriptLog:
     def __init__(self, wica: Wica | None, display_entry: DisplayEntry | None = None) -> None: ...
-    # subscribes on_agent_trigger, on_agent_prompt, on_agent_command in the constructor
+    # subscribes on_agent_trigger, on_agent_prompt, on_agent_command, on_agent_reaction_ended
     async def output_sink(self, text: str) -> None: ...      # the application passes this to wica.set_output_sink
     def snapshot(self) -> TranscriptSnapshot: ...            # conversation (Gradio "messages" format) + change signature
 
@@ -213,8 +213,11 @@ What it renders, from the framework's uniform signals only:
   outcome) but still labels the step. A trigger dropped by the busy single-in-flight loop never
   fires the Event, so it never appears and no reply follows — faithful to what happened.
 - **Assistant side (left):** each reasoning step is one **collapsible reaction group**
-  (`💬 reaction N · <trigger>`, opened on `on_agent_prompt`), and its outputs nest under it in
-  order:
+  (`💬 reaction N · <trigger>`, opened *pending* — a spinner — on `on_agent_prompt` and, on
+  `on_agent_reaction_ended`, losing the spinner and gaining a `duration` — the reaction's
+  `busy_time`, the same `metadata.duration` its Command items already use — matched by
+  `reaction_id`, which counts reactions exactly as `on_agent_prompt` does), and its outputs nest
+  under it in order:
   - **every Command the model issued** (`on_agent_command`), titled through the hook (`🗣️` for the
     output Command, `🦾` otherwise), **with its execution state live**: the item is created the
     moment the Command is issued, marked *pending* (a spinner), and the log listens to the

@@ -5,9 +5,33 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 
 from wica import Command, Wica
 from wica.config import WicaConfig
+
+# The SDK's global TracerProvider can be set only once per process, so it is set once for the
+# whole fast tier (at conftest import) rather than per test. See specs/instrumentation.md
+# ("Layer 2"): wica itself never imports the SDK, only the tests do, to observe the spans wica's
+# `opentelemetry-api` calls produce.
+_EXPORTER = InMemorySpanExporter()
+_PROVIDER = TracerProvider()
+_PROVIDER.add_span_processor(SimpleSpanProcessor(_EXPORTER))
+trace.set_tracer_provider(_PROVIDER)
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    """Finished spans of the current test (cleared before each test). `spans.get_finished_spans()`
+    returns ReadableSpan objects: `.name`, `.attributes`, `.parent` (a SpanContext or None),
+    `.context.span_id`, `.links`."""
+    _EXPORTER.clear()
+    return _EXPORTER
 
 
 @pytest.fixture

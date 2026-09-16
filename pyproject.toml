@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "langchain>=1.0",
     "langchain-core>=1.0",
+    "opentelemetry-api>=1.20",
 ]
 
 # Provider integrations are optional extras: core `wica` ships with no model provider,
@@ -39,6 +40,9 @@ dev = [
     "pyright>=1.1.411",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
+    # Span tests use the SDK's in-memory exporter (see tests/conftest.py); wica itself never
+    # imports the SDK.
+    "opentelemetry-sdk>=1.20",
 ]
 # The runnable example only (examples/conversation_demo/app.py); kept out of core deps.
 # Run with: uv run --group demo python -m examples.conversation_demo.app
@@ -47,6 +51,8 @@ demo = [
     "langchain-anthropic>=1.0",
     "langchain-openai>=1.0",
     "langchain-huggingface>=1.2",
+    # For the opt-in WICA_DEMO_TRACES=console exporter.
+    "opentelemetry-sdk>=1.20",
 ]
 
 [tool.ruff]

@@ -260,6 +260,39 @@ small handle, and [`app.py`](examples/conversation_demo/app.py) wires and starts
 sequence with a Speaking panel, sensor buttons and an explore-only fallback when no key is set.
 [specs/gradio-contrib.md](specs/gradio-contrib.md) carries the design rationale.
 
+### Latency and traces
+
+Every reaction ends with `wica.on_agent_reaction_ended` firing a `ReactionTrace` — subscribe to it
+for the per-reaction numbers: `reaction_latency(trace)` (input written → reaction ended, `None`
+when the reaction only re-triggered from a Command completion), `trace.model_latency`, and
+`trace.busy_time` (how long the Agent was unavailable for the next trigger). `wica.instrumentation`
+also holds `reactions_per_input` (the re-trigger chain's cost) and the raw measures each stamp
+enables — see [specs/instrumentation.md](specs/instrumentation.md) ("Metrics").
+
+For a trace you can view in a backend (Jaeger, Grafana Tempo, Langfuse, or just the console),
+install `opentelemetry-sdk` and configure a `TracerProvider` **before** `Wica.init` — WICA itself
+depends only on `opentelemetry-api` and never imports the SDK, so nothing changes if you don't:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+
+provider = TracerProvider()
+provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(provider)
+
+wica = Wica.init(config)
+```
+
+A span opened inside a Command's body (an application or third-party library calling
+`tracer.start_as_current_span(...)`) automatically nests under that Command's `wica.agent.command`
+span, with no WICA-specific API — the pattern a TTS engine's synthesis/playback spans, or a speech
+recognizer's own span around `world.update()`, use to join one end-to-end trace. See
+[specs/instrumentation.md](specs/instrumentation.md) ("Layer 2") for the full span tree. The
+conversation demo wires exactly this behind `WICA_DEMO_TRACES=console`
+([`app.py`](examples/conversation_demo/app.py)).
+
 ## Configuration
 
 `Wica.init()` consumes a `WicaConfig`, regardless of where its values originate. Construct the

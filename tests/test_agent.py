@@ -13,6 +13,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
+from opentelemetry.trace import format_trace_id
 from pydantic import Field
 
 from wica.agent import (
@@ -28,7 +29,13 @@ from wica.agent import (
 from wica.command import Command
 from wica.config import AgentConfig
 from wica.content import Content, TextPart
-from wica.world import World
+from wica.instrumentation import (
+    CommandTrace,
+    ReactionTrace,
+    TokenUsage,
+    reaction_latency,
+)
+from wica.world import World, WorldEntry
 
 WAIT_TIMEOUT = 2.0
 
@@ -47,6 +54,17 @@ def wait_until(predicate: Callable[[], bool], timeout: float = WAIT_TIMEOUT) -> 
 
 def identity_serialize(value: Any, previous: Any) -> Content:
     return [TextPart(str(value))]
+
+
+def _recorder[T](items: list[T], event: threading.Event) -> Callable[[T], None]:
+    """An Event subscriber that appends the payload and signals — the common pattern for waiting
+    on a single instrumentation Event emission from the test thread."""
+
+    def record(item: T) -> None:
+        items.append(item)
+        event.set()
+
+    return record
 
 
 class ProgrammableChatModel(BaseChatModel):
@@ -2101,3 +2119,374 @@ def test_on_text_fires_even_when_the_sink_raises(loop, world, caplog):
         )
     assert texts == ["still observed"]
     agent.stop()
+
+
+# --- Instrumentation: ReactionTrace, on_trigger_dropped, on_command_ended, spans ---------------
+
+
+def test_reaction_ended_carries_the_phase_stamps_and_usage(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        return AIMessage(
+            content="hi",
+            usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        )
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("prompt", "x")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(traces) == 1
+    trace = traces[0]
+    assert trace.reaction_id == 1
+    assert trace.outcome == "ok"
+    assert trace.text_length == 2
+    assert trace.usage == TokenUsage(3, 2, None)
+    assert trace.noop is False
+    assert trace.command_call_ids == ()
+    assert len(trace.triggers) == 1
+    assert trace.triggers[0].key == "prompt"
+    assert trace.triggers[0].is_command_completion is False
+    t = trace.triggers[0]
+    assert trace.prompt_ready_at is not None
+    assert trace.model_started_at is not None
+    assert trace.model_ended_at is not None
+    assert (
+        t.written_at
+        <= t.arrived_at
+        <= trace.window_opened_at
+        <= trace.window_closed_at
+        <= trace.prompt_ready_at
+        <= trace.model_started_at
+        <= trace.model_ended_at
+        <= trace.ended_at
+    )
+    assert trace.sink_duration is not None and trace.sink_duration >= 0
+    assert trace.trace_id is not None
+    assert re.fullmatch(r"[0-9a-f]{32}", trace.trace_id)
+
+    agent.stop()
+
+
+def test_reaction_ended_reports_an_empty_response(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=text_response(""))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("prompt", "x")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert traces[0].outcome == "empty"
+    assert traces[0].sink_duration is None
+
+    agent.stop()
+
+
+def test_reaction_ended_reports_a_model_error(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        raise RuntimeError("boom")
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("prompt", "x")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert traces[0].outcome == "model_error"
+    assert traces[0].error == "boom"
+    assert traces[0].model_ended_at is not None
+
+    done.clear()
+    world.update("prompt", "y")  # the agent is free again — a second trace follows
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert len(traces) == 2
+
+    agent.stop()
+
+
+def test_reaction_ended_reports_cancellation_on_stop(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    prompt_fired = threading.Event()
+    block = asyncio.Event()
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        await block.wait()
+        return AIMessage(content="never")
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.on_prompt.subscribe(lambda m: prompt_fired.set())
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("prompt", "x")
+    assert prompt_fired.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert traces[0].outcome == "cancelled"
+    assert traces[0].model_ended_at is None
+
+
+def test_dropped_trigger_fires_on_trigger_dropped(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    block = asyncio.Event()
+    started = threading.Event()
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        started.set()
+        await block.wait()
+        return AIMessage(content="done")
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    dropped: list[WorldEntry] = []
+    got_drop = threading.Event()
+    agent.on_trigger_dropped.subscribe(_recorder(dropped, got_drop))
+    agent.start()
+
+    world.update("prompt", "first")
+    assert started.wait(timeout=WAIT_TIMEOUT)
+
+    world.update("prompt", "second")
+    assert got_drop.wait(timeout=WAIT_TIMEOUT)
+    assert dropped[0].current.value == "second"
+
+    loop.call_soon_threadsafe(block.set)
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+
+def test_coalesced_reaction_lists_every_trigger(loop, world, sink):
+    world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(
+        model, world=world, loop=loop, coalesce_window=0.2, output_sink=sink
+    )
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("a", "1")
+    world.update("b", "2")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(traces[0].triggers) == 2
+    assert traces[0].coalescing_wait >= 0.15
+
+    agent.stop()
+
+
+def test_command_ended_carries_reaction_id_and_duration(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
+            text_response("done"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    agent.register_command(add)
+    command_traces: list[CommandTrace] = []
+    got_command = threading.Event()
+    agent.on_command_ended.subscribe(_recorder(command_traces, got_command))
+    reaction_traces: list[ReactionTrace] = []
+    done = threading.Event()
+
+    def on_reaction(t: ReactionTrace) -> None:
+        reaction_traces.append(t)
+        if len(reaction_traces) == 2:
+            done.set()
+
+    agent.on_reaction_ended.subscribe(on_reaction)
+    agent.start()
+
+    world.update("prompt", "add them")
+    assert got_command.wait(timeout=WAIT_TIMEOUT)
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(command_traces) == 1
+    ct = command_traces[0]
+    assert ct.name == "add"
+    assert ct.reaction_id == 1
+    assert ct.state == "complete"
+    assert ct.duration >= 0
+
+    assert len(reaction_traces) == 2
+    follow_up = reaction_traces[1]
+    assert follow_up.triggers[0].is_command_completion is True
+    assert reaction_latency(follow_up) is None
+
+    agent.stop()
+
+
+def test_span_tree_follows_the_reaction(loop, world, sink, spans):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
+            text_response("done"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    agent.register_command(add)
+    reaction_traces: list[ReactionTrace] = []
+    done = threading.Event()
+
+    def on_reaction(t: ReactionTrace) -> None:
+        reaction_traces.append(t)
+        if len(reaction_traces) == 2:
+            done.set()
+
+    agent.on_reaction_ended.subscribe(on_reaction)
+    agent.start()
+
+    world.update("prompt", "add them")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    finished = spans.get_finished_spans()
+    by_name: dict[str, list[Any]] = {}
+    for s in finished:
+        by_name.setdefault(s.name, []).append(s)
+
+    update_spans = sorted(by_name["wica.world.update"], key=lambda s: s.start_time)
+    reaction_spans = sorted(by_name["wica.agent.reaction"], key=lambda s: s.start_time)
+    model_spans = by_name["wica.agent.model"]
+    (command_span,) = by_name["wica.agent.command"]
+
+    assert len(update_spans) == 2
+    assert len(reaction_spans) == 2
+    assert len(model_spans) == 2
+
+    first_reaction, second_reaction = reaction_spans
+    first_update, second_update = update_spans
+
+    assert first_reaction.parent is not None
+    assert first_reaction.parent.span_id == first_update.context.span_id
+
+    model_by_parent = {s.parent.span_id: s for s in model_spans if s.parent is not None}
+    assert first_reaction.context.span_id in model_by_parent
+    assert second_reaction.context.span_id in model_by_parent
+
+    assert command_span.parent is not None
+    assert command_span.parent.span_id == first_reaction.context.span_id
+
+    assert second_reaction.parent is not None
+    assert second_reaction.parent.span_id == second_update.context.span_id
+    assert second_update.parent is not None
+    assert second_update.parent.span_id == command_span.context.span_id
+
+    assert reaction_traces[0].trace_id == format_trace_id(
+        first_reaction.context.trace_id
+    )
+
+
+def test_spans_opened_inside_a_command_nest_under_the_command_span(
+    loop, world, sink, spans
+):
+    from opentelemetry import trace as otel_trace_module
+
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
+            text_response("done"),
+        )
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        with otel_trace_module.get_tracer("app").start_as_current_span(
+            "tts.synthesize"
+        ):
+            pass
+        return a + b
+
+    agent.register_command(add)
+    agent.start()
+
+    world.update("prompt", "add them")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    finished = spans.get_finished_spans()
+    (tts_span,) = [s for s in finished if s.name == "tts.synthesize"]
+    (command_span,) = [s for s in finished if s.name == "wica.agent.command"]
+    assert tts_span.parent is not None
+    assert tts_span.parent.span_id == command_span.context.span_id
+
+
+def test_coalesced_reaction_links_the_other_triggers(loop, world, sink, spans):
+    world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=True)
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(
+        model, world=world, loop=loop, coalesce_window=0.2, output_sink=sink
+    )
+    agent.start()
+
+    world.update("a", "1")
+    world.update("b", "2")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    finished = spans.get_finished_spans()
+    update_spans = sorted(
+        (s for s in finished if s.name == "wica.world.update"),
+        key=lambda s: s.start_time,
+    )
+    (reaction_span,) = [s for s in finished if s.name == "wica.agent.reaction"]
+    first_update, second_update = update_spans
+
+    assert len(reaction_span.links) == 1
+    assert reaction_span.links[0].context.span_id == second_update.context.span_id
+    assert reaction_span.parent is not None
+    assert reaction_span.parent.span_id == first_update.context.span_id

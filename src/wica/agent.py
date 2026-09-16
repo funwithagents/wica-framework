@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import copy
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -21,11 +23,23 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import Runnable
+from opentelemetry import context as otel_context
+from opentelemetry import trace as otel_trace
 
 from wica.command import Command
 from wica.config import AgentConfig, resolve_api_key, resolve_system_prompt
 from wica.content import Content, ImagePart, TextPart
 from wica.events import Event
+from wica.instrumentation import (
+    CommandTrace,
+    ReactionOutcome,
+    ReactionTrace,
+    TokenUsage,
+    TriggerTrace,
+    now,
+    parent_trigger,
+    tracer,
+)
 from wica.world import World, WorldEntry, validate_key
 
 _logger = logging.getLogger(__name__)
@@ -172,6 +186,75 @@ def _content_to_message_blocks(content: Content) -> list[dict[str, Any]]:
 
 
 _COMMAND_KEY_PREFIX = "agent:command:"
+
+
+@dataclass
+class _PendingTrigger:
+    """A trigger waiting in the coalescing window, with what the reaction record needs. See
+    specs/instrumentation.md ("Layer 1", "Layer 2")."""
+
+    entry: WorldEntry
+    arrived_at: datetime
+    context: contextvars.Context  # the writer's context, captured in _handle_trigger
+
+    def trace(self) -> TriggerTrace:
+        return TriggerTrace(
+            key=self.entry.key,
+            version_id=self.entry.current.id,
+            written_at=self.entry.current.timestamp,
+            arrived_at=self.arrived_at,
+            is_command_completion=self.entry.key.startswith(_COMMAND_KEY_PREFIX),
+        )
+
+
+@dataclass
+class _ReactionBuilder:
+    """Mutable per-reaction scratch filled in as the phases pass; frozen into a ReactionTrace at
+    the end (see _run_batch). See specs/instrumentation.md ("Layer 1")."""
+
+    reaction_id: int
+    triggers: tuple[TriggerTrace, ...]
+    window_opened_at: datetime
+    window_closed_at: datetime
+    span: otel_trace.Span
+    prompt_ready_at: datetime | None = None
+    model_started_at: datetime | None = None
+    model_ended_at: datetime | None = None
+    outcome: ReactionOutcome = (
+        "cancelled"  # overwritten by _run_step; stays "cancelled" if it
+    )
+    # never finishes (e.g. stop() cancels the reaction task before _run_step sets an outcome)
+    error: str | None = None
+    text_length: int = 0
+    sink_duration: float | None = None
+    command_call_ids: list[str] = field(default_factory=list)
+    noop: bool = False
+    usage: TokenUsage | None = None
+
+
+def _span_ids(span: otel_trace.Span) -> tuple[str | None, str | None]:
+    """The OpenTelemetry trace/span ids of a span, formatted as hex strings for a ReactionTrace —
+    or (None, None) when no SDK is installed (a no-op span has an invalid context)."""
+    sc = span.get_span_context()
+    if not sc.is_valid:
+        return None, None
+    return otel_trace.format_trace_id(sc.trace_id), otel_trace.format_span_id(
+        sc.span_id
+    )
+
+
+def _token_usage(response: AIMessage) -> TokenUsage | None:
+    """TokenUsage from an AIMessage's usage_metadata, or None when the provider didn't report it.
+    See specs/instrumentation.md ("Layer 1")."""
+    usage = response.usage_metadata
+    if usage is None:
+        return None
+    return TokenUsage(
+        input_tokens=usage["input_tokens"],
+        output_tokens=usage["output_tokens"],
+        cache_read_tokens=usage.get("input_token_details", {}).get("cache_read"),
+    )
+
 
 # cancel_command is a WICA-native control Command (not backed by an off-the-shelf tool): the Agent
 # implements it directly and auto-registers it so the model can abort a Command it previously issued
@@ -391,6 +474,9 @@ class Agent:
         self._persona = resolve_system_prompt(config)
         self.system_prompt = self._compose_system_prompt()
         self.model = model if model is not None else build_chat_model(config)
+        # Read for the wica.agent.model span's GenAI attributes (see specs/instrumentation.md).
+        self._provider = config.provider
+        self._model_name = config.model
         self._world = world
         # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
         # here. The Agent runs its tasks/timers/cancellation on it but never starts or stops it. See
@@ -412,10 +498,17 @@ class Agent:
         #                           (which is observable but not a World action; filter by name).
         #  - on_text(text):        the step's complete free text, right before the sink receives
         #                           it (observation; the sink is delivery).
+        #  - on_reaction_ended(trace):  once at the end of every reaction that started, whatever
+        #                           its outcome — see specs/instrumentation.md ("Layer 1").
+        #  - on_trigger_dropped(entry): once per trigger dropped because a reaction was in flight.
+        #  - on_command_ended(trace):   once per dispatched Command when its terminal state lands.
         self.on_trigger: Event[WorldEntry] = Event()
         self.on_prompt: Event[list[BaseMessage]] = Event()
         self.on_command: Event[CommandIssued] = Event()
         self.on_text: Event[str] = Event()
+        self.on_reaction_ended: Event[ReactionTrace] = Event()
+        self.on_trigger_dropped: Event[WorldEntry] = Event()
+        self.on_command_ended: Event[CommandTrace] = Event()
 
         # name -> the registered Command (which holds the backing LangChain tool — see commands.md)
         self._commands: dict[str, Command] = {}
@@ -423,9 +516,18 @@ class Agent:
         self._history: list[HistoryRecord] = []
         self._busy = False
         # Coalescing-window state, touched only on the loop thread (like _running_tasks): the
-        # triggers batched into the currently-open window, and the timer that will flush them.
-        self._window_batch: list[WorldEntry] = []
+        # triggers batched into the currently-open window (with the reaction-record fields each
+        # one needs), when the window opened, and the timer that will flush them.
+        self._window_batch: list[_PendingTrigger] = []
+        self._window_opened_at: datetime | None = None
         self._window_timer: asyncio.TimerHandle | None = None
+        self._reaction_counter = 0
+        # The reaction currently running _run_step, if any — read by _dispatch_command to stamp a
+        # Command's reaction_id. None outside of _run_batch (loop thread only, so race-free).
+        self._current_reaction: _ReactionBuilder | None = None
+        # call_id -> (the running version's timestamp, the reaction that issued it), consumed by
+        # _emit_command_ended when the terminal write lands. See specs/instrumentation.md.
+        self._command_started: dict[str, tuple[datetime, int]] = {}
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         # Every task the Agent creates, including trigger shims, reasoning batches, and Commands.
         # stop() cancels this complete set. An off-loop caller also drains cancellation before an
@@ -661,6 +763,7 @@ class Agent:
             self._window_timer.cancel()
             self._window_timer = None
         self._window_batch.clear()
+        self._window_opened_at = None
 
     def cancel_command(self, call_id: str) -> None:
         try:
@@ -705,13 +808,18 @@ class Agent:
         # Runs on the loop thread (the World emits on_trigger there, and the start() shim
         # create_tasks this coroutine on it). All window state below is therefore touched
         # single-threaded, so open/join/flush are race-free — the same invariant that makes
-        # cancellation race-free (see specs/agent.md "The shared event loop").
+        # cancellation race-free (see specs/agent.md "The shared event loop"). The task itself runs
+        # in the writer's context (the World scheduled on_trigger's emission with it, and
+        # create_task inherits the current context), so capturing it here for the window batch is
+        # all that's needed for propagation (see specs/instrumentation.md "Layer 2").
+        arrived_at = now()
         _logger.debug("trigger received: %s", _describe_entry(entry))
         if self._busy:
             _logger.info(
                 "dropping trigger (%s) — a call is already in flight",
                 _describe_entry(entry),
             )
+            self.on_trigger_dropped.emit(entry)
             # We don't run a step for a dropped trigger. A dropped *command completion* is left
             # in place on purpose — NOT retired here — so the terminal entry stays part of
             # current World state and gets rendered into history (then retired) by the next step
@@ -723,7 +831,10 @@ class Agent:
             # drop). Collecting during-flight triggers is the deferred concurrency/queue question.
             return
 
-        self._window_batch.append(entry)
+        pending = _PendingTrigger(entry, arrived_at, contextvars.copy_context())
+        self._window_batch.append(pending)
+        if len(self._window_batch) == 1:
+            self._window_opened_at = arrived_at
         if entry.bypass_coalescing or self._coalesce_window <= 0:
             # Fire immediately: an urgent entry flushes the window early (carrying anything already
             # batched), and a zero window is simply a window that closes at once.
@@ -736,8 +847,10 @@ class Agent:
             )
 
     def _flush_window(self) -> None:
-        """Close the coalescing window and start the single step for the batched triggers. Sync,
-        runs on the loop thread (called directly for an immediate flush, or by the window timer)."""
+        """Close the coalescing window, build this reaction's record and span, and start the single
+        step for the batched triggers. Sync, runs on the loop thread (called directly for an
+        immediate flush, or by the window timer). See specs/instrumentation.md ("Layer 1", "Layer
+        2", "Which trigger is the reaction's parent")."""
         if self._window_timer is not None:
             self._window_timer.cancel()
             self._window_timer = None
@@ -745,18 +858,96 @@ class Agent:
             return
         batch = self._window_batch
         self._window_batch = []
+
+        window_closed_at = now()
+        window_opened_at = self._window_opened_at or window_closed_at
+        self._window_opened_at = None
+        self._reaction_counter += 1
+        traces = tuple(pending.trace() for pending in batch)
+        parent = parent_trigger(traces)
+        parent_pending = batch[traces.index(parent)]
+        # The reaction span's parent is the context captured with the parent trigger (the trigger
+        # a coalesced batch is attributed to — see parent_trigger); every other trigger in the
+        # batch becomes a span link instead, so the trace still records it without splitting the
+        # reaction's parentage.
+        parent_ctx = parent_pending.context.run(otel_context.get_current)
+        links = []
+        for pending in batch:
+            if pending is parent_pending:
+                continue
+            sc = pending.context.run(otel_trace.get_current_span).get_span_context()
+            if sc.is_valid:
+                links.append(otel_trace.Link(sc))
+        span = tracer().start_span(
+            "wica.agent.reaction",
+            context=parent_ctx,
+            links=links,
+            attributes={
+                "wica.reaction_id": self._reaction_counter,
+                "wica.trigger_count": len(batch),
+            },
+        )
+        builder = _ReactionBuilder(
+            reaction_id=self._reaction_counter,
+            triggers=traces,
+            window_opened_at=window_opened_at,
+            window_closed_at=window_closed_at,
+            span=span,
+        )
         # Set _busy before the step task runs so triggers arriving in the gap are dropped, not
         # folded into a second concurrent step (single-in-flight).
         self._busy = True
-        self._track_task(self._run_batch(batch))
+        self._track_task(self._run_batch([pending.entry for pending in batch], builder))
 
-    async def _run_batch(self, batch: list[WorldEntry]) -> None:
+    async def _run_batch(
+        self, batch: list[WorldEntry], builder: _ReactionBuilder
+    ) -> None:
+        self._current_reaction = builder
         try:
-            await self._run_step(batch)
+            with otel_trace.use_span(builder.span, end_on_exit=False):
+                await self._run_step(batch, builder)
         finally:
             self._busy = False
+            self._current_reaction = None
+            ended_at = now()
+            builder.span.set_attributes(
+                {
+                    "wica.outcome": builder.outcome,
+                    "wica.text_length": builder.text_length,
+                    "wica.command_count": len(builder.command_call_ids),
+                    "wica.noop": builder.noop,
+                }
+            )
+            builder.span.end()
+            trace_id, span_id = _span_ids(builder.span)
+            # Emitted after _busy is cleared, so a subscriber sees "the Agent is free again" and
+            # the record at the same moment. Fires for every reaction that started, whatever its
+            # outcome (ok/empty/model_error/cancelled) — see specs/instrumentation.md ("Layer 1").
+            self.on_reaction_ended.emit(
+                ReactionTrace(
+                    reaction_id=builder.reaction_id,
+                    triggers=builder.triggers,
+                    window_opened_at=builder.window_opened_at,
+                    window_closed_at=builder.window_closed_at,
+                    prompt_ready_at=builder.prompt_ready_at,
+                    model_started_at=builder.model_started_at,
+                    model_ended_at=builder.model_ended_at,
+                    outcome=builder.outcome,
+                    error=builder.error,
+                    text_length=builder.text_length,
+                    sink_duration=builder.sink_duration,
+                    command_call_ids=tuple(builder.command_call_ids),
+                    noop=builder.noop,
+                    usage=builder.usage,
+                    ended_at=ended_at,
+                    trace_id=trace_id,
+                    span_id=span_id,
+                )
+            )
 
-    async def _run_step(self, batch: list[WorldEntry]) -> None:
+    async def _run_step(
+        self, batch: list[WorldEntry], builder: _ReactionBuilder
+    ) -> None:
         # A coalesced burst runs a single step, but on_trigger fires once per trigger that joined
         # the window (so a UI still shows every input). The Observation, on_prompt, and the model
         # call below happen once. See specs/agent.md "Trigger coalescing".
@@ -778,19 +969,42 @@ class Agent:
         # Instrumentation is observation-only: subscribers receive a defensive copy, never the
         # message list subsequently handed to the model.
         self.on_prompt.emit(copy.deepcopy(messages))
+        builder.prompt_ready_at = now()
+
+        builder.model_started_at = now()
         try:
-            response = await self._bound_model.ainvoke(messages)
-        except Exception:
+            with tracer().start_as_current_span(
+                "wica.agent.model",
+                attributes={
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.provider.name": self._provider,
+                    "gen_ai.request.model": self._model_name,
+                },
+            ) as model_span:
+                response = await self._bound_model.ainvoke(messages)
+                builder.usage = _token_usage(response)
+                if builder.usage is not None:
+                    model_span.set_attributes(
+                        {
+                            "gen_ai.usage.input_tokens": builder.usage.input_tokens,
+                            "gen_ai.usage.output_tokens": builder.usage.output_tokens,
+                        }
+                    )
+        except Exception as exc:
             # The observation is already in history (and terminal command entries are retired),
             # so the model never saw it this step; the renderer merges it into the next
             # observation's user message (see _render_messages). Nothing is dispatched. Ending the
             # step here frees the single-in-flight loop for the next trigger. CancelledError is a
             # BaseException and keeps propagating. See specs/agent.md ("Instrumentation").
+            builder.model_ended_at = now()
+            builder.outcome = "model_error"
+            builder.error = str(exc)
             _logger.exception(
                 "model call failed; step abandoned (trigger: %s)",
                 _describe_entry(representative),
             )
             return
+        builder.model_ended_at = now()
 
         text = response.text
         _logger.debug(
@@ -798,21 +1012,26 @@ class Agent:
             _truncate(text) if text else "(none)",
             [c["name"] for c in response.tool_calls] or "(none)",
         )
+        builder.text_length = len(text) if text else 0
+        builder.outcome = "empty" if not text and not response.tool_calls else "ok"
         if text:
             self._history.append(AssistantTextRecord(text))
             # Observation first, delivery second: the Event carries the same string the sink is
             # about to receive, so a watcher never has to occupy the single sink slot. A raising
             # sink below does not affect the emission. See specs/agent.md ("Instrumentation").
             self.on_text.emit(text)
-            try:
-                await self._output_sink(text)
-            except Exception:
-                # The sink is application code; its failure must not drop the Commands the model
-                # issued in the same response, nor escape the step. The text stays in history —
-                # the model did say it. See specs/agent.md ("Instrumentation").
-                _logger.exception(
-                    "output sink raised; continuing with the step's commands"
-                )
+            sink_started = now()
+            with tracer().start_as_current_span("wica.agent.sink"):
+                try:
+                    await self._output_sink(text)
+                except Exception:
+                    # The sink is application code; its failure must not drop the Commands the
+                    # model issued in the same response, nor escape the step. The text stays in
+                    # history — the model did say it. See specs/agent.md ("Instrumentation").
+                    _logger.exception(
+                        "output sink raised; continuing with the step's commands"
+                    )
+            builder.sink_duration = (now() - sink_started).total_seconds()
 
         for call in response.tool_calls:
             # The provider's tool-call id reconstructs the native tool_call/tool_result pair; the
@@ -826,6 +1045,7 @@ class Agent:
                 # model issued, so on_command fires for it like every other (a consumer that wants
                 # only real actions filters it out by name). See specs/commands.md, specs/agent.md.
                 _logger.debug("noop issued (call_id=%s) — no action taken", call_id)
+                builder.noop = True
                 self.on_command.emit(CommandIssued(_NOOP_COMMAND_NAME, {}, call_id))
                 self._history.append(NoReactionRecord(call_id, tool_call_id))
                 continue
@@ -834,6 +1054,7 @@ class Agent:
                 CommandRecord(call_id, tool_call_id, call["name"], copy.deepcopy(args))
             )
             self._dispatch_command(call_id, call["name"], args)
+            builder.command_call_ids.append(call_id)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
 
     def _world_call_id(self, provider_id: str | None) -> str:
@@ -881,60 +1102,99 @@ class Agent:
         # shown in the World, or passed to the Command itself. See specs/agent.md.
         self.on_command.emit(CommandIssued(name, copy.deepcopy(args), call_id))
         self._world.update(key, CommandExecution(name=name, args=args, state="running"))
-        task = self._track_task(self._run_command(key, call_id, name, args))
+        started_at = self._world.get_entry(key).current.timestamp
+        reaction_id = (
+            self._current_reaction.reaction_id if self._current_reaction else 0
+        )
+        self._command_started[key] = (started_at, reaction_id)
+        # No context= here: start_span parents to the current span, which is the reaction span
+        # (this call happens inside _run_step, which _run_batch wraps in use_span). See
+        # specs/instrumentation.md ("Layer 2").
+        span = tracer().start_span(
+            "wica.agent.command",
+            attributes={"wica.command.name": name, "wica.call_id": call_id},
+        )
+        task = self._track_task(self._run_command(key, call_id, name, args, span))
         self._running_tasks[key] = task
 
     async def _run_command(
-        self, key: str, call_id: str, name: str, args: dict[str, Any]
+        self,
+        key: str,
+        call_id: str,
+        name: str,
+        args: dict[str, Any],
+        span: otel_trace.Span,
     ) -> None:
         _logger.debug(
             "command %s(%s) [call_id=%s] executing", name, _format_args(args), call_id
         )
-        try:
-            command = self._commands.get(name)
-            if command is None:
-                # The model named a tool the Agent never bound (or one unregistered since). Fail
-                # the entry with a readable error rather than the bare KeyError repr ("'ghost'").
-                raise LookupError(f"unknown command {name!r}")
-            result = await command.tool.ainvoke(args)
-        except asyncio.CancelledError:
-            _logger.debug("command %s [call_id=%s] cancelled", name, call_id)
-            self._write_terminal(
-                key, call_id, CommandExecution(name=name, args=args, state="cancelled")
-            )
-            raise
-        except Exception as exc:
-            _logger.warning("command %s [call_id=%s] failed: %s", name, call_id, exc)
-            self._write_terminal(
-                key,
-                call_id,
-                CommandExecution(name=name, args=args, state="failed", error=str(exc)),
-            )
-        else:
-            _logger.debug(
-                "command %s [call_id=%s] complete → %s",
-                name,
-                call_id,
-                _truncate(str(result)),
-            )
-            self._write_terminal(
-                key,
-                call_id,
-                CommandExecution(
-                    name=name, args=args, state="complete", result=str(result)
-                ),
-            )
-        finally:
-            self._running_tasks.pop(key, None)
+        # Current for the whole Command body (dispatch to terminal write), so any span an
+        # application or third-party library opens inside it nests under this one with no
+        # WICA-specific API, and the terminal world.update() below carries it — the completion
+        # trigger's follow-up reaction then descends from the Command. See
+        # specs/instrumentation.md ("Layer 2").
+        with otel_trace.use_span(span, end_on_exit=True):
+            try:
+                command = self._commands.get(name)
+                if command is None:
+                    # The model named a tool the Agent never bound (or one unregistered since).
+                    # Fail the entry with a readable error rather than the bare KeyError repr
+                    # ("'ghost'").
+                    raise LookupError(f"unknown command {name!r}")
+                result = await command.tool.ainvoke(args)
+            except asyncio.CancelledError:
+                _logger.debug("command %s [call_id=%s] cancelled", name, call_id)
+                span.set_attribute("wica.command.state", "cancelled")
+                if self._write_terminal(
+                    key,
+                    call_id,
+                    CommandExecution(name=name, args=args, state="cancelled"),
+                ):
+                    self._emit_command_ended(key, call_id, name, "cancelled")
+                raise
+            except Exception as exc:
+                _logger.warning(
+                    "command %s [call_id=%s] failed: %s", name, call_id, exc
+                )
+                span.set_attribute("wica.command.state", "failed")
+                if self._write_terminal(
+                    key,
+                    call_id,
+                    CommandExecution(
+                        name=name, args=args, state="failed", error=str(exc)
+                    ),
+                ):
+                    self._emit_command_ended(key, call_id, name, "failed")
+            else:
+                _logger.debug(
+                    "command %s [call_id=%s] complete → %s",
+                    name,
+                    call_id,
+                    _truncate(str(result)),
+                )
+                span.set_attribute("wica.command.state", "complete")
+                if self._write_terminal(
+                    key,
+                    call_id,
+                    CommandExecution(
+                        name=name, args=args, state="complete", result=str(result)
+                    ),
+                ):
+                    self._emit_command_ended(key, call_id, name, "complete")
+            finally:
+                self._running_tasks.pop(key, None)
 
     def _write_terminal(
         self, key: str, call_id: str, execution: CommandExecution
-    ) -> None:
+    ) -> bool:
         """Write a Command's terminal state to its World entry, tolerating a World that has
         already stopped. That happens during Wica teardown (agent.stop() cancels in-flight
         commands just before world.stop()) and for a Command that finishes after the World paused
         (an injected-loop shutdown, or one that swallows its cancellation). The write is moot then:
-        log and drop it rather than raise into the task. See specs/wica.md ("Lifecycle")."""
+        log and drop it rather than raise into the task. Returns whether the write happened — the
+        caller uses this to decide whether to emit on_command_ended: if the World is stopped, the
+        entry's current version is still `running`, so there's no terminal timestamp to report.
+        See specs/wica.md ("Lifecycle")."""
         try:
             self._world.update(key, execution)
         except RuntimeError:
@@ -945,6 +1205,34 @@ class Agent:
                 call_id,
                 execution.state,
             )
+            return False
+        return True
+
+    def _emit_command_ended(
+        self,
+        key: str,
+        call_id: str,
+        name: str,
+        state: Literal["complete", "failed", "cancelled"],
+    ) -> None:
+        started = self._command_started.pop(key, None)
+        if started is None:
+            return
+        try:
+            ended_at = self._world.get_entry(key).current.timestamp
+        except KeyError:
+            return  # entry already gone (World stopped and the write was dropped)
+        started_at, reaction_id = started
+        self.on_command_ended.emit(
+            CommandTrace(
+                call_id=call_id,
+                name=name,
+                reaction_id=reaction_id,
+                started_at=started_at,
+                ended_at=ended_at,
+                state=state,
+            )
+        )
 
     def _append_observation(self) -> None:
         snapshot = self._world.get_prompt_snapshot()

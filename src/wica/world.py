@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import dataclasses
 import inspect
@@ -9,21 +10,18 @@ import threading
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from wica.content import Content, TextPart
 from wica.events import Event
+from wica.instrumentation import now, tracer
 
 _logger = logging.getLogger(__name__)
 
 # A World listener may be a plain sync function or an async coroutine function; the World
 # detects which and dispatches accordingly on the shared loop (see World.add_listener).
 Listener = Callable[["WorldEntry"], None] | Callable[["WorldEntry"], Awaitable[None]]
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _describe_value(value: Any) -> str:
@@ -127,14 +125,16 @@ class World:
             if self._running:
                 return
             self._running = True
-            now = _now()
+            current_time = now()
             # stop() cancels timers but retains state. Restore each retained value against its
             # original update deadline so wall-clock TTL continues across the pause.
             for key, config in self._configs.items():
                 entry = self._entries[key]
                 if config.ttl is None or entry.current.value is None:
                     continue
-                remaining = (entry.current.timestamp + config.ttl - now).total_seconds()
+                remaining = (
+                    entry.current.timestamp + config.ttl - current_time
+                ).total_seconds()
                 if remaining <= 0:
                     expired.append((key, entry.current.id))
                 else:
@@ -195,7 +195,7 @@ class World:
                 key=key,
                 type=type,
                 bypass_coalescing=bypass_coalescing,
-                current=WorldEntryVersion(id=new_id, value=None, timestamp=_now()),
+                current=WorldEntryVersion(id=new_id, value=None, timestamp=now()),
                 previous=None,
             )
         _logger.debug(
@@ -307,7 +307,7 @@ class World:
                 type=old_entry.type,
                 bypass_coalescing=old_entry.bypass_coalescing,
                 current=WorldEntryVersion(
-                    id=new_id, value=stored_value, timestamp=_now()
+                    id=new_id, value=stored_value, timestamp=now()
                 ),
                 previous=old_entry.current,
             )
@@ -323,6 +323,21 @@ class World:
 
             listeners = list(self._listeners.get(key, ()))
 
+            # The caller's context is captured under the lock and carried onto every callback this
+            # update schedules (listeners and the trigger emission), so a span or context variable
+            # set by the writer is visible in them — including a sync listener, run through this
+            # context on the executor (see _dispatch). A triggering update opens a short span first;
+            # the context captured *inside* it holds that span as current, so the reaction span
+            # opened later has it as parent. See specs/instrumentation.md ("Layer 2").
+            if should_trigger:
+                with tracer().start_as_current_span(
+                    "wica.world.update",
+                    attributes={"wica.key": key, "wica.version_id": new_id},
+                ):
+                    ctx = contextvars.copy_context()
+            else:
+                ctx = contextvars.copy_context()
+
             # Both reactive outputs are fire-and-forget onto the shared loop, so a slow callback
             # never blocks update()'s (possibly cross-thread) caller. Listeners run sync-on-the-pool
             # or async-on-the-loop and are individually guarded; the trigger emits on_trigger on the
@@ -332,11 +347,11 @@ class World:
             # specs/world.md ("The shared event loop").
             for listener in listeners:
                 self._loop.call_soon_threadsafe(
-                    self._dispatch, listener, copy.deepcopy(new_entry)
+                    self._dispatch, listener, copy.deepcopy(new_entry), context=ctx
                 )
             if should_trigger:
                 self._loop.call_soon_threadsafe(
-                    self.on_trigger.emit, copy.deepcopy(new_entry)
+                    self.on_trigger.emit, copy.deepcopy(new_entry), context=ctx
                 )
 
         new_id = new_entry.current.id
@@ -361,15 +376,19 @@ class World:
             )
 
     def _dispatch(self, callback: Listener, entry: WorldEntry) -> None:
-        """Schedule one listener on the loop (runs on the loop thread, via call_soon_threadsafe).
+        """Schedule one listener on the loop (runs on the loop thread, via call_soon_threadsafe, in
+        the writer's context — see update()).
 
-        An async listener becomes a loop task; a sync listener is offloaded to the loop's default
-        thread-pool executor so a blocking callback never stalls the loop. Each is individually
-        guarded so a raising listener is caught-and-logged, isolated from siblings and the loop."""
+        An async listener becomes a loop task, which inherits this context automatically. A sync
+        listener is offloaded to the loop's default thread-pool executor, which does *not* inherit
+        context on its own, so the writer's context (captured here, since _dispatch itself runs
+        under it) is carried onto the executor thread via `ctx.run`. Each is individually guarded
+        so a raising listener is caught-and-logged, isolated from siblings and the loop."""
         if inspect.iscoroutinefunction(callback):
             self._loop.create_task(self._run_guarded_async(callback, entry))
         else:
-            fut = self._loop.run_in_executor(None, callback, entry)  # type: ignore[arg-type]
+            ctx = contextvars.copy_context()
+            fut = self._loop.run_in_executor(None, ctx.run, callback, entry)  # type: ignore[arg-type]
             fut.add_done_callback(self._log_if_failed)
 
     async def _run_guarded_async(

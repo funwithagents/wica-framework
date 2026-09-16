@@ -42,7 +42,7 @@ from typing import Any
 import gradio as gr
 from langchain_core.messages import BaseMessage
 
-from wica import CommandExecution, CommandIssued, Wica, World, WorldEntry
+from wica import CommandExecution, CommandIssued, ReactionTrace, Wica, World, WorldEntry
 from wica.agent import _COMMAND_KEY_PREFIX, _NOOP_COMMAND_NAME
 from wica.contrib.gradio.display import (
     DisplayEntry,
@@ -111,11 +111,15 @@ class TranscriptLog:
         # each was issued (monotonic) for the duration shown on completion.
         self._command_items: dict[str, dict[str, Any]] = {}
         self._command_started: dict[str, float] = {}
+        # Reaction group items by reaction_id, so on_reaction_ended can drop the spinner and add
+        # the duration once the reaction finishes. See specs/instrumentation.md.
+        self._reaction_items: dict[int, dict[str, Any]] = {}
 
         if wica is not None:
             wica.on_agent_trigger.subscribe(self.on_trigger)
             wica.on_agent_prompt.subscribe(self.on_prompt)
             wica.on_agent_command.subscribe(self.on_command)
+            wica.on_agent_reaction_ended.subscribe(self.on_reaction_ended)
 
     @property
     def output_command_name(self) -> str | None:
@@ -234,19 +238,33 @@ class TranscriptLog:
         """Open this step's **reaction group** in the transcript so its outputs nest under one
         header, titled by the trigger that caused the step. Fires once per reasoning step, on the
         agent loop, before the model call — so it precedes the step's items. (The prompt itself
-        is kept by `PromptLog`, not here.)"""
+        is kept by `PromptLog`, not here.) Opens *pending* (a spinner while the model thinks);
+        `on_reaction_ended` drops it and shows the reaction's duration."""
         self._reaction_count += 1
         self._current_reaction_id = f"reaction-{self._reaction_count}"
-        self._items.put(
-            {
-                "role": "assistant",
-                "content": "",
-                "metadata": {
-                    "id": self._current_reaction_id,
-                    "title": f"💬 reaction {self._reaction_count} · {self._last_trigger_label}",
-                },
-            }
-        )
+        item = {
+            "role": "assistant",
+            "content": "",
+            "metadata": {
+                "id": self._current_reaction_id,
+                "title": f"💬 reaction {self._reaction_count} · {self._last_trigger_label}",
+                "status": "pending",
+            },
+        }
+        with self._lock:
+            self._reaction_items[self._reaction_count] = item
+        self._items.put(item)
+
+    def on_reaction_ended(self, reaction: ReactionTrace) -> None:
+        """The reaction finished: drop the spinner and show how long the Agent was busy. Matched by
+        reaction_id, which counts reactions exactly as on_prompt does (both start at 1 and advance
+        once per reaction). Runs on the agent loop."""
+        with self._lock:
+            item = self._reaction_items.pop(reaction.reaction_id, None)
+            if item is None:
+                return
+            item["metadata"].pop("status", None)
+            item["metadata"]["duration"] = round(reaction.busy_time, 1)
 
     # --- UI reads --------------------------------------------------------------------
 
