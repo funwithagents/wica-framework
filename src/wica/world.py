@@ -489,6 +489,11 @@ class World:
             copy.deepcopy(entry.current.value),
             copy.deepcopy(previous_value),
         )
+        if not body:
+            # An empty body means "nothing to show": the entry is omitted from this render — no
+            # envelope at all, so every consumer (render_full_prompt, the Agent's history
+            # renderer) drops it with no extra logic. See specs/world.md ("Omitting an entry").
+            return []
         opening = TextPart(f'<entry key="{entry.key}" id="{entry.current.id}">\n')
         # The closing part ends with a trailing newline so that, when entries are concatenated
         # (the way adjacent parts merge — see content.md), each `</entry>` sits on its own line

@@ -23,6 +23,8 @@ from wica.agent import (
     NoReactionRecord,
     ObservationRecord,
     _command_ack,
+    _EMPTY_OBSERVATION,
+    _EMPTY_OBSERVATION_BLOCK,
     _NOOP_ACK,
     _NOOP_COMMAND_NAME,
 )
@@ -2490,3 +2492,92 @@ def test_coalesced_reaction_links_the_other_triggers(loop, world, sink, spans):
     assert reaction_span.links[0].context.span_id == second_update.context.span_id
     assert reaction_span.parent is not None
     assert reaction_span.parent.span_id == first_update.context.span_id
+
+
+# --- Omitted entries (serializer returns []) --------------------------------
+
+
+def _hide_when_none(value: Any, previous: Any) -> Content:
+    return [] if value is None else [TextPart(f"mood={value}")]
+
+
+def test_observation_leaves_out_entries_whose_serializer_returns_empty(
+    loop, world, sink
+):
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+    )
+    world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    world.register("mood", str, serialize_fn=_hide_when_none)
+    agent.start()
+
+    _step(model, world, "speech", "one", 1)
+    first = _rendered_user_text(model, 0)
+    assert 'key="speech"' in first
+    assert "mood" not in first  # no hollow <entry key="mood"> block either
+
+    world.update("mood", "happy")
+    _step(model, world, "speech", "two", 2)
+    second = _rendered_user_text(model, 1)
+    assert 'key="mood"' in second
+    assert "mood=happy" in second
+    # the archival re-render of observation 1 still omits it — its snapshot held None
+    assert second.count('key="mood"') == 1
+    agent.stop()
+
+
+def test_all_omitted_observation_renders_as_a_placeholder_user_message(
+    loop, world, sink
+):
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+    )
+    world.register("silent", str, serialize_fn=lambda v, p: [], triggers_llm_call=True)
+    agent.start()
+
+    _step(model, world, "silent", "x", 1)
+    humans = [m for m in model.calls[0] if isinstance(m, HumanMessage)]
+    assert len(humans) == 1
+    assert humans[0].content == [{"type": "text", "text": _EMPTY_OBSERVATION}]
+    assert isinstance(
+        model.calls[0][1], HumanMessage
+    )  # a user turn follows the system prompt
+
+    _step(model, world, "silent", "y", 2)
+    assert _no_consecutive_human_messages(model.calls[1])
+    humans = [m for m in model.calls[1] if isinstance(m, HumanMessage)]
+    assert [m.content for m in humans] == [[_EMPTY_OBSERVATION_BLOCK]] * 2
+    agent.stop()
+
+
+def test_merged_all_omitted_observations_share_one_placeholder(loop, world, sink):
+    world.register("silent", str, serialize_fn=lambda v, p: [], triggers_llm_call=True)
+    world.register("mood", str, serialize_fn=_hide_when_none)
+    model = ProgrammableChatModel(
+        respond=sequence(text_response(""), text_response(""), text_response("ok"))
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+
+    world.update("silent", "a")
+    wait_until(lambda: len(model.calls) == 1 and not agent._busy)
+    world.update("silent", "b")  # empty response above: observations 1 and 2 merge
+    wait_until(lambda: len(model.calls) == 2 and not agent._busy)
+    humans = [m for m in model.calls[1] if isinstance(m, HumanMessage)]
+    assert [m.content for m in humans] == [[_EMPTY_OBSERVATION_BLOCK]]
+
+    world.update("mood", "calm")
+    world.update(
+        "silent", "c"
+    )  # real blocks replace the placeholder in the merged message
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    humans = [m for m in model.calls[2] if isinstance(m, HumanMessage)]
+    assert len(humans) == 1
+    assert isinstance(humans[0].content, list)
+    assert _EMPTY_OBSERVATION_BLOCK not in humans[0].content
+    assert "mood=calm" in human_texts(humans[0])
+    agent.stop()

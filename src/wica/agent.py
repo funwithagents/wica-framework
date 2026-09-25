@@ -187,6 +187,13 @@ def _content_to_message_blocks(content: Content) -> list[dict[str, Any]]:
 
 _COMMAND_KEY_PREFIX = "agent:command:"
 
+# The single text block an observation renders to when every one of its entries omitted itself
+# (serializer returned []). Providers reject empty user content and the first message after the
+# system prompt must be a user turn, so the observation cannot simply be skipped. See
+# specs/agent.md ("Rendering to messages", omitted entries).
+_EMPTY_OBSERVATION = "(no entries to observe)"
+_EMPTY_OBSERVATION_BLOCK: dict[str, Any] = {"type": "text", "text": _EMPTY_OBSERVATION}
+
 
 @dataclass
 class _PendingTrigger:
@@ -1343,9 +1350,19 @@ class Agent:
                         if isinstance(previous.content, list)
                         else [previous.content]
                     )
-                    messages[-1] = HumanMessage(content=[*merged, *blocks])
+                    # A placeholder left by an earlier all-omitted observation gives way to real
+                    # blocks; it only stays if the merged observation is still empty.
+                    combined = [
+                        *(b for b in merged if b != _EMPTY_OBSERVATION_BLOCK),
+                        *blocks,
+                    ]
+                    messages[-1] = HumanMessage(
+                        content=combined or [_EMPTY_OBSERVATION_BLOCK]
+                    )
                 else:
-                    messages.append(HumanMessage(content=blocks))
+                    messages.append(
+                        HumanMessage(content=blocks or [_EMPTY_OBSERVATION_BLOCK])
+                    )
             elif isinstance(record, AssistantTextRecord):
                 pending_text.append(record.text)
             elif isinstance(record, CommandRecord):

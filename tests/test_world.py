@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import timedelta
+from typing import Any
 
 import pytest
 
@@ -1084,3 +1085,77 @@ def test_get_config_reports_the_declared_schema_and_is_a_copy(world: World):
     assert "tampered" not in flatten(world.render_entry(world.get_entry("speech")))
     with pytest.raises(KeyError):
         world.get_config("missing")
+
+
+# --- Omitting an entry (serializer returns []) ------------------------------
+
+
+def _hide_when_none(value: Any, previous: Any) -> Content:
+    return [] if value is None else [TextPart(f"value={value}")]
+
+
+def test_render_entry_returns_nothing_when_serializer_returns_empty_content(
+    world: World,
+):
+    world.register("hidden", str, serialize_fn=_hide_when_none)
+
+    assert world.render_entry(world.get_entry("hidden")) == []
+
+    world.update("hidden", "shown")
+    rendered = flatten(world.render_entry(world.get_entry("hidden")))
+    assert rendered.startswith('<entry key="hidden" id="2">\nvalue=shown\n')
+
+
+def test_render_entry_fresh_and_archival_omission_are_independent(world: World):
+    world.register(
+        "photo",
+        bytes,
+        serialize_fn=image_serialize,
+        archival_serialize_fn=lambda v, p: [],
+    )
+    world.update("photo", b"\x89PNG")
+    entry = world.get_entry("photo")
+
+    assert any(isinstance(part, ImagePart) for part in world.render_entry(entry))
+    assert world.render_entry(entry, archival=True) == []
+
+    world.register(
+        "reading",
+        str,
+        serialize_fn=lambda v, p: [],
+        archival_serialize_fn=lambda v, p: [TextPart("was read")],
+    )
+    world.update("reading", "x")
+    entry = world.get_entry("reading")
+    assert world.render_entry(entry) == []
+    assert "was read" in flatten(world.render_entry(entry, archival=True))
+
+
+def test_render_entry_explicit_serializer_returning_empty_content_omits(world: World):
+    world.register("temp", str, serialize_fn=identity_serialize)
+    world.update("temp", "a")
+    entry = world.get_entry("temp")
+
+    assert world.render_entry(entry, serialize_fn=lambda v, p: []) == []
+    assert "a" in flatten(world.render_entry(entry))
+
+
+def test_render_full_prompt_leaves_out_entries_whose_serializer_returns_empty(
+    world: World,
+):
+    world.register("first", str, serialize_fn=identity_serialize)
+    world.register("hidden", str, serialize_fn=_hide_when_none)
+    world.register("last", str, serialize_fn=identity_serialize)
+    world.update("first", "one")
+    world.update("last", "two")
+
+    prompt = flatten(world.render_full_prompt())
+    assert "hidden" not in prompt
+    assert prompt.count("<entry ") == 2
+    assert prompt.count("</entry>\n<entry ") == 1  # the two shown blocks stay adjacent
+
+    world.update("hidden", "now")
+    prompt = flatten(world.render_full_prompt())
+    assert 'key="hidden"' in prompt
+    assert "value=now" in prompt
+    assert prompt.count("<entry ") == 3
