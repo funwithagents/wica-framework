@@ -39,6 +39,9 @@ class AgentConfig:
     api_key_env: str | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     hf_provider: str = "auto"  # only used by provider "huggingface-hub"
+    # None = unbounded history. A positive int X keeps the last X reactions in the prompt (the
+    # Agent lets history grow to 2X, then cuts back to X). See specs/agent.md ("History window").
+    history_reactions: int | None = None
 
     def __post_init__(self) -> None:
         # The structural invariants the loaders enforce, applied to direct construction too, so
@@ -57,6 +60,7 @@ class AgentConfig:
             raise ConfigError(
                 "agent: specify at most one of 'api_key'/'api_key_env', not both"
             )
+        _validate_history_reactions(self.history_reactions, block="agent")
 
     @classmethod
     def from_dict(
@@ -110,7 +114,13 @@ class WicaConfig:
 
 
 _AGENT_REQUIRED = {"provider", "model"}
-_AGENT_OPTIONAL_COMMON = {"api_key", "api_key_env", "model_kwargs", "hf_provider"}
+_AGENT_OPTIONAL_COMMON = {
+    "api_key",
+    "api_key_env",
+    "model_kwargs",
+    "hf_provider",
+    "history_reactions",
+}
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent"}
 
@@ -120,6 +130,18 @@ def _as_base_dir(base_dir: str | Path | None) -> Path | None:
     `Path | None` the `_parse_*` locate plumbing expects — the same base-dir context `from_json_file`
     derives from the config file's own directory. See specs/config.md ("System prompt")."""
     return Path(base_dir) if base_dir is not None else None
+
+
+def _validate_history_reactions(value: Any, *, block: str) -> int | None:
+    """None (unbounded) or a positive int — the number of reactions the history window keeps.
+    A bool is rejected even though it is an int subclass. See specs/config.md."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(
+            f"{block}: 'history_reactions' must be a positive integer or null, got {value!r}"
+        )
+    return value
 
 
 def _require_str(data: dict[str, Any], key: str, *, block: str) -> str:
@@ -209,6 +231,10 @@ def _parse_agent_block(
             f"{block}: 'hf_provider' must be a string, got {type(hf_provider).__name__}"
         )
 
+    history_reactions = _validate_history_reactions(
+        data.get("history_reactions"), block=block
+    )
+
     return {
         "provider": provider,
         "model": model,
@@ -218,6 +244,7 @@ def _parse_agent_block(
         "api_key_env": api_key_env,
         "model_kwargs": model_kwargs,
         "hf_provider": hf_provider,
+        "history_reactions": history_reactions,
     }
 
 

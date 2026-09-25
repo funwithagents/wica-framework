@@ -327,6 +327,17 @@ _RUNTIME_PRIMER = (
     "both together: issue the first, then issue the next in a later step, once you observe the "
     "first complete."
 )
+# Appended only when AgentConfig.history_reactions is set: a bounded context changes how the model
+# should read its prompt (a truncated history is not the whole conversation; a Command outcome may
+# show up for a dispatch it no longer sees). Absent with unbounded history, so the primer stays
+# fixed for a given config. See specs/agent.md ("History window", primer clause 2).
+_HISTORY_WINDOW_PROMPT = (
+    "\n- Your context holds only your most recent reactions — the latest observations and what "
+    "you said or did in response — not the whole interaction: older exchanges are gone. The "
+    "current observation is the authority on the present state of the World; anything that must "
+    "persist comes from the entries it shows, not from memory of earlier turns. An entry may "
+    "report the outcome of an action you no longer see yourself issuing."
+)
 # Appended when there is *no* output Command: free text is the reply channel. Without this some
 # models default to a tool (noop) instead of answering. See specs/agent.md ("System prompt
 # composition").
@@ -479,6 +490,10 @@ class Agent:
         # string is fixed before the first step and stays in the cached deep prefix. See
         # specs/agent.md ("System prompt composition").
         self._persona = resolve_system_prompt(config)
+        # None = unbounded. X keeps the last X reactions: history grows to 2X, then is cut back to
+        # X at step start (hysteresis keeps the cached prefix stable). See specs/agent.md
+        # ("History window").
+        self._history_reactions = config.history_reactions
         self.system_prompt = self._compose_system_prompt()
         self.model = model if model is not None else build_chat_model(config)
         # Read for the wica.agent.model span's GenAI attributes (see specs/instrumentation.md).
@@ -561,9 +576,12 @@ class Agent:
 
     def _compose_system_prompt(self) -> str:
         """The persona followed by the WICA runtime primer: perception + acting, then the
-        output-mode clause (how you reply differs by whether an output Command is set), then the
-        noop clause last. See specs/agent.md ("System prompt composition")."""
+        history-window clause (only with a bounded history), then the output-mode clause (how you
+        reply differs by whether an output Command is set), then the noop clause last. See
+        specs/agent.md ("System prompt composition")."""
         primer = _RUNTIME_PRIMER
+        if self._history_reactions is not None:
+            primer += _HISTORY_WINDOW_PROMPT
         if self._output_command_name is not None:
             primer += _OUTPUT_COMMAND_PROMPT.format(name=self._output_command_name)
         else:
@@ -1253,6 +1271,7 @@ class Agent:
             for entry, config in snapshot
         ]
         self._history.append(ObservationRecord(observed))
+        self._apply_history_window()
         # This snapshot has now captured every terminal command entry's outcome (they render from
         # it in _render_messages), so retire them all here — not just the one that fired. This is
         # the *sole* retirement path: a completion whose own trigger was dropped by the
@@ -1263,6 +1282,33 @@ class Agent:
             if self._is_terminal_command(item.entry):
                 _logger.debug("retiring completed command entry %r", item.entry.key)
                 self._cleanup_command_entry(item.entry.key)
+
+    def _apply_history_window(self) -> None:
+        """Cut the oldest reactions once history holds 2X of them, keeping the newest X (the
+        current step's included). A reaction is counted by its ObservationRecord — every step
+        appends exactly one, whatever its outcome. Cutting at an Observation boundary keeps the
+        provider stream valid (first message a user turn; a step's tool_calls and tool_results
+        travel together). Records are dropped from storage, not hidden — that is what bounds
+        memory. Hysteresis (2X, not X+1) keeps the cached prefix byte-stable between cuts. See
+        specs/agent.md ("History window")."""
+        keep = self._history_reactions
+        if keep is None:
+            return
+        observation_indexes = [
+            i
+            for i, record in enumerate(self._history)
+            if isinstance(record, ObservationRecord)
+        ]
+        if len(observation_indexes) < 2 * keep:
+            return
+        cut = observation_indexes[-keep]
+        _logger.debug(
+            "history window: dropping %d reaction(s) (%d record(s)), keeping the last %d",
+            len(observation_indexes) - keep,
+            cut,
+            keep,
+        )
+        del self._history[:cut]
 
     def _is_terminal_command(self, entry: WorldEntry) -> bool:
         value = entry.current.value

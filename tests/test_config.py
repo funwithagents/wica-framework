@@ -461,6 +461,35 @@ def test_hf_provider_wrong_type_raises():
         AgentConfig.from_dict(_agent_dict(hf_provider=123))
 
 
+# --- history_reactions field --------------------------------------------------------------
+
+
+def test_history_reactions_defaults_to_unbounded():
+    assert AgentConfig.from_dict(_agent_dict()).history_reactions is None
+    assert (
+        AgentConfig.from_dict(_agent_dict(history_reactions=None)).history_reactions
+        is None
+    )
+
+
+def test_history_reactions_parsed_from_dict_and_json():
+    assert (
+        AgentConfig.from_dict(_agent_dict(history_reactions=3)).history_reactions == 3
+    )
+    cfg = WicaConfig.from_json(json.dumps(_wica_dict(history_reactions=12)))
+    assert cfg.agent.history_reactions == 12
+
+
+@pytest.mark.parametrize("value", [0, -1, "3", True, 2.5])
+def test_history_reactions_rejects_non_positive_integers(value: Any):
+    with pytest.raises(ConfigError, match="history_reactions"):
+        AgentConfig.from_dict(_agent_dict(history_reactions=value))
+    with pytest.raises(ConfigError, match="history_reactions"):
+        AgentConfig(
+            provider="fake", model="x", system_prompt="p", history_reactions=value
+        )
+
+
 # --- build_chat_model: provider construction branch ---------------------------------------
 
 

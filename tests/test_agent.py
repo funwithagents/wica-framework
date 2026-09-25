@@ -180,6 +180,7 @@ def make_agent(
     system_prompt: str = "You are terse.",
     output_sink: Callable[[str], Awaitable[None]] | None = None,
     output_command: Callable[..., Any] | Command | None = None,
+    history_reactions: int | None = None,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
@@ -187,7 +188,12 @@ def make_agent(
     ProgrammableChatModel the loop is driven over. The prompt is carried on the config. The output
     sink / output Command are not constructor arguments (build, then wire — see specs/agent.md,
     "Output wiring"); this helper folds the wiring step in for brevity."""
-    config = AgentConfig(provider="fake", model="test", system_prompt=system_prompt)
+    config = AgentConfig(
+        provider="fake",
+        model="test",
+        system_prompt=system_prompt,
+        history_reactions=history_reactions,
+    )
     agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
     if output_sink is not None:
         agent.set_output_sink(output_sink)
@@ -2581,3 +2587,256 @@ def test_merged_all_omitted_observations_share_one_placeholder(loop, world, sink
     assert _EMPTY_OBSERVATION_BLOCK not in humans[0].content
     assert "mood=calm" in human_texts(humans[0])
     agent.stop()
+
+
+# --- History window (specs/agent.md, "History window") -----------------------------------
+
+
+def _run_text_steps(
+    agent: Agent, world: World, sink: RecordingSink, inputs: list[str]
+) -> None:
+    """Drive one text-only step per input, waiting for each reply before the next update."""
+    for value in inputs:
+        sink.event.clear()
+        world.update("input", value)
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        wait_until(lambda: agent._busy is False)
+
+
+def _assert_tool_stream_valid(messages: list[BaseMessage]) -> None:
+    """Every ToolMessage answers a tool_call of the AIMessage right before it, and nothing
+    assistant-side precedes the first user turn — what a provider requires of the stream."""
+    assert isinstance(messages[1], HumanMessage)
+    open_ids: set[str] = set()
+    for message in messages[1:]:
+        if isinstance(message, AIMessage):
+            open_ids = {c["id"] for c in message.tool_calls if c["id"]}
+        elif isinstance(message, ToolMessage):
+            assert message.tool_call_id in open_ids, message
+            open_ids.discard(message.tool_call_id)
+        else:
+            open_ids = set()
+
+
+def test_history_window_grows_to_twice_the_limit_then_cuts_back_to_it(
+    loop, world, sink
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    prompts: list[list[BaseMessage]] = []
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, history_reactions=2
+    )
+    agent.on_prompt.subscribe(prompts.append)
+    agent.start()
+
+    _run_text_steps(agent, world, sink, ["one", "two", "three", "four"])
+
+    def observations(messages: list[BaseMessage]) -> list[str]:
+        return [human_texts(m) for m in messages if isinstance(m, HumanMessage)]
+
+    # Steps 1-3: below 2X reactions, nothing is cut — history keeps growing and the message
+    # right after the system prompt is byte-identical across calls (the cacheable prefix).
+    assert len(observations(prompts[2])) == 3
+    assert prompts[1][1] == prompts[2][1]
+    assert "one" in human_texts(prompts[2][1])
+    # Step 4 reaches 2X = 4: cut back to the newest X = 2 (step 3 and the current step 4).
+    kept = observations(prompts[3])
+    assert len(kept) == 2
+    assert "three" in kept[0] and "one" not in kept[0] and "two" not in kept[0]
+    assert "four" in kept[1]
+    assert prompts[3][1] != prompts[2][1]
+    # The cut removed the records from storage, not just from the rendered prompt.
+    assert [
+        r for r in agent._history if isinstance(r, ObservationRecord)
+    ].__len__() == 2
+
+    agent.stop()
+
+
+def test_history_window_counts_failed_and_noop_steps_as_reactions(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            _explode,
+            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+            text_response("three"),
+            text_response("four"),
+        )
+    )
+    prompts: list[list[BaseMessage]] = []
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, history_reactions=2
+    )
+    agent.on_prompt.subscribe(prompts.append)
+    agent.start()
+
+    world.update("input", "one")  # model raises: a reaction all the same
+    wait_until(lambda: len(model.calls) == 1 and not agent._busy)
+    world.update("input", "two")  # noop: a reaction all the same
+    wait_until(lambda: len(model.calls) == 2 and not agent._busy)
+    _run_text_steps(agent, world, sink, ["three", "four"])
+
+    # Four reactions (error, noop, text, text) reach 2X = 4 → only steps 3 and 4 remain, so the
+    # failed step's observation (which would have merged into step 2's) and the noop are gone.
+    step4 = prompts[3]
+    humans = [human_texts(m) for m in step4 if isinstance(m, HumanMessage)]
+    assert len(humans) == 2
+    assert "three" in humans[0] and "one" not in humans[0] and "two" not in humans[0]
+    assert not any(isinstance(m, ToolMessage) for m in step4)
+    assert not any(isinstance(r, NoReactionRecord) for r in agent._history)
+
+    agent.stop()
+
+
+def test_history_window_cut_keeps_a_steps_tool_calls_with_their_results(
+    loop, world, sink
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 1}, "call1")]),
+            text_response("two"),
+            tool_call_response([("add", {"a": 2, "b": 2}, "call3")]),
+            text_response("four"),
+        )
+    )
+    prompts: list[list[BaseMessage]] = []
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, history_reactions=2
+    )
+    agent.on_prompt.subscribe(prompts.append)
+    agent.register_command(add)
+    agent.start()
+
+    world.update("input", "add 1 and 1")  # step 1 dispatches call1; completion → step 2
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: agent._busy is False)
+    sink.event.clear()
+    world.update("input", "add 2 and 2")  # step 3 dispatches call3; completion → step 4
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert sink.texts == ["two", "four"]
+    assert len(prompts) == 4
+
+    for messages in prompts:
+        _assert_tool_stream_valid(messages)
+    # Step 4 hit 2X: steps 1-2 are gone as a whole — call1's tool_call, its ack and its outcome —
+    # while step 3's tool_call travels with its ack into the kept prefix.
+    step4 = prompts[3]
+    assert isinstance(step4[1], HumanMessage) and "add 2 and 2" in human_texts(step4[1])
+    assert isinstance(step4[2], AIMessage)
+    assert [c["id"] for c in step4[2].tool_calls] == ["call3"]
+    assert isinstance(step4[3], ToolMessage) and step4[3].tool_call_id == "call3"
+    assert "call1" not in "".join(str(m.content) for m in step4)
+    assert "Called add(a=2, b=2) → 4" in human_texts(step4[4])
+
+    agent.stop()
+
+
+def test_command_outcome_still_renders_after_its_dispatch_was_cut(loop, world, sink):
+    # With X = 1 every second step cuts the previous one, so a slow Command's dispatch is gone
+    # before its outcome is observed: the entry must still render (as an orphan), and the stream
+    # must stay valid without the tool_call it answers.
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    block = asyncio.Event()
+
+    async def dance() -> str:
+        """Blocks until released."""
+        await block.wait()
+        return "done dancing"
+
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("dance", {}, "call1")]),
+            text_response("still going"),
+            text_response("finished"),
+        )
+    )
+    prompts: list[list[BaseMessage]] = []
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, history_reactions=1
+    )
+    agent.on_prompt.subscribe(prompts.append)
+    agent.register_command(dance)
+    agent.start()
+
+    world.update("input", "dance")
+    key = "agent:command:call1"
+    wait_until(lambda: world.get_entry(key).current.value.state == "running")
+    wait_until(lambda: agent._busy is False)
+    world.update(
+        "input", "how is it going?"
+    )  # step 2 cuts step 1 while dance still runs
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    sink.event.clear()
+    loop.call_soon_threadsafe(block.set)  # completion → step 3 cuts step 2
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert sink.texts == ["still going", "finished"]
+
+    step2, step3 = prompts[1], prompts[2]
+    for messages in (step2, step3):
+        _assert_tool_stream_valid(messages)
+        assert not any(isinstance(m, (AIMessage, ToolMessage)) for m in messages)
+        assert len(messages) == 2
+    assert "still running" in human_texts(step2[1])
+    assert "done dancing" in human_texts(step3[1])
+
+    agent.stop()
+
+
+def test_unbounded_history_keeps_every_reaction_by_default(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+
+    _run_text_steps(agent, world, sink, ["one", "two", "three", "four", "five"])
+
+    humans = [m for m in model.calls[4] if isinstance(m, HumanMessage)]
+    assert len(humans) == 5
+    assert "one" in human_texts(humans[0])
+    assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 5
+    assert "most recent reactions" not in agent.system_prompt
+
+    agent.stop()
+
+
+def test_history_window_clause_sits_between_perception_and_output_clauses(
+    loop, world, sink
+):
+    model = ProgrammableChatModel(respond=text_response("hi"))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, history_reactions=3
+    )
+
+    prompt = agent.system_prompt
+    assert "most recent reactions" in prompt
+    assert (
+        prompt.index("run concurrently")
+        < prompt.index("most recent reactions")
+        < prompt.index("write your answer as ordinary text")
+        < prompt.index(f"never use {_NOOP_COMMAND_NAME}")
+    )
+
+    async def say(text: str) -> None:
+        """Speak."""
+
+    agent.set_output_command(say)  # recomposition keeps the clause, in the same place
+    prompt = agent.system_prompt
+    assert prompt.index("run concurrently") < prompt.index("most recent reactions")
+    assert prompt.index("most recent reactions") < prompt.index("private reasoning")

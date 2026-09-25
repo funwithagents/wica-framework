@@ -40,6 +40,7 @@ The config is a **top-level framework object** with an `agent` field, not a bare
 | `system_prompt` | `agent` | **one of** | Inline persona string (see "System prompt") |
 | `system_prompt_file` | `agent` | **one of** | Path to the persona file; **located** relative to the config file at load, **read** at Agent build (see "System prompt") |
 | `model_kwargs` | `agent` | no (default `{}`) | Extra params forwarded to `init_chat_model` (e.g. `temperature`) |
+| `history_reactions` | `agent` | no (default `null` = unbounded) | Positive integer: how many past **reactions** the Agent always keeps in the prompt. History grows to twice this and is then cut back to it in one go (hysteresis keeps the cached prefix stable) — see [agent.md](agent.md), "History window". `null`/absent keeps history unbounded |
 | `hf_provider` | `agent` | no (default `"auto"`) | **Only** for `provider: "huggingface-hub"`: the Hub Inference **backend** provider (`auto`/`fireworks-ai`/`together`/…), forwarded to `HuggingFaceEndpoint(provider=…)`. Ignored by other providers (see "Providers") |
 
 ### Providers
