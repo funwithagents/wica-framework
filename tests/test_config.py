@@ -511,6 +511,30 @@ def test_build_chat_model_resolves_api_key_env(monkeypatch: pytest.MonkeyPatch):
     assert captured["kwargs"]["api_key"] == "sk-resolved"
 
 
+def test_build_chat_model_google_genai_is_a_pass_through():
+    """google_genai (Gemini via the Gemini Developer API) takes no WICA branch: build_chat_model
+    hands it to init_chat_model verbatim, and the two things that must land on the real model
+    do — the resolved api_key on its Google key field, and model_kwargs (thinking_level, the
+    knob the committed configs use to minimize Gemini 3's default thinking). Constructing the
+    model makes no request — see specs/config.md "Providers"."""
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    config = AgentConfig(
+        provider="google_genai",
+        model="gemini-3.8-flash",
+        system_prompt="hi",
+        api_key="test-key",
+        model_kwargs={"thinking_level": "low"},
+    )
+    model = agent_module.build_chat_model(config)
+
+    assert isinstance(model, ChatGoogleGenerativeAI)
+    assert model.model.endswith("gemini-3.8-flash")
+    assert model.google_api_key is not None
+    assert model.google_api_key.get_secret_value() == "test-key"
+    assert model.thinking_level == "low"
+
+
 def test_build_chat_model_huggingface_hub_branch(monkeypatch: pytest.MonkeyPatch):
     """huggingface-hub is built directly as ChatHuggingFace(llm=HuggingFaceEndpoint(...)), NOT via
     init_chat_model, and forwards the resolved api_key as huggingfacehub_api_token (its own kwarg

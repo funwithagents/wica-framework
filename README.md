@@ -20,7 +20,7 @@ The name is the model:
 - **Multimodal in, multimodal out.** Inputs serialize through the neutral [`Content`](specs/content.md) model (`TextPart`, `ImagePart`, more to come), while output modalities are Commands acting on the physical or digital world and reporting their state/results back through the World. A camera Input can be inline while fresh and a light text description afterwards; Commands can speak, move, display, or call external systems without making those effects `Content` return values.
 - **Actions are async and cancellable.** Commands run as `asyncio` tasks on the Agent's event loop, so a long-running action (walk to the kitchen, do a 10-second dance) can be **cancelled** — by the framework, or by the model itself issuing `cancel_command(call_id)`.
 - **Reactive by construction.** Marking an Input `triggers_llm_call=True` is all it takes to wake the Agent when a new perception arrives. Bursts of perceptions are coalesced into a single step.
-- **Provider-agnostic.** Switching between Anthropic, OpenAI, or Hugging Face Hub is a config edit, not a code change. LangChain is used only as a low-level primitive (model + tool schemas) at the model-facing edge (the Agent, the `Command` wrapper, the prompt Event) — the World, `Content`, and Inputs never touch it, and nothing depends on a specific provider SDK.
+- **Provider-agnostic.** Switching between Anthropic, OpenAI, Gemini, or Hugging Face Hub is a config edit, not a code change. LangChain is used only as a low-level primitive (model + tool schemas) at the model-facing edge (the Agent, the `Command` wrapper, the prompt Event) — the World, `Content`, and Inputs never touch it, and nothing depends on a specific provider SDK.
 
 ## How it works
 
@@ -90,7 +90,7 @@ WICA is distributed via git (not PyPI), and ships with **no** model provider —
 ```bash
 # In a consuming project:
 uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
-# or wica[openai], or wica[huggingface-hub]
+# or wica[openai], wica[huggingface-hub], or wica[google-genai]
 ```
 
 A minimal agent starts from a `WicaConfig`. For configuration owned by Python code, construct it directly:
@@ -217,6 +217,7 @@ Core `wica` bundles no provider; install the extra for the one you use. Selectin
 | `anthropic` | `wica[anthropic]` | `langchain-anthropic` |
 | `openai` | `wica[openai]` | `langchain-openai` |
 | `huggingface-hub` | `wica[huggingface-hub]` | `langchain-huggingface` (serverless Inference Providers) |
+| `google_genai` | `wica[google-genai]` | `langchain-google-genai` (Gemini Developer API; Gemini thinks by default — set `model_kwargs: {"thinking_level": "low"}` for reactive use) |
 | `fake` | none | built-in deterministic test double; no network or key |
 
 ## The conversation demo

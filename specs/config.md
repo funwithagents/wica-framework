@@ -7,7 +7,7 @@ tests:
 
 # Config
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -34,7 +34,7 @@ The config is a **top-level framework object** with an `agent` field, not a bare
 | Field | Location | Required | Notes |
 |---|---|---|---|
 | `provider` | `agent` | **yes** | Selects the model backend. Most values pass straight through as LangChain's `model_provider` to `init_chat_model` (`anthropic`, `openai`, …); the special value `huggingface-hub` takes WICA's own construction path (see "Providers" below) |
-| `model` | `agent` | **yes** | Model name passed to `init_chat_model` (for `huggingface-hub`, the Hub `repo_id`, e.g. `meta-llama/Llama-3.3-70B-Instruct`) |
+| `model` | `agent` | **yes** | Model name passed to `init_chat_model` (e.g. `gemini-3.8-flash` for `google_genai`; for `huggingface-hub`, the Hub `repo_id`, e.g. `meta-llama/Llama-3.3-70B-Instruct`) |
 | `api_key` | `agent` | no | Literal key (see "API key"); at most one of `api_key`/`api_key_env` |
 | `api_key_env` | `agent` | no | Name of an env var the key is read from at **Agent build** (see "API key"); at most one of `api_key`/`api_key_env` |
 | `system_prompt` | `agent` | **one of** | Inline persona string (see "System prompt") |
@@ -51,13 +51,14 @@ WICA recognizes a small set of `provider` values, each backed by an optional int
 | `anthropic` | `wica[anthropic]` → `langchain-anthropic` |
 | `openai` | `wica[openai]` → `langchain-openai` |
 | `huggingface-hub` | `wica[huggingface-hub]` → `langchain-huggingface` |
+| `google_genai` | `wica[google-genai]` → `langchain-google-genai` |
 | `fake` | none — built in (test-only) |
 
 Core `wica` bundles **no** provider; selecting one whose extra isn't installed fails at runtime with a clear `ImportError`, never silently.
 
 **`fake` is a testing provider**, not a real backend: it builds a deterministic, network-free, key-less scripted model (`FakeChatModel`) whose responses come from `model_kwargs` (`script`/`default`/`loop`/`delay_s`) rather than any API. `api_key`/`api_key_env` are unnecessary and ignored, and `model` is a free-text label. It exists to drive the Agent's whole loop deterministically in tests — see [fake-provider.md](fake-provider.md).
 
-Two of these are ordinary LangChain providers — `anthropic`, `openai`, and any other LangChain-supported value are passed through as `model_provider` to `init_chat_model`, so switching between them is a pure config edit. **`huggingface-hub` is WICA-specific:** it targets the Hugging Face Hub's serverless Inference Providers and the Agent constructs it on its own path rather than via `init_chat_model`. Config-wise that adds exactly one field — **`hf_provider`**, naming the Hub **backend** (`auto`/`fireworks-ai`/…). *How* that model is built and *why* it bypasses `init_chat_model` (including how the resolved API key is forwarded) is an Agent concern — see [agent.md](agent.md), "Provider-agnostic model, from config".
+Three of these are ordinary LangChain providers — `anthropic`, `openai`, `google_genai`, and any other LangChain-supported value are passed through as `model_provider` to `init_chat_model`, so switching between them is a pure config edit. `google_genai` is Gemini through the **Gemini Developer API** (an AI Studio API key — not Vertex AI, whose Google Cloud credentials no config field expresses); its value is LangChain's own provider id, kept verbatim so it stays a pass-through with no WICA branch, and its extra is spelled `google-genai` (PEP 685 normalizes `wica[google_genai]` to the same extra). The resolved `api_key` lands on the model's Google key field through `init_chat_model`'s generic kwarg; with neither key field set the package reads `GOOGLE_API_KEY`, then `GEMINI_API_KEY`. **Gemini models think by default** (a dynamic reasoning budget that adds latency to every reaction), so a reactive deployment should cap it through `model_kwargs` rather than through any dedicated field: `{"thinking_level": "low"}` for Gemini 3+ (thinking cannot be fully disabled there, and `gemini-3.8-flash` rejects the nominal `minimal` level, so `low` is its floor) — what the committed e2e and demo configs use — or `{"thinking_budget": 0}` on the older Gemini 2.5 models. The committed model is 3.8 Flash because the Gemini Developer API no longer serves 2.5 Flash to new accounts. **`huggingface-hub` is WICA-specific:** it targets the Hugging Face Hub's serverless Inference Providers and the Agent constructs it on its own path rather than via `init_chat_model`. Config-wise that adds exactly one field — **`hf_provider`**, naming the Hub **backend** (`auto`/`fireworks-ai`/…). *How* that model is built and *why* it bypasses `init_chat_model` (including how the resolved API key is forwarded) is an Agent concern — see [agent.md](agent.md), "Provider-agnostic model, from config".
 
 ### Logging is not framework config
 

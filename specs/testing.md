@@ -5,6 +5,7 @@ code:
   - tests-e2e/e2e.anthropic.config.json
   - tests-e2e/e2e.openai.config.json
   - tests-e2e/e2e.huggingface-hub.config.json
+  - tests-e2e/e2e.google-genai.config.json
 tests:
   - tests-e2e/test_smoke.py
   - tests-e2e/test_wica.py
@@ -64,7 +65,7 @@ There is no process-global World: each `Wica` (see [wica.md](wica.md)) owns its 
 
 The live e2e set is **parametrized over one committed config per provider**, not a single reference provider — so the live tests verify WICA's real provider-branching construction across the whole supported surface, not just one privileged backend.
 
-- **One config file per provider**, checked in and named symmetrically: `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, and `huggingface-hub`. They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**.
+- **One config file per provider**, checked in and named symmetrically: `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, `huggingface-hub`, and `google-genai` (the file stem is the hyphenated extra name; the `provider` value inside is LangChain's `google_genai`). They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**.
 - **The live tests go through WICA's own entrypoint**, not a divergent `init_chat_model` call: `support.real_chat_model()` builds via `build_chat_model()` (the smoke test), and `support.real_wica()` stands up the whole system via `Wica.init(WicaConfig.from_json_file(...))` — the real production path, loop + World + Agent and all. This is what makes the tier meaningful: it exercises the actual per-provider construction (including `huggingface-hub`'s dedicated non-`init_chat_model` path — see [agent.md](agent.md), "Provider-agnostic model, from config") end-to-end, so a branch that builds the wrong model is caught here rather than slipping through a test that bypassed it.
 - **Each config uses `api_key_env`**, so it carries no secret and is safe to commit (see [config.md](config.md), "API key"). A provider whose key env var is unset makes that config **skip itself** — never fail — via `MissingEnvError → pytest.skip` (in `support.load_agent_config`). You exercise only the providers you hold keys for; the rest skip cleanly, so a contributor with one key, or CI with none, is never broken by the others' absence.
 - **Filter to one provider with `-k <provider>`.** Because the configs are named symmetrically, the provider name matches its config-filename stem, so `-k openai` runs just that one.
@@ -76,6 +77,7 @@ The committed configs and their key env vars:
 | `tests-e2e/e2e.anthropic.config.json` | `anthropic` | `WICA_ANTHROPIC_API_KEY` |
 | `tests-e2e/e2e.openai.config.json` | `openai` | `WICA_OPENAI_API_KEY` |
 | `tests-e2e/e2e.huggingface-hub.config.json` | `huggingface-hub` | `WICA_HF_TOKEN` |
+| `tests-e2e/e2e.google-genai.config.json` | `google_genai` | `WICA_GEMINI_API_KEY` |
 
 The provider/extra surface these configs select from is specced in [config.md](config.md) ("Providers") and packaged as install-time extras per [project.md](project.md) ("Provider integrations are optional extras").
 

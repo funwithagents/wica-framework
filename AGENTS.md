@@ -84,8 +84,9 @@ Some tests call a real LLM provider over the network. They live in `tests-e2e/`,
 | `tests-e2e/e2e.anthropic.config.json` | `WICA_ANTHROPIC_API_KEY` |
 | `tests-e2e/e2e.openai.config.json` | `WICA_OPENAI_API_KEY` |
 | `tests-e2e/e2e.huggingface-hub.config.json` | `WICA_HF_TOKEN` |
+| `tests-e2e/e2e.google-genai.config.json` | `WICA_GEMINI_API_KEY` |
 
-**All three keys live in `~/.zshrc`**, but the shell tool runs non-interactive `bash`/`zsh`, which doesn't source it — a plain `uv run pytest tests-e2e` in that shell sees no keys and every case skips. Source it explicitly in an interactive `zsh` invocation. Run **all providers** (each whose key is set runs; the rest skip):
+**The keys live in `~/.zshrc`**, but the shell tool runs non-interactive `bash`/`zsh`, which doesn't source it — a plain `uv run pytest tests-e2e` in that shell sees no keys and every case skips. Source it explicitly in an interactive `zsh` invocation. Run **all providers** (each whose key is set runs; the rest skip):
 
 ```
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e'
@@ -97,6 +98,7 @@ Run **one provider** by filtering on its config-filename stem with `-k` (the con
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k openai'
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k huggingface'
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k anthropic'
+zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k google'
 ```
 
 Never `echo`/print a key itself; when checking whether one is set, redact the value (e.g. `env | grep WICA | sed -E 's/=.*/=<set>/'`).

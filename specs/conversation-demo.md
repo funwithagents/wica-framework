@@ -8,6 +8,7 @@ code:
   - examples/conversation_demo/agent.anthropic.config.json
   - examples/conversation_demo/agent.openai.config.json
   - examples/conversation_demo/agent.huggingface-hub.config.json
+  - examples/conversation_demo/agent.google-genai.config.json
 tests:
   - tests/test_conversation_demo.py
   - tests-e2e/test_example_flow.py
@@ -234,7 +235,7 @@ everything is wired before `start()`, the setters' intended zone.
   `examples/conversation_demo/prompts/wica.md`) all live
   there. Switching providers/models, or editing the persona, is a file edit, not a code change.
   Committed per-provider variants sit alongside it — `agent.anthropic.config.json`,
-  `agent.openai.config.json`, `agent.huggingface-hub.config.json` — showing the same demo against
+  `agent.openai.config.json`, `agent.huggingface-hub.config.json`, `agent.google-genai.config.json` — showing the same demo against
   each supported provider (see [config.md](config.md), "Providers"); copy one over
   `agent.config.json` to switch backend.
 - **The API key is referenced, not stored.** The committed config uses

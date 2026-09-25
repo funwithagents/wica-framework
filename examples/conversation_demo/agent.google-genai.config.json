@@ -1,0 +1,9 @@
+{
+  "agent": {
+    "provider": "google_genai",
+    "model": "gemini-3.8-flash",
+    "api_key_env": "WICA_GEMINI_API_KEY",
+    "system_prompt_file": "prompts/wica.md",
+    "model_kwargs": { "thinking_level": "low" }
+  }
+}

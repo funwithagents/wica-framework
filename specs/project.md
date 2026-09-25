@@ -7,7 +7,7 @@ tests:
 
 # Project
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -22,7 +22,7 @@ Structure and tooling for the WICA project itself: Python version, dependency/pa
 - **Testing:** `pytest`, in two physically-separated tiers — a fast, deterministic, no-network default run (`tests/`, the only tier `testpaths` collects) and an opt-in full-loop tier (`tests-e2e/`) containing both deterministic scripted-fake flows and live cases parametrized over one committed config per provider. Full strategy — tier rationale, functional-test philosophy, fresh-World isolation, and the provider-parametrized live set — is specced in [testing.md](testing.md)
 - **Type checking:** `pyright`, dev dependency, run via `uv run pyright`. Config lives in `[tool.pyright]` in `pyproject.toml` (`standard` mode, targets `src`, `tests`, and `tests-e2e`, pinned to the `.venv`). VS Code: install the Pylance extension, which bundles pyright and picks up the same settings via `.vscode/settings.json`
 - **Distribution intent:** distributed via **GitHub, not PyPI** — consumed by separate agent-app repositories that depend on WICA through a git URL (e.g. `"wica[openai] @ git+https://…"`). Structure should not preclude PyPI later, but no release tooling is set up now
-- **Provider integrations are optional extras.** Core `wica` depends only on `langchain`/`langchain-core` and ships with **no** model provider. Each provider's LangChain integration is an install-time **extra** under `[project.optional-dependencies]` — `wica[anthropic]` → `langchain-anthropic`, `wica[openai]` → `langchain-openai`, `wica[huggingface-hub]` → `langchain-huggingface` — so a consumer pulls only what it wires up, and an unselected provider fails at runtime with a clear `ImportError` rather than silently. Extras (not dependency groups) are the mechanism because downstream repos consume WICA *as a dependency*, and groups aren't visible to a dependant. The same provider packages are **also** listed in the `dev`/`demo` dependency groups, so this repo's own e2e tests and demo can switch providers by editing config alone — extras serve downstream consumers, groups serve in-repo work (provider surface in [config.md](config.md), "Providers")
+- **Provider integrations are optional extras.** Core `wica` depends only on `langchain`/`langchain-core` and ships with **no** model provider. Each provider's LangChain integration is an install-time **extra** under `[project.optional-dependencies]` — `wica[anthropic]` → `langchain-anthropic`, `wica[openai]` → `langchain-openai`, `wica[huggingface-hub]` → `langchain-huggingface`, `wica[google-genai]` → `langchain-google-genai` — so a consumer pulls only what it wires up, and an unselected provider fails at runtime with a clear `ImportError` rather than silently. Extras (not dependency groups) are the mechanism because downstream repos consume WICA *as a dependency*, and groups aren't visible to a dependant. The same provider packages are **also** listed in the `dev`/`demo` dependency groups, so this repo's own e2e tests and demo can switch providers by editing config alone — extras serve downstream consumers, groups serve in-repo work (provider surface in [config.md](config.md), "Providers")
 - **Repo shape:**
   - `tests/` at repo root, mirroring the `src/wica/` module structure
   - `tests-e2e/` at repo root, for the full-loop fake/live tier above — not collected by the default `pytest` run
