@@ -287,3 +287,73 @@ def test_noop_flow_takes_no_action():
         assert len(model.calls) == 1  # no re-trigger
     finally:
         wica.close()
+
+
+def test_history_budget_flow_cuts_after_a_scripted_over_budget_report():
+    """The usage-driven history cut, through the JSON config path: a scripted usage figure over
+    the budget's high-water mark at step 3 makes the Agent drop the oldest reactions, so the
+    prompt of step 4 holds fewer observations than step 3's — see specs/agent.md ("History
+    budget") and specs/fake-provider.md ("Token usage")."""
+    config = WicaConfig.from_dict(
+        {
+            "agent": {
+                "provider": "fake",
+                "model": "scripted",
+                "system_prompt": "You are a test double.",
+                "history_budget": 0.5,
+                "context_window": 1600,  # high 800, low 400
+                "model_kwargs": {
+                    "delay_s": 0,
+                    "script": [
+                        {
+                            "text": "one",
+                            "usage": {"input_tokens": 100, "output_tokens": 1},
+                        },
+                        {
+                            "text": "two",
+                            "usage": {"input_tokens": 300, "output_tokens": 1},
+                        },
+                        # fixed part ~100 (first report); 3 reactions at 900 → (900 - 100)
+                        # / 2 = 400 each → keep floor((400 - 100) / 400) = 0 → at least one,
+                        # so reaction 3 stays and reactions 1-2 go.
+                        {
+                            "text": "three",
+                            "usage": {"input_tokens": 900, "output_tokens": 1},
+                        },
+                        {
+                            "text": "four",
+                            "usage": {"input_tokens": 500, "output_tokens": 1},
+                        },
+                    ],
+                    "default": {"text": ""},
+                },
+            }
+        }
+    )
+
+    sink = RecordingSink()
+    prompts: list[list[Any]] = []
+    wica = Wica.init(config, coalesce_window=0.0)
+    wica.set_output_sink(sink)
+    wica.on_agent_prompt.subscribe(prompts.append)
+    wica.world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    try:
+        for i, text in enumerate(["first", "second", "third", "fourth"], start=1):
+            wica.world.update("prompt", text)
+            wait_until(lambda: len(sink.texts) == i)
+
+        def observations(messages: list[Any]) -> list[str]:
+            return [m.text for m in messages if m.type == "human"]
+
+        assert len(observations(prompts[2])) == 3  # nothing cut before the report
+        kept = observations(
+            prompts[3]
+        )  # after the cut: reaction 3 and the new reaction 4
+        assert len(kept) == 2
+        assert "third" in kept[0] and "fourth" in kept[1]
+        assert "most recent reactions" in wica.agent.system_prompt
+    finally:
+        wica.close()

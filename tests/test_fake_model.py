@@ -151,3 +151,28 @@ def test_looped_script_generates_unique_ids():
     )
     ids = [model.invoke("q").tool_calls[0]["id"] for _ in range(3)]
     assert ids == ["fake_call_0_0", "fake_call_1_0", "fake_call_2_0"]
+
+
+def test_usage_is_estimated_from_the_prompt_and_reply_by_default():
+    model = FakeChatModel(script=[{"text": "x" * 40}], delay_s=0)
+    short = model.invoke([HumanMessage(content="a" * 40)])
+    assert short.usage_metadata is not None
+    assert short.usage_metadata["input_tokens"] == 10
+    assert short.usage_metadata["output_tokens"] == 10
+    # Exhausted → default (empty text); a longer prompt reports more input tokens.
+    long = model.invoke([HumanMessage(content="a" * 400)])
+    assert long.usage_metadata is not None
+    assert long.usage_metadata["input_tokens"] == 100
+    assert long.usage_metadata["output_tokens"] == 0
+
+
+def test_scripted_usage_overrides_the_estimate():
+    model = FakeChatModel(
+        script=[{"text": "hi", "usage": {"input_tokens": 90000, "output_tokens": 7}}],
+        delay_s=0,
+    )
+    message = model.invoke([HumanMessage(content="short")])
+    assert message.usage_metadata is not None
+    assert message.usage_metadata["input_tokens"] == 90000
+    assert message.usage_metadata["output_tokens"] == 7
+    assert message.usage_metadata["total_tokens"] == 90007

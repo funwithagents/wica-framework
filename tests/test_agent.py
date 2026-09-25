@@ -5,7 +5,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import Any
 
 import pytest
@@ -29,7 +29,7 @@ from wica.agent import (
     _NOOP_COMMAND_NAME,
 )
 from wica.command import Command
-from wica.config import AgentConfig
+from wica.config import AgentConfig, ConfigError
 from wica.content import Content, TextPart
 from wica.instrumentation import (
     CommandTrace,
@@ -181,6 +181,8 @@ def make_agent(
     output_sink: Callable[[str], Awaitable[None]] | None = None,
     output_command: Callable[..., Any] | Command | None = None,
     history_reactions: int | None = None,
+    history_budget: float | None = None,
+    context_window: int | None = None,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
@@ -193,6 +195,8 @@ def make_agent(
         model="test",
         system_prompt=system_prompt,
         history_reactions=history_reactions,
+        history_budget=history_budget,
+        context_window=context_window,
     )
     agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
     if output_sink is not None:
@@ -2840,3 +2844,240 @@ def test_history_window_clause_sits_between_perception_and_output_clauses(
     prompt = agent.system_prompt
     assert prompt.index("run concurrently") < prompt.index("most recent reactions")
     assert prompt.index("most recent reactions") < prompt.index("private reasoning")
+
+
+# --- History budget (specs/agent.md, "History budget") -----------------------------------
+
+
+def usage_responses(
+    input_tokens: Sequence[int | None], text: str = "ok"
+) -> Callable[[list[BaseMessage]], Awaitable[AIMessage]]:
+    """One text reply per call, each reporting the given input token count (None = no usage
+    reported, as a provider that returns none). The last figure repeats once the list is spent."""
+    remaining = list(input_tokens)
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        tokens = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        if tokens is None:
+            return AIMessage(content=text)
+        return AIMessage(
+            content=text,
+            usage_metadata={
+                "input_tokens": tokens,
+                "output_tokens": 1,
+                "total_tokens": tokens + 1,
+            },
+        )
+
+    return respond
+
+
+def _observation_texts(messages: list[BaseMessage]) -> list[str]:
+    return [human_texts(m) for m in messages if isinstance(m, HumanMessage)]
+
+
+def test_history_budget_cuts_to_the_low_water_mark_from_reported_usage(
+    loop, world, sink
+):
+    # window 1000 × budget 0.5 → high 500, low 250. The first report (100) is the fixed part +
+    # one reaction; six reactions reporting 600 → (600 - 100) / 5 = 100 each → keep
+    # floor((250 - 100) / 100) = 1 newest; the 7th prompt then starts at reaction 6.
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=usage_responses([100, 200, 300, 400, 450, 600, 300])
+    )
+    prompts: list[list[BaseMessage]] = []
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        history_budget=0.5,
+        context_window=1000,
+    )
+    agent.on_prompt.subscribe(prompts.append)
+    agent.start()
+
+    _run_text_steps(agent, world, sink, ["r1", "r2", "r3", "r4", "r5", "r6", "r7"])
+
+    # Under the mark (calls 1-5) nothing is cut: prompt 6 still holds all six reactions.
+    assert len(_observation_texts(prompts[5])) == 6
+    assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 2
+    # Call 6 reported 600 > 500: cut to 1 reaction at the end of step 6, so prompt 7 holds
+    # reaction 6 and the new 7 — and call 7's 300 (< 500) triggers no further cut.
+    kept = _observation_texts(prompts[6])
+    assert [t.split("\n")[1] for t in kept] == ["r6", "r7"]
+    for messages in prompts:
+        _assert_tool_stream_valid(messages)
+
+    agent.stop()
+
+
+def test_history_budget_charges_the_fixed_part_once_not_per_reaction(loop, world, sink):
+    # A prompt dominated by its fixed part: window 100k × 0.5 → high 50k, low 25k; the first
+    # report is 10k fixed + 1k → 11k, then +1k per reaction up to 51k at 41 reactions. A plain
+    # average (51k / 41 ≈ 1.24k) would keep 20; charging the fixed part once keeps
+    # floor((25k - 11k) / 1k) = 14, so the prompt after the cut is 10k + 15k = 25k — on the mark.
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    reports = [10_000 + 1_000 * n for n in range(1, 42)] + [25_000]
+    model = ProgrammableChatModel(respond=usage_responses(reports))
+    prompts: list[list[BaseMessage]] = []
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        history_budget=0.5,
+        context_window=100_000,
+    )
+    agent.on_prompt.subscribe(prompts.append)
+    agent.start()
+
+    _run_text_steps(agent, world, sink, [f"r{n}" for n in range(1, 43)])
+
+    assert (
+        len(_observation_texts(prompts[40])) == 41
+    )  # nothing cut before the 41st report
+    kept = _observation_texts(prompts[41])
+    assert len(kept) == 15  # 14 kept by the cut + the new reaction 42
+    assert kept[0].split("\n")[1] == "r28"
+
+    agent.stop()
+
+
+def test_history_budget_warns_when_the_fixed_part_leaves_no_room(
+    loop, world, sink, caplog
+):
+    # Fixed part ~400 (first report) against a low mark of 250: nothing fits; keep one, warn.
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=usage_responses([400, 450, 520]))
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        history_budget=0.5,
+        context_window=1000,
+    )
+    agent.start()
+
+    with caplog.at_level(logging.WARNING, logger="wica.agent"):
+        _run_text_steps(agent, world, sink, ["r1", "r2", "r3"])
+
+    assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 1
+    assert any("leaves no room" in r.message for r in caplog.records)
+
+    agent.stop()
+
+
+def test_history_budget_ignores_calls_without_usage(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=usage_responses([None]))
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        history_budget=0.1,
+        context_window=10,
+    )
+    agent.start()
+
+    _run_text_steps(agent, world, sink, ["r1", "r2", "r3", "r4"])
+
+    assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 4
+
+    agent.stop()
+
+
+def test_history_budget_cannot_cut_a_single_reaction_and_warns(
+    loop, world, sink, caplog
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=usage_responses([900]))
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        history_budget=0.5,
+        context_window=1000,
+    )
+    agent.start()
+
+    with caplog.at_level(logging.WARNING, logger="wica.agent"):
+        _run_text_steps(agent, world, sink, ["r1"])
+
+    assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 1
+    assert any(
+        "history budget" in r.message and "cannot be cut" in r.message
+        for r in caplog.records
+    )
+
+    agent.stop()
+
+
+def test_history_budget_and_fixed_window_compose(loop, world, sink):
+    # The fixed cap still applies at step start (2X = 6 → keep 3) while the budget never trips.
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=usage_responses([10]))
+    prompts: list[list[BaseMessage]] = []
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        history_reactions=3,
+        history_budget=0.5,
+        context_window=1000,
+    )
+    agent.on_prompt.subscribe(prompts.append)
+    agent.start()
+
+    _run_text_steps(agent, world, sink, ["r1", "r2", "r3", "r4", "r5", "r6"])
+
+    assert len(_observation_texts(prompts[4])) == 5
+    assert len(_observation_texts(prompts[5])) == 3
+
+    agent.stop()
+
+
+def test_history_budget_requires_a_known_context_window(loop, world, sink):
+    model = ProgrammableChatModel(respond=text_response("hi"))  # profile: None
+    with pytest.raises(ConfigError, match="context_window"):
+        make_agent(model, world=world, loop=loop, history_budget=0.5)
+
+    # The model profile supplies the window when the config does not…
+    profiled = ProgrammableChatModel(
+        respond=text_response("hi"), profile={"max_input_tokens": 2000}
+    )
+    agent = make_agent(profiled, world=world, loop=loop, history_budget=0.5)
+    assert (agent._history_high, agent._history_low) == (1000, 500)
+    # …and the config override wins over it.
+    agent = make_agent(
+        profiled, world=world, loop=loop, history_budget=0.5, context_window=400
+    )
+    assert (agent._history_high, agent._history_low) == (200, 100)
+    # A window alone (no budget) leaves the budget off and needs no profile.
+    agent = make_agent(model, world=world, loop=loop, context_window=400)
+    assert agent._history_high is None
+
+
+def test_history_budget_alone_turns_on_the_window_clause(loop, world, sink):
+    model = ProgrammableChatModel(respond=text_response("hi"))
+    agent = make_agent(
+        model, world=world, loop=loop, history_budget=0.5, context_window=1000
+    )
+    assert "most recent reactions" in agent.system_prompt

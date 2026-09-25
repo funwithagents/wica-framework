@@ -343,11 +343,14 @@ The dictionary/JSON representation has this shape:
 | `agent.api_key` / `api_key_env` | at most one | Literal key, or an env var read at **Agent build** (`Wica.init`). Neither → provider's standard env var. Prefer `api_key_env` so the config carries no secret and is safe to commit |
 | `agent.model_kwargs` | no | Forwarded to the provider (e.g. `temperature`; `thinking_level: "low"` to minimize Gemini's default thinking) |
 | `agent.hf_provider` | no | Only for `huggingface-hub`: the Hub backend (`auto`/`fireworks-ai`/…). Default `auto` |
+| `agent.history_reactions` | no | Positive int: keep the last N reactions in the prompt. History grows to 2N, then is cut back to N in one go (a stable cached prefix between cuts). Default unbounded |
+| `agent.history_budget` | no | Number in `(0, 1]`: keep the prompt under this fraction of the model's context window. When a call reports more input tokens than that, the oldest reactions are cut down to about half the budget. Needs a known context window (next row). Default off |
+| `agent.context_window` | no | Positive int, tokens, for `history_budget`. Absent → the model's LangChain profile (`max_input_tokens`) is used; with a budget set and neither known, `Wica.init` raises `ConfigError` (e.g. Hub models and models newer than the installed profile data) |
 
 For `from_json_file()`, a relative `system_prompt_file` is located relative to the JSON file. No
 loader reads the prompt file or resolves `api_key_env`; those operations happen when `Wica.init()`
 builds the Agent. A caller that degrades on `MissingEnvError` or an unreadable prompt therefore
-wraps `Wica.init()`, not config creation. Code-only wiring (`output_sink`, `output_command`,
+wraps `Wica.init()`, not config creation — as does one that must handle a `history_budget` with no known context window. Code-only wiring (`output_sink`, `output_command`,
 `coalesce_window`, and an optional event loop) also belongs in `Wica.init()`. Selecting a provider
 whose extra is not installed fails there with a clear `ImportError`.
 
@@ -355,7 +358,7 @@ whose extra is not installed fails there with a clear `ImportError`.
 
 ## Testing flows deterministically
 
-Your own e2e tests can drive the whole loop against a **scripted** model instead of a live LLM — no key, no network, fully deterministic — by selecting `provider: "fake"`. The model replays `model_kwargs.script` step by step: each reasoning step consumes the next entry, so you assert the *exact* Commands and utterances a real provider could never pin. Once the script is spent it returns `model_kwargs.default` (so an extra step never crashes a test); `delay_s` (default 200 ms) simulates latency and is worth setting to `0` in a test.
+Your own e2e tests can drive the whole loop against a **scripted** model instead of a live LLM — no key, no network, fully deterministic — by selecting `provider: "fake"`. The model replays `model_kwargs.script` step by step: each reasoning step consumes the next entry, so you assert the *exact* Commands and utterances a real provider could never pin. Once the script is spent it returns `model_kwargs.default` (so an extra step never crashes a test); `delay_s` (default 200 ms) simulates latency and is worth setting to `0` in a test. Every response also reports token usage like a real provider — an estimate of the prompt's text length by default, or a per-step `"usage": {"input_tokens": N, "output_tokens": M}` — so a `history_budget` can be exercised deterministically.
 
 ```python
 from wica import Wica, WicaConfig
@@ -392,6 +395,7 @@ Each scripted `tool_calls[].name` is validated against your registered Commands 
 - **Lifecycle is restartable.** `wica.start()`/`wica.stop()` may repeat on the same instance and preserve its state. Call `wica.close()` for terminal teardown; a closed Wica cannot restart.
 - **The conversational sink is complete text.** `output_sink(text)` is `async` and receives the model's assistant text per step; broader output modalities are Commands. Streaming sink output is deferred.
 - **The World is a snapshot, not a log.** It holds current + previous per entry; conversation history lives in the Agent (as re-renderable snapshots). Heavy multimodal data (an image) renders inline on the turn it arrives and light thereafter.
+- **History is the agent's only memory, and bounding it is lossy.** With `history_reactions` or `history_budget` set, anything older than the bound is gone for the model — an earlier instruction, a name, its own replies. Put state that must outlive the bound in a World entry. The budget's signal is the usage each call reports, so it lags one step: keep the fraction well below 1 (0.5–0.7), and if the prompt still overflows the window the failed call reports no usage and nothing corrects it — a `history_reactions` cap is the backstop.
 - **Command names are unique, and `noop`/`cancel_command` are reserved.** Registering a duplicate or a reserved name raises `ValueError` (the output Command's name is checked at construction too).
 - **World keys must be safe to embed.** A key is a non-empty string with no whitespace and none of `" < > &` (it goes verbatim into the `<entry key="…">` envelope); `register()` raises `ValueError` otherwise. The `agent:` prefix is framework-owned by convention.
 - **Don't stop Wica from inside its own loop.** When Wica owns the loop, calling `wica.stop()`/`wica.close()` from a sink, Command, or Event subscriber raises `RuntimeError` (a thread can't join itself); hand the call to another thread.

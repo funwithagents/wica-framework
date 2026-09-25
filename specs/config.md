@@ -41,6 +41,8 @@ The config is a **top-level framework object** with an `agent` field, not a bare
 | `system_prompt_file` | `agent` | **one of** | Path to the persona file; **located** relative to the config file at load, **read** at Agent build (see "System prompt") |
 | `model_kwargs` | `agent` | no (default `{}`) | Extra params forwarded to `init_chat_model` (e.g. `temperature`) |
 | `history_reactions` | `agent` | no (default `null` = unbounded) | Positive integer: how many past **reactions** the Agent always keeps in the prompt. History grows to twice this and is then cut back to it in one go (hysteresis keeps the cached prefix stable) — see [agent.md](agent.md), "History window". `null`/absent keeps history unbounded |
+| `history_budget` | `agent` | no (default `null` = off) | Number in `(0, 1]`: the fraction of the model's context window the prompt should stay under. When a model call reports more input tokens than that, the Agent cuts the oldest reactions down to about half the budget — see [agent.md](agent.md), "History budget". Needs a known context window (below) |
+| `context_window` | `agent` | no (default `null`) | Positive integer: the model's context window in tokens, for `history_budget`. When absent, the model's LangChain profile (`max_input_tokens`) supplies it; with `history_budget` set and neither known, Agent build fails with a `ConfigError`. Unused without `history_budget` |
 | `hf_provider` | `agent` | no (default `"auto"`) | **Only** for `provider: "huggingface-hub"`: the Hub Inference **backend** provider (`auto`/`fireworks-ai`/`together`/…), forwarded to `HuggingFaceEndpoint(provider=…)`. Ignored by other providers (see "Providers") |
 
 ### Providers

@@ -42,6 +42,14 @@ class AgentConfig:
     # None = unbounded history. A positive int X keeps the last X reactions in the prompt (the
     # Agent lets history grow to 2X, then cuts back to X). See specs/agent.md ("History window").
     history_reactions: int | None = None
+    # None = off. A fraction in (0, 1] of the model's context window the prompt should stay under;
+    # a model call reporting more input tokens than that cuts the oldest reactions down to about
+    # half of it. Needs a known context window: `context_window`, else the model's LangChain
+    # profile, else Agent build fails. See specs/agent.md ("History budget").
+    history_budget: float | None = None
+    # The context window in tokens for `history_budget` (None = use the model profile's
+    # max_input_tokens). Unused without `history_budget`.
+    context_window: int | None = None
 
     def __post_init__(self) -> None:
         # The structural invariants the loaders enforce, applied to direct construction too, so
@@ -61,6 +69,8 @@ class AgentConfig:
                 "agent: specify at most one of 'api_key'/'api_key_env', not both"
             )
         _validate_history_reactions(self.history_reactions, block="agent")
+        _validate_history_budget(self.history_budget, block="agent")
+        _validate_context_window(self.context_window, block="agent")
 
     @classmethod
     def from_dict(
@@ -120,6 +130,8 @@ _AGENT_OPTIONAL_COMMON = {
     "model_kwargs",
     "hf_provider",
     "history_reactions",
+    "history_budget",
+    "context_window",
 }
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent"}
@@ -140,6 +152,33 @@ def _validate_history_reactions(value: Any, *, block: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ConfigError(
             f"{block}: 'history_reactions' must be a positive integer or null, got {value!r}"
+        )
+    return value
+
+
+def _validate_history_budget(value: Any, *, block: str) -> float | None:
+    """None (off) or a number in (0, 1] — the fraction of the context window the prompt should stay
+    under. See specs/config.md."""
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not 0 < value <= 1
+    ):
+        raise ConfigError(
+            f"{block}: 'history_budget' must be a number in (0, 1] or null, got {value!r}"
+        )
+    return float(value)
+
+
+def _validate_context_window(value: Any, *, block: str) -> int | None:
+    """None (use the model profile) or a positive int — the context window in tokens."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(
+            f"{block}: 'context_window' must be a positive integer or null, got {value!r}"
         )
     return value
 
@@ -234,6 +273,8 @@ def _parse_agent_block(
     history_reactions = _validate_history_reactions(
         data.get("history_reactions"), block=block
     )
+    history_budget = _validate_history_budget(data.get("history_budget"), block=block)
+    context_window = _validate_context_window(data.get("context_window"), block=block)
 
     return {
         "provider": provider,
@@ -245,6 +286,8 @@ def _parse_agent_block(
         "model_kwargs": model_kwargs,
         "hf_provider": hf_provider,
         "history_reactions": history_reactions,
+        "history_budget": history_budget,
+        "context_window": context_window,
     }
 
 

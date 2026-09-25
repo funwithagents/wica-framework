@@ -490,6 +490,44 @@ def test_history_reactions_rejects_non_positive_integers(value: Any):
         )
 
 
+# --- history_budget / context_window fields -----------------------------------------------
+
+
+def test_history_budget_and_context_window_default_to_off():
+    cfg = AgentConfig.from_dict(_agent_dict())
+    assert cfg.history_budget is None and cfg.context_window is None
+    cfg = AgentConfig.from_dict(_agent_dict(history_budget=None, context_window=None))
+    assert cfg.history_budget is None and cfg.context_window is None
+
+
+def test_history_budget_and_context_window_parsed():
+    cfg = WicaConfig.from_json(
+        json.dumps(_wica_dict(history_budget=0.6, context_window=128000))
+    ).agent
+    assert cfg.history_budget == 0.6 and cfg.context_window == 128000
+    assert AgentConfig.from_dict(_agent_dict(history_budget=1)).history_budget == 1.0
+    # The window alone is accepted (and unused without a budget).
+    assert (
+        AgentConfig.from_dict(_agent_dict(context_window=4096)).context_window == 4096
+    )
+
+
+@pytest.mark.parametrize("value", [0, 1.5, -0.2, "0.5", True])
+def test_history_budget_rejects_values_outside_zero_one(value: Any):
+    with pytest.raises(ConfigError, match="history_budget"):
+        AgentConfig.from_dict(_agent_dict(history_budget=value))
+    with pytest.raises(ConfigError, match="history_budget"):
+        AgentConfig(provider="fake", model="x", system_prompt="p", history_budget=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, "4096", True, 2.5])
+def test_context_window_rejects_non_positive_integers(value: Any):
+    with pytest.raises(ConfigError, match="context_window"):
+        AgentConfig.from_dict(_agent_dict(context_window=value))
+    with pytest.raises(ConfigError, match="context_window"):
+        AgentConfig(provider="fake", model="x", system_prompt="p", context_window=value)
+
+
 # --- build_chat_model: provider construction branch ---------------------------------------
 
 

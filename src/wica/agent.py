@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextvars
 import copy
+import math
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -27,7 +28,12 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 
 from wica.command import Command
-from wica.config import AgentConfig, resolve_api_key, resolve_system_prompt
+from wica.config import (
+    AgentConfig,
+    ConfigError,
+    resolve_api_key,
+    resolve_system_prompt,
+)
 from wica.content import Content, ImagePart, TextPart
 from wica.events import Event
 from wica.instrumentation import (
@@ -388,6 +394,29 @@ _HUGGINGFACE_HUB_PROVIDER = "huggingface-hub"
 _FAKE_PROVIDER = "fake"
 
 
+def _resolve_history_budget(
+    config: AgentConfig, model: BaseChatModel
+) -> tuple[int | None, int | None]:
+    """(high, low) token marks for the history budget, or (None, None) when it is off. The context
+    window is `config.context_window`, else the model profile's `max_input_tokens` (a beta
+    LangChain field loaded from the provider package's bundled data — absent for the Hub and for
+    models newer than that data). A budget with no known window is a build-time ConfigError, never
+    a silently inert budget. See specs/agent.md ("History budget")."""
+    if config.history_budget is None:
+        return None, None
+    window = config.context_window
+    if window is None:
+        profile = model.profile
+        window = profile.get("max_input_tokens") if profile is not None else None
+    if window is None:
+        raise ConfigError(
+            "agent: 'history_budget' needs a known context window, and the model profile for "
+            f"{config.provider}/{config.model} has no max_input_tokens — set 'context_window'"
+        )
+    high = int(window * config.history_budget)
+    return high, high // 2
+
+
 def build_chat_model(config: AgentConfig) -> BaseChatModel:
     """Construct the LangChain chat model for an AgentConfig — the single source of truth for
     provider construction, shared by the Agent constructor and the e2e helper (so tests exercise
@@ -494,8 +523,17 @@ class Agent:
         # X at step start (hysteresis keeps the cached prefix stable). See specs/agent.md
         # ("History window").
         self._history_reactions = config.history_reactions
-        self.system_prompt = self._compose_system_prompt()
         self.model = model if model is not None else build_chat_model(config)
+        # Token marks for the usage-driven cut (None = off): high = window × budget, low = half.
+        # The window is resolved once here — config override, else the model profile — and a
+        # budget without a known window is a build error. See specs/agent.md ("History budget").
+        self._history_high, self._history_low = _resolve_history_budget(
+            config, self.model
+        )
+        # The prompt's fixed part (system prompt + tool schemas), estimated as the smallest input
+        # count any call has reported — the first call's, i.e. the fixed part plus one reaction.
+        self._history_overhead: int | None = None
+        self.system_prompt = self._compose_system_prompt()
         # Read for the wica.agent.model span's GenAI attributes (see specs/instrumentation.md).
         self._provider = config.provider
         self._model_name = config.model
@@ -580,7 +618,7 @@ class Agent:
         reply differs by whether an output Command is set), then the noop clause last. See
         specs/agent.md ("System prompt composition")."""
         primer = _RUNTIME_PRIMER
-        if self._history_reactions is not None:
+        if self._history_reactions is not None or self._history_high is not None:
             primer += _HISTORY_WINDOW_PROMPT
         if self._output_command_name is not None:
             primer += _OUTPUT_COMMAND_PROMPT.format(name=self._output_command_name)
@@ -1080,6 +1118,8 @@ class Agent:
             )
             self._dispatch_command(call_id, call["name"], args)
             builder.command_call_ids.append(call_id)
+        if builder.usage is not None:
+            self._apply_history_budget(builder.usage.input_tokens)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
 
     def _world_call_id(self, provider_id: str | None) -> str:
@@ -1292,18 +1332,72 @@ class Agent:
         memory. Hysteresis (2X, not X+1) keeps the cached prefix byte-stable between cuts. See
         specs/agent.md ("History window")."""
         keep = self._history_reactions
-        if keep is None:
+        if keep is None or self._count_observations() < 2 * keep:
             return
+        self._cut_history(keep, reason="history window")
+
+    def _apply_history_budget(self, input_tokens: int) -> None:
+        """The usage-driven cut: the call just made reported `input_tokens` for the prompt it read.
+        Over the high-water mark, keep only as many newest reactions as fit under the low-water
+        mark (at least the current one). The prompt is a fixed part (system prompt, tool schemas)
+        plus one slice per reaction; the fixed part is taken as the smallest count ever reported
+        (the first call's: fixed part + one reaction) and one reaction's cost as the rest of this
+        report spread over its other reactions — so a large system prompt does not inflate the
+        per-reaction estimate. See specs/agent.md ("History budget")."""
+        if self._history_high is None or self._history_low is None:
+            return
+        if self._history_overhead is None or input_tokens < self._history_overhead:
+            self._history_overhead = input_tokens
+        if input_tokens <= self._history_high:
+            return
+        count = self._count_observations()
+        if count < 2:
+            _logger.warning(
+                "history budget: prompt reported %d input tokens (mark: %d) but the single "
+                "reaction in history cannot be cut",
+                input_tokens,
+                self._history_high,
+            )
+            return
+        overhead = self._history_overhead
+        per_reaction = max(1.0, (input_tokens - overhead) / (count - 1))
+        keep = math.floor((self._history_low - overhead) / per_reaction)
+        if keep < 1:
+            _logger.warning(
+                "history budget: the prompt's fixed part (~%d tokens: system prompt and tools) "
+                "leaves no room for history under the low-water mark (%d); keeping one reaction",
+                overhead,
+                self._history_low,
+            )
+            keep = 1
+        _logger.debug(
+            "history budget: prompt reported %d input tokens (mark: %d) over %d reaction(s), "
+            "fixed part ~%d, ~%d per reaction",
+            input_tokens,
+            self._history_high,
+            count,
+            overhead,
+            per_reaction,
+        )
+        self._cut_history(keep, reason="history budget")
+
+    def _count_observations(self) -> int:
+        return sum(isinstance(r, ObservationRecord) for r in self._history)
+
+    def _cut_history(self, keep: int, *, reason: str) -> None:
+        """Drop every record before the `keep`-th newest Observation — whole reactions, from
+        storage. The one place history is ever shortened; both cut policies land here."""
         observation_indexes = [
             i
             for i, record in enumerate(self._history)
             if isinstance(record, ObservationRecord)
         ]
-        if len(observation_indexes) < 2 * keep:
+        if keep >= len(observation_indexes):
             return
         cut = observation_indexes[-keep]
         _logger.debug(
-            "history window: dropping %d reaction(s) (%d record(s)), keeping the last %d",
+            "%s: dropping %d reaction(s) (%d record(s)), keeping the last %d",
+            reason,
             len(observation_indexes) - keep,
             cut,
             keep,

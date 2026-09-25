@@ -133,7 +133,9 @@ class FakeChatModel(BaseChatModel):
         self._cursor += 1
         return step, call_index
 
-    def _to_result(self, step: dict[str, Any], call_index: int) -> ChatResult:
+    def _to_result(
+        self, step: dict[str, Any], call_index: int, messages: list[BaseMessage]
+    ) -> ChatResult:
         text = step.get("text", "") or ""
         tool_calls = [
             {
@@ -146,7 +148,26 @@ class FakeChatModel(BaseChatModel):
             }
             for i, call in enumerate(step.get("tool_calls", []) or [])
         ]
-        message = AIMessage(content=text, tool_calls=tool_calls)
+        # Token usage like a real provider's: a scripted override per step, else a deterministic
+        # estimate (text characters / 4) of the prompt and of the reply — the input figure grows
+        # with history, so the Agent's history budget is exercisable here. See
+        # specs/fake-provider.md ("Token usage").
+        usage = step.get("usage")
+        if usage is None:
+            usage = {
+                "input_tokens": sum(len(m.text) for m in messages) // 4,
+                "output_tokens": len(text) // 4,
+            }
+        message = AIMessage(
+            content=text,
+            tool_calls=tool_calls,
+            usage_metadata={
+                "input_tokens": int(usage["input_tokens"]),
+                "output_tokens": int(usage["output_tokens"]),
+                "total_tokens": int(usage["input_tokens"])
+                + int(usage["output_tokens"]),
+            },
+        )
         return ChatResult(generations=[ChatGeneration(message=message)])
 
     def _generate(
@@ -159,7 +180,7 @@ class FakeChatModel(BaseChatModel):
         self._calls.append(list(messages))
         self._validate_once()
         step, call_index = self._next_step()
-        return self._to_result(step, call_index)
+        return self._to_result(step, call_index, messages)
 
     async def _agenerate(
         self,
@@ -175,4 +196,4 @@ class FakeChatModel(BaseChatModel):
         if self.delay_s:
             await asyncio.sleep(self.delay_s)
         step, call_index = self._next_step()
-        return self._to_result(step, call_index)
+        return self._to_result(step, call_index, messages)

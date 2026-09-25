@@ -50,6 +50,7 @@ The fake is **scripted via `model_kwargs`** — JSON-expressible, so it flows th
 - `model_kwargs.script`: an ordered list of step responses. Each `ainvoke(messages)` **consumes the next one** and returns the corresponding `AIMessage`.
 - Each step: `{"text": str?, "tool_calls": [{"name": str, "args": object}]?}` — text, tool calls, or both. Each tool call becomes a **native LangChain tool call** (`AIMessage.tool_calls`), with a stable generated `id` when none is supplied, so the Agent dispatches it exactly like a real model's call (Commands *are* native tool calls — see [commands.md](commands.md)).
 - **Exhaustion:** once the script is spent, return `model_kwargs.default` (default: empty text, no tool calls) so an extra reasoning step never crashes a test. Optional `model_kwargs.loop: true` cycles the script instead.
+- **Token usage.** Every response carries `usage_metadata`, as a real provider's does, so the Agent's usage-driven history budget ([agent.md](agent.md), "History budget") is exercisable in the deterministic tier. By default `input_tokens` is an **estimate of the prompt's size** — the total text characters of the messages handed in, divided by 4 — and `output_tokens` the same estimate of the step's text; both are deterministic and the input figure grows with history, so a flow test can watch the budget trip naturally. A step may **override** both with `"usage": {"input_tokens": N, "output_tokens": M}` to trip the budget at a chosen step regardless of the prompt's real size (the robust choice when the trip point matters, since the estimate moves with the primer text).
 
 ### `bind_tools` & name checking
 
@@ -89,7 +90,8 @@ The command names below are illustrative (they match the `walk_to`-style example
         {"text": "On my way.",
          "tool_calls": [
            {"name": "walk_to", "args": {"place": "kitchen"}}
-         ]}
+         ]},
+        {"text": "Still here.", "usage": {"input_tokens": 90000, "output_tokens": 3}}
       ],
       "default": {"text": ""}
     }
