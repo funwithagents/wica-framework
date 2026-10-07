@@ -622,6 +622,15 @@ wheels = [
 ]
 
 [[package]]
+name = "httpx-sse"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/4c/751061ffa58615a32c31b2d82e8482be8dd4a89154f003147acee90f2be9/httpx_sse-0.4.3.tar.gz", hash = "sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d", size = 15943, upload-time = "2025-10-10T21:48:22.271Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl", hash = "sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc", size = 8960, upload-time = "2025-10-10T21:48:21.158Z" },
+]
+
+[[package]]
 name = "huggingface-hub"
 version = "1.24.0"
 source = { registry = "https://pypi.org/simple" }
@@ -836,6 +845,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2c/e8/4068ad02179253f55958e59e442e5b6e8cb95ffc5e805cc4db0b1ef61d4e/langchain_huggingface-1.2.2.tar.gz", hash = "sha256:1dd91ec415190d2704e93ec149618e3145075863ba37e74afc9080d685dc2743", size = 255513, upload-time = "2026-04-16T19:57:41.046Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0a/ed/648b87f9b67153ade616f360bf4145b76ed428b4adb89525938f611e9828/langchain_huggingface-1.2.2-py3-none-any.whl", hash = "sha256:f94944b0c0d5afc687568d426c87ed5236907464c41e72108ed76eee1a690f6d", size = 31926, upload-time = "2026-04-16T19:57:40.079Z" },
+]
+
+[[package]]
+name = "langchain-mistralai"
+version = "1.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "httpx-sse" },
+    { name = "langchain-core" },
+    { name = "pydantic" },
+    { name = "tokenizers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/70/92/d15c0640bf77908b765d76f46d7123d7b82b34b04dfad2838b68143f38f7/langchain_mistralai-1.1.6.tar.gz", hash = "sha256:c2694828adee61a497c571e25eaba1472095cd1d1f260a7fe15a6e60f9ece039", size = 157112, upload-time = "2026-07-05T21:30:23.059Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/db/b727cd6e8083a48e4d0aba542f1454a50510d59b24476888af94b038be15/langchain_mistralai-1.1.6-py3-none-any.whl", hash = "sha256:0aa59b313b406ee934dc0431873b0e11849d8d746a6a7e281103c6848a9b1319", size = 22806, upload-time = "2026-07-05T21:30:21.84Z" },
 ]
 
 [[package]]
@@ -2125,6 +2150,9 @@ gradio = [
 huggingface-hub = [
     { name = "langchain-huggingface" },
 ]
+mistralai = [
+    { name = "langchain-mistralai" },
+]
 openai = [
     { name = "langchain-openai" },
 ]
@@ -2135,6 +2163,7 @@ demo = [
     { name = "langchain-anthropic" },
     { name = "langchain-google-genai" },
     { name = "langchain-huggingface" },
+    { name = "langchain-mistralai" },
     { name = "langchain-openai" },
     { name = "opentelemetry-sdk" },
 ]
@@ -2143,6 +2172,7 @@ dev = [
     { name = "langchain-anthropic" },
     { name = "langchain-google-genai" },
     { name = "langchain-huggingface" },
+    { name = "langchain-mistralai" },
     { name = "langchain-openai" },
     { name = "opentelemetry-sdk" },
     { name = "pyright" },
@@ -2158,10 +2188,11 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.0" },
     { name = "langchain-google-genai", marker = "extra == 'google-genai'", specifier = ">=4.4" },
     { name = "langchain-huggingface", marker = "extra == 'huggingface-hub'", specifier = ">=1.2" },
+    { name = "langchain-mistralai", marker = "extra == 'mistralai'", specifier = ">=1.1" },
     { name = "langchain-openai", marker = "extra == 'openai'", specifier = ">=1.0" },
     { name = "opentelemetry-api", specifier = ">=1.20" },
 ]
-provides-extras = ["anthropic", "openai", "huggingface-hub", "google-genai", "gradio"]
+provides-extras = ["anthropic", "openai", "huggingface-hub", "google-genai", "mistralai", "gradio"]
 
 [package.metadata.requires-dev]
 demo = [
@@ -2169,6 +2200,7 @@ demo = [
     { name = "langchain-anthropic", specifier = ">=1.0" },
     { name = "langchain-google-genai", specifier = ">=4.4" },
     { name = "langchain-huggingface", specifier = ">=1.2" },
+    { name = "langchain-mistralai", specifier = ">=1.1" },
     { name = "langchain-openai", specifier = ">=1.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
 ]
@@ -2177,6 +2209,7 @@ dev = [
     { name = "langchain-anthropic", specifier = ">=1.0" },
     { name = "langchain-google-genai", specifier = ">=4.4" },
     { name = "langchain-huggingface", specifier = ">=1.2" },
+    { name = "langchain-mistralai", specifier = ">=1.1" },
     { name = "langchain-openai", specifier = ">=1.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
     { name = "pyright", specifier = ">=1.1.411" },

@@ -1,0 +1,8 @@
+{
+  "agent": {
+    "provider": "mistralai",
+    "model": "ministral-3b-latest",
+    "api_key_env": "WICA_MISTRAL_API_KEY",
+    "system_prompt": "You are a terse test assistant. Use tools when appropriate."
+  }
+}

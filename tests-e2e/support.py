@@ -23,6 +23,7 @@ PROVIDER_CONFIGS = [
     E2E_DIR / "e2e.openai.config.json",
     E2E_DIR / "e2e.huggingface-hub.config.json",
     E2E_DIR / "e2e.google-genai.config.json",
+    E2E_DIR / "e2e.mistralai.config.json",
 ]
 
 

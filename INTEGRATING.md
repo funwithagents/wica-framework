@@ -5,7 +5,7 @@
 > WICA ships **no model provider**. Install the extra for the one you use:
 > ```bash
 > uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
-> # or wica[openai], wica[huggingface-hub], or wica[google-genai]
+> # or wica[openai], wica[huggingface-hub], wica[google-genai], or wica[mistralai]
 > ```
 
 ## Mental model (read this first)
@@ -337,7 +337,7 @@ The dictionary/JSON representation has this shape:
 
 | Key | Required | Notes |
 |---|---|---|
-| `agent.provider` | yes | `anthropic` \| `openai` \| `google_genai` \| `huggingface-hub` \| `fake` (deterministic test double — see "Testing flows deterministically") |
+| `agent.provider` | yes | `anthropic` \| `openai` \| `google_genai` \| `mistralai` \| `huggingface-hub` \| `fake` (deterministic test double — see "Testing flows deterministically") |
 | `agent.model` | yes | Model id (or Hub `repo_id` for `huggingface-hub`) |
 | `agent.system_prompt` / `system_prompt_file` | exactly one | Inline, or a path located according to the construction method described above |
 | `agent.api_key` / `api_key_env` | at most one | Literal key, or an env var read at **Agent build** (`Wica.init`). Neither → provider's standard env var. Prefer `api_key_env` so the config carries no secret and is safe to commit |

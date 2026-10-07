@@ -21,6 +21,9 @@ huggingface-hub = ["langchain-huggingface>=1.2"]
 # Gemini via the Gemini Developer API (`provider: "google_genai"`, a plain init_chat_model
 # pass-through). PEP 685 normalizes extras, so `wica[google_genai]` selects it too.
 google-genai = ["langchain-google-genai>=4.4"]
+# Mistral via La Plateforme (`provider: "mistralai"`, LangChain's own provider id, a plain
+# init_chat_model pass-through).
+mistralai = ["langchain-mistralai>=1.1"]
 # Not a provider: the opt-in Gradio observability panels in `wica.contrib.gradio`
 # (specs/gradio-contrib.md, "Packaging"). Core never imports Gradio.
 gradio = ["gradio>=5.0.0"]
@@ -41,6 +44,7 @@ dev = [
     "langchain-openai>=1.0",
     "langchain-huggingface>=1.2",
     "langchain-google-genai>=4.4",
+    "langchain-mistralai>=1.1",
     "pyright>=1.1.411",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
@@ -56,6 +60,7 @@ demo = [
     "langchain-openai>=1.0",
     "langchain-huggingface>=1.2",
     "langchain-google-genai>=4.4",
+    "langchain-mistralai>=1.1",
     # For the opt-in WICA_DEMO_TRACES=console exporter.
     "opentelemetry-sdk>=1.20",
 ]

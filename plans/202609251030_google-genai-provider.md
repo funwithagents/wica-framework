@@ -1,6 +1,6 @@
 # Provider: Gemini via `google_genai`
 
-**Status:** In progress
+**Status:** Done
 
 Add **Gemini** (Gemini 3.8 Flash — 2.5 Flash, the original target, is no longer served to new Developer API accounts) as a fully supported provider, through the **Gemini Developer API** (an AI Studio API key) and LangChain's `langchain-google-genai` integration. Implements the `Updated` parts of [config.md](../specs/config.md) ("Providers") and [project.md](../specs/project.md) (provider extras). Flip both `Updated` specs back to `Implemented` when this plan is `Done`.
 
@@ -53,4 +53,4 @@ Findings that shaped the configs: the Developer API no longer serves `gemini-2.5
 
 Of the three behaviours only a live run settles: (3) primer steering is confirmed — the direct request was answered as text and the heartbeat observation drew a `noop`. (1) is *not yet* proven: `test_real_tool_calling_round_trip` stops at the Command's terminal entry and does not assert on the follow-up step whose prompt carries the tool-result turn immediately followed by the completion observation. (2) same-Command concurrent calls are not exercised by the live set at all. Both stay listed here as deferrals; neither has produced an error in the runs above.
 
-**To close:** one clean `-k google` run with all four cases passing , then flip [config.md](../specs/config.md) and [project.md](../specs/project.md) back to `Implemented` and mark this plan `Done`. If (1) ever fails, the fix belongs in the renderer in `agent.py` and this plan grows a step for it.
+**Closed 2026-10-07.** The per-case passes above were accepted as the live verification: every case passed at least once, and the failures that kept a single run from going four-for-four were provider-side (503 "high demand", 429 key quota), not WICA behaviour. [config.md](../specs/config.md) and [project.md](../specs/project.md) returned to `Implemented` for this provider — and were set `Updated` again in the same change for the Mistral provider ([202610071849_mistralai-provider.md](202610071849_mistralai-provider.md)), so their status line reads `Updated` until that plan is `Done`. If deferral (1) ever fails on a live run, the fix belongs in the renderer in `agent.py` and the Mistral plan (or a new one) grows a step for it.

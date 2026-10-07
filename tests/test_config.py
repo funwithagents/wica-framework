@@ -602,6 +602,29 @@ def test_build_chat_model_google_genai_is_a_pass_through():
     assert model.thinking_level == "low"
 
 
+def test_build_chat_model_mistralai_is_a_pass_through():
+    """mistralai (Mistral via La Plateforme) takes no WICA branch: build_chat_model hands it to
+    init_chat_model verbatim, and the two things that must land on the real model do — the
+    resolved api_key on its mistral_api_key field, and model_kwargs (temperature). Constructing
+    the model makes no request — see specs/config.md "Providers"."""
+    from langchain_mistralai import ChatMistralAI
+
+    config = AgentConfig(
+        provider="mistralai",
+        model="mistral-small-latest",
+        system_prompt="hi",
+        api_key="test-key",
+        model_kwargs={"temperature": 0.2},
+    )
+    model = agent_module.build_chat_model(config)
+
+    assert isinstance(model, ChatMistralAI)
+    assert model.model == "mistral-small-latest"
+    assert model.mistral_api_key is not None
+    assert model.mistral_api_key.get_secret_value() == "test-key"
+    assert model.temperature == 0.2
+
+
 def test_build_chat_model_huggingface_hub_branch(monkeypatch: pytest.MonkeyPatch):
     """huggingface-hub is built directly as ChatHuggingFace(llm=HuggingFaceEndpoint(...)), NOT via
     init_chat_model, and forwards the resolved api_key as huggingfacehub_api_token (its own kwarg
