@@ -2,6 +2,7 @@
 code:
   - pyproject.toml
   - tests-e2e/support.py
+  - tests-e2e/conftest.py
   - tests-e2e/e2e.anthropic.config.json
   - tests-e2e/e2e.openai.config.json
   - tests-e2e/e2e.huggingface-hub.config.json
@@ -87,7 +88,8 @@ The provider/extra surface these configs select from is specced in [config.md](c
 
 ## Tooling
 
-- **`pytest`** is the runner; **`ruff`** lints/formats; **`pyright`** (`standard` mode) type-checks. All three are the gate after any change — lint, type check, and tests must pass before work is considered done (see [AGENTS.md](../AGENTS.md), "Verification").
+- **`pytest`** is the runner, with **`pytest-xdist`** running the fast tier in parallel: `addopts = ["-n", "logical", "--maxprocesses", "8"]` in `pyproject.toml`, as reachy-mini-bridge and naoqi-sim do. The tier is sleep-bound (coalescing windows, step loops and `wait_until` deadlines run in real time), so spreading it over workers cuts a laptop run from about 43 s to about 17 s; the floor is the slowest single test. `-n 0` runs it serially. Each worker is its own interpreter, so per-test isolation (a fresh `World` and loop per test, the OpenTelemetry in-memory exporter) holds per worker. A test that sends a second trigger must wait for the first reaction to **end** (`not agent._busy`), not just for the model call — under parallel load a trigger arriving while the step is in flight is dropped by design ([agent.md](agent.md)). **`tests-e2e/` stays serial:** its `conftest.py` sets `numprocesses = 0` in `pytest_cmdline_main`, since parallel live cases would only hit provider rate limits and the scripted-fake flows take seconds; it loads only when that tier is collected, so the fast tier keeps its workers.
+- **`ruff`** lints/formats; **`pyright`** (`standard` mode) type-checks. All three are the gate after any change — lint, type check, and tests must pass before work is considered done (see [AGENTS.md](../AGENTS.md), "Verification").
 - **`pyright` covers test code too:** its `include` is `src`, `tests`, and `tests-e2e`, so tests are type-checked alongside the library rather than being a blind spot.
 - The concrete commands (`uv run ruff check .`, `uv run pyright`, `uv run pytest`, and the sourced-env e2e invocations) live in [AGENTS.md](../AGENTS.md).
 

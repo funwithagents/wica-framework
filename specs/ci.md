@@ -49,11 +49,11 @@ One file, `.github/workflows/ci.yml`. It triggers on `pull_request`, on `push` t
 | Job | When | What |
 |---|---|---|
 | `check` | every event | `uv sync --locked`, then `ruff check .`, `ruff format --check .`, `pyright` |
-| `fast-tier` | every event | `uv sync --locked`, then `pytest` (the default `tests/` tier) — **once per platform**: `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `windows-2025` |
+| `fast-tier` | every event | `uv sync --locked`, then `pytest` (the default `tests/` tier, in parallel — [testing.md](testing.md) "Tooling") — **once per platform**: `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `windows-2025` |
 | `e2e-fake` | every event | `uv sync --locked`, then `pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs` |
 | `live` | push to `main`, `workflow_dispatch` | `uv sync --locked`, then `pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py -rs` with the provider keys mapped from secrets |
 
-None waits on another, so a run takes as long as its slowest job. Every job carries a `timeout-minutes` well under GitHub's default, so a hung loop fails in minutes, not hours.
+None waits on another, so a run takes as long as its slowest job — about a minute and a half end to end, most of it the sync. The fast tier's parallel run helps a runner less than a laptop: three or four cores, not fifteen. Every job carries a `timeout-minutes` well under GitHub's default, so a hung loop fails in minutes, not hours.
 
 ### Secrets
 

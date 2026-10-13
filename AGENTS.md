@@ -134,7 +134,7 @@ uv sync --dev
 uv run ruff check .
 uv run ruff format .
 uv run pyright
-uv run pytest
+uv run pytest            # the fast tier, in parallel (pytest-xdist); `-n 0` runs it serially
 ```
 
 On a fresh venv, run `uv run python -c "import gradio"` once before `pyright`: Gradio writes its components' `.pyi` stubs on first import, and without them pyright reports missing event methods (`Timer.tick`, …) in `wica.contrib.gradio`.
