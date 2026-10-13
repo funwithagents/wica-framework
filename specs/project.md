@@ -7,7 +7,7 @@ tests:
 
 # Project
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -16,6 +16,7 @@ Structure and tooling for the WICA project itself: Python version, dependency/pa
 ## Decided
 
 - **Python version:** 3.12+ minimum
+- **Platforms:** **macOS, Linux and Windows.** WICA is pure Python with no platform branches, and every dependency ships wheels for the three; the support is stated by CI running the fast tier on each ([ci.md](ci.md) "Platforms"), and a platform-only failure is a bug to fix
 - **Package layout:** `src/` layout — `src/wica/...` — not flat, to avoid accidentally importing an uninstalled package from the repo root
 - **Dependency/venv management:** `uv`
 - **Linting/formatting:** `ruff`
@@ -27,6 +28,7 @@ Structure and tooling for the WICA project itself: Python version, dependency/pa
   - `tests/` at repo root, mirroring the `src/wica/` module structure
   - `tests-e2e/` at repo root, for the full-loop fake/live tier above — not collected by the default `pytest` run
   - `examples/` at repo root, for runnable demo scripts
+  - `.github/workflows/` for continuous integration — one `ci.yml`, specced in [ci.md](ci.md)
   - `docs/` reserved for future user-facing documentation (usage guides, API reference) — distinct from `specs/`, which holds pre-implementation design/planning docs and continues to exist alongside `docs/` once that appears
 
 ## Open questions

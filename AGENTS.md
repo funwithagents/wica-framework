@@ -16,6 +16,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | `tests/` | Fast, deterministic, no-network tests; mirrors the `src/wica/` module structure (`tests/contrib/` for the contrib; shared fixtures in `conftest.py`, plain helpers in `support.py`) |
 | `tests-e2e/` | Opt-in full-loop tests: deterministic scripted-fake flows plus live provider cases (not collected by default `pytest`) |
 | `examples/` | Runnable example apps demonstrating the framework — e.g. the Gradio conversation demo ([specs/conversation-demo.md](specs/conversation-demo.md)); deps live in the `demo` uv group, not core |
+| `.github/workflows/` | CI — one `ci.yml` running the gate below on GitHub's runners ([specs/ci.md](specs/ci.md)) |
 
 ### `src/wica/` modules
 
@@ -103,6 +104,8 @@ zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k google'
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k mistral'
 ```
 
+**On CI** the live set runs only on pushes to `main` (and manual runs), with each key above stored as a repository secret of the same name; a secret the repository doesn't hold makes that provider skip, as locally ([specs/ci.md](specs/ci.md) "Secrets").
+
 Never `echo`/print a key itself; when checking whether one is set, redact the value (e.g. `env | grep WICA | sed -E 's/=.*/=<set>/'`).
 
 **The `tests-e2e/` tier also holds an always-run, deterministic set: the scripted-fake flows** (`test_fake_flows.py`, over `provider: "fake"` — see [specs/fake-provider.md](specs/fake-provider.md)). These are network-free and key-less, so they sit **outside** `PROVIDER_CONFIGS` and never skip. Run just them — no keys, no `~/.zshrc` sourcing needed — with `-k fake`:
@@ -122,7 +125,7 @@ Alongside them, `tests-e2e/test_example_flow.py` is another always-run, key-less
 
 ## Verification
 
-After any code change, run linting, type checking, and tests, and fix any failures before considering the work done.
+After any code change, run linting, type checking, and tests, and fix any failures before considering the work done. CI ([specs/ci.md](specs/ci.md)) runs the same gate on every pull request — the fast tier on Linux, macOS and Windows — so a change that passes locally on one platform can still fail on another; treat that as a bug, not noise.
 
 ## Commands
 
