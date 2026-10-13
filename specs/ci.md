@@ -17,16 +17,18 @@ Run the verification gate of [AGENTS.md](../AGENTS.md) — lint, type check, tes
 ### The runners
 
 - **GitHub-hosted runners, the free tier.** The repo is public, so every runner is free, macOS and Windows included. No self-hosted runner.
-- **Images pinned by name** — `ubuntu-24.04`, `macos-15`, `windows-2025` — never `*-latest`, so the platform a job was validated on moves only when a pin is bumped on purpose.
+- **Images pinned by name** — `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `windows-2025` — never `*-latest`, so the platform a job was validated on moves only when a pin is bumped on purpose.
 - **One Python, 3.12** — the floor of `requires-python`, the version `.python-version` names; `uv` installs it on the runner. A newer Python is not in the matrix: the floor is the version most likely to break, and the library has no version branches.
 - **`uv sync --locked`** in every job, so a `pyproject.toml` edit without its lock update fails CI rather than resolving silently. The default sync installs the `dev` group, which carries every provider package and Gradio (see [project.md](project.md)) — what pyright, the contrib's fast tests and the live set all need. `astral-sh/setup-uv` caches uv's downloads keyed on `uv.lock`.
 
-### Platforms: the fast tier on all three
+### Platforms: the fast tier on each
 
-WICA supports **macOS, Linux and Windows** ([project.md](project.md)), and the fast tier is what states it: one job per platform.
+WICA supports **macOS (arm64), Linux (x86_64 and arm64) and Windows (x86_64)** ([project.md](project.md)), and the fast tier is what states it: one job per platform.
 
 - **Why Windows.** WICA is pure Python with no native code, subprocess or signal handling, and every dependency ships Windows wheels — so supporting it is nearly free, while apps built on WICA (a robot bridge among them) do run there. What differs on Windows is exactly what the fast tier exercises: asyncio's default Proactor event loop under the World's shared loop and its thread hand-offs, and Python 3.12's coarse Windows clocks (about 15.6 ms per tick for `datetime.now`/`time.monotonic`, the clocks of [instrumentation.md](instrumentation.md) and the tests' deadlines). A Windows-only failure is a WICA bug to fix — or a test whose timing margin assumed a fine clock — never a reason to drop the platform.
 - **Why macOS.** It is where development happens, so it is rarely the first to break; it stays in the matrix because it is cheap and because a laptop's run is not a clean checkout's.
+- **Why Linux arm64.** It is where a WICA app runs *on* a robot — a Raspberry Pi (the wireless Reachy Mini's own computer) or a Jetson — rather than on a laptop beside it. WICA's own code is architecture-neutral; what the job proves is that every locked dependency (Gradio's stack, `tokenizers`, `pydantic-core`, …) has an arm64 wheel, or builds, so `uv sync --locked` succeeds there. A dependency bump that drops arm64 fails this entry, not a user's robot.
+- **Not Intel macOS.** It runs the same macOS code paths as the arm64 entry, so it could only catch a missing x86_64 macOS wheel — a platform Apple no longer ships, that packages are starting to drop and whose GitHub runner images are being retired. **Untested, expected to work**: no native code of WICA's own, same OS as the tested entry. Revisited only if a user reports a break there.
 - **`fail-fast: false`**, so one platform's failure leaves the others running and the log says which platforms broke.
 
 ### The static gate on Linux only
@@ -47,7 +49,7 @@ One file, `.github/workflows/ci.yml`. It triggers on `pull_request`, on `push` t
 | Job | When | What |
 |---|---|---|
 | `check` | every event | `uv sync --locked`, then `ruff check .`, `ruff format --check .`, `pyright` |
-| `fast-tier` | every event | `uv sync --locked`, then `pytest` (the default `tests/` tier) — **once per platform**: `ubuntu-24.04`, `macos-15`, `windows-2025` |
+| `fast-tier` | every event | `uv sync --locked`, then `pytest` (the default `tests/` tier) — **once per platform**: `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `windows-2025` |
 | `full-loop-fake` | every event | `uv sync --locked`, then `pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs` |
 | `live` | push to `main`, `workflow_dispatch` | `uv sync --locked`, then `pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py -rs` with the provider keys mapped from secrets |
 
@@ -58,7 +60,7 @@ None waits on another, so a run takes as long as its slowest job. Every job carr
 - **One repository secret per committed e2e config, under the config's own `api_key_env` name** — `WICA_ANTHROPIC_API_KEY`, `WICA_OPENAI_API_KEY`, `WICA_HF_TOKEN`, `WICA_GEMINI_API_KEY`, `WICA_MISTRAL_API_KEY` (the table in [AGENTS.md](../AGENTS.md) "Live/e2e tests") — mapped onto the same environment variable in the `live` job's test step only.
 - **No secret is required.** A secret the repository does not hold comes out as an empty variable, which `resolve_api_key` treats as unset (`MissingEnvError`), so that provider's cases **skip** — the job stays green with any subset of keys, none included. `-rs` lists the skips in the job log; a provider that should have run and skipped is a missing or misnamed secret.
 - **Adding a provider** adds a config to `PROVIDER_CONFIGS`, a row to the AGENTS.md key table, and a line to the `live` job's `env` — the same hand-kept pairing [testing.md](testing.md) open question 2 already notes.
-- **Required status checks on `main`** are `check`, the three `fast-tier` entries and `full-loop-fake` — the jobs that run on a pull request. `live` cannot be required (it never runs on one). Requiring them is a repository setting on GitHub, outside the repo.
+- **Required status checks on `main`** are `check`, the four `fast-tier` entries and `full-loop-fake` — the jobs that run on a pull request. `live` cannot be required (it never runs on one). Requiring them is a repository setting on GitHub, outside the repo.
 
 ## Relationship to the other specs
 

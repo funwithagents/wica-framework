@@ -125,7 +125,7 @@ Alongside them, `tests-e2e/test_example_flow.py` is another always-run, key-less
 
 ## Verification
 
-After any code change, run linting, type checking, and tests, and fix any failures before considering the work done. CI ([specs/ci.md](specs/ci.md)) runs the same gate on every pull request — the fast tier on Linux, macOS and Windows — so a change that passes locally on one platform can still fail on another; treat that as a bug, not noise.
+After any code change, run linting, type checking, and tests, and fix any failures before considering the work done. CI ([specs/ci.md](specs/ci.md)) runs the same gate on every pull request — the fast tier on Linux (x86_64 and arm64), macOS and Windows — so a change that passes locally on one platform can still fail on another; treat that as a bug, not noise.
 
 ## Commands
 

@@ -16,7 +16,7 @@ Structure and tooling for the WICA project itself: Python version, dependency/pa
 ## Decided
 
 - **Python version:** 3.12+ minimum
-- **Platforms:** **macOS, Linux and Windows.** WICA is pure Python with no platform branches, and every dependency ships wheels for the three; the support is stated by CI running the fast tier on each ([ci.md](ci.md) "Platforms"), and a platform-only failure is a bug to fix
+- **Platforms:** **macOS (arm64), Linux (x86_64 and arm64 — the on-robot target) and Windows (x86_64).** WICA is pure Python with no platform branches, and every dependency ships wheels for each; Intel macOS is untested but expected to work; the support is stated by CI running the fast tier on each ([ci.md](ci.md) "Platforms"), and a platform-only failure is a bug to fix
 - **Package layout:** `src/` layout — `src/wica/...` — not flat, to avoid accidentally importing an uninstalled package from the repo root
 - **Dependency/venv management:** `uv`
 - **Linting/formatting:** `ruff`

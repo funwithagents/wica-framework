@@ -1,8 +1,8 @@
 # Continuous integration — specs/ci.md.
 #
 # Four jobs side by side, none waiting on another: `check` (lint, format, types) on Linux;
-# `fast-tier` (the default `pytest`) once per supported platform — Linux, macOS, Windows —
-# since that is where a platform's own event loop, clocks and paths meet the World's shared
+# `fast-tier` (the default `pytest`) once per supported platform — Linux (x86_64 and arm64),
+# macOS (arm64), Windows — since that is where a platform's own event loop, clocks and paths meet the World's shared
 # loop and its threads; `full-loop-fake` (the always-run, key-less scripted-fake flows of
 # tests-e2e/) on Linux; and `live` (the provider-parametrized live set) on Linux, only on a
 # push to main or a manual run — never on a pull request, since every case is a paid call.
@@ -50,10 +50,12 @@ jobs:
     timeout-minutes: 15
     strategy:
       # One entry per supported platform, images pinned by name; one platform's failure
-      # leaves the others running.
+      # leaves the others running. Linux arm64 is the on-robot target (a Raspberry Pi, a
+      # Jetson): it proves every locked dependency installs there. Intel macOS is untested
+      # (specs/ci.md "Platforms").
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
