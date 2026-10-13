@@ -97,6 +97,11 @@ class World:
         self._configs: dict[str, WorldEntryConfig] = {}
         self._entries: dict[str, WorldEntry] = {}
         self._id_counters: dict[str, int] = {}
+        # World-wide version order: breaks timestamp ties in prompt ordering, since two versions
+        # can share a wall-clock stamp (Python 3.12's ~15.6 ms clock tick on Windows). Versions
+        # are created under the lock, so this is their true creation order. See specs/world.md.
+        self._version_order: dict[str, int] = {}
+        self._version_counter = 0
         self._listeners: dict[str, list[Listener]] = {}
         self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.RLock()
@@ -191,6 +196,8 @@ class World:
             )
             new_id = self._id_counters.get(key, 0) + 1
             self._id_counters[key] = new_id
+            self._version_counter += 1
+            self._version_order[key] = self._version_counter
             self._entries[key] = WorldEntry(
                 key=key,
                 type=type,
@@ -215,6 +222,7 @@ class World:
                 raise KeyError(key)
             del self._configs[key]
             del self._entries[key]
+            del self._version_order[key]
             self._listeners.pop(key, None)
             timer = self._timers.pop(key, None)
             if timer is not None:
@@ -302,6 +310,8 @@ class World:
             )
             new_id = self._id_counters[key] + 1
             self._id_counters[key] = new_id
+            self._version_counter += 1
+            self._version_order[key] = self._version_counter
             new_entry = WorldEntry(
                 key=key,
                 type=old_entry.type,
@@ -444,7 +454,9 @@ class World:
                 for key, entry in self._entries.items()
                 if self._configs[key].include_in_prompt
             ]
-            entries.sort(key=lambda e: e.current.timestamp)
+            entries.sort(
+                key=lambda e: (e.current.timestamp, self._version_order[e.key])
+            )
         return copy.deepcopy(entries)
 
     def get_prompt_snapshot(self) -> list[tuple[WorldEntry, WorldEntryConfig]]:
@@ -458,7 +470,12 @@ class World:
                 for key, entry in self._entries.items()
                 if self._configs[key].include_in_prompt
             ]
-            pairs.sort(key=lambda pair: pair[0].current.timestamp)
+            pairs.sort(
+                key=lambda pair: (
+                    pair[0].current.timestamp,
+                    self._version_order[pair[0].key],
+                )
+            )
             return [
                 (copy.deepcopy(entry), dataclasses.replace(config))
                 for entry, config in pairs

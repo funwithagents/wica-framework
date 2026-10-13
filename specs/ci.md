@@ -31,7 +31,7 @@ WICA supports **macOS, Linux and Windows** ([project.md](project.md)), and the f
 
 ### The static gate on Linux only
 
-`ruff check .`, `ruff format --check .` and `pyright` give the same verdict on every platform, so they run once, on Linux. `ruff format --check .` is the CI form of the `ruff format .` the AGENTS.md command list runs (Ruff formats no Markdown here, so `.` is safe).
+`ruff check .`, `ruff format --check .` and `pyright` give the same verdict on every platform, so they run once, on Linux. `ruff format --check .` is the CI form of the `ruff format .` the AGENTS.md command list runs (Ruff formats no Markdown here, so `.` is safe). **Gradio's type stubs come first:** Gradio's wheel ships no `.pyi` for its components — `component_meta` writes them into site-packages the first time `gradio` is imported — so on a fresh venv pyright cannot see generated event methods (`Timer.tick`, `Dropdown.change`) and reports errors on the contrib. The job imports `gradio` once before `pyright`; the same applies to a fresh local clone (see [AGENTS.md](../AGENTS.md) "Commands").
 
 ### The full-loop tier, split by its two kinds
 

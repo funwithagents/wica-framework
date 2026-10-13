@@ -39,6 +39,8 @@ jobs:
         run: uv run ruff check .
       - name: Format check
         run: uv run ruff format --check .
+      - name: Gradio's type stubs (written to site-packages on first import, not shipped)
+        run: uv run python -c "import gradio"
       - name: Type check
         run: uv run pyright
 

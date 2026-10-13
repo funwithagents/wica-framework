@@ -136,3 +136,5 @@ uv run ruff format .
 uv run pyright
 uv run pytest
 ```
+
+On a fresh venv, run `uv run python -c "import gradio"` once before `pyright`: Gradio writes its components' `.pyi` stubs on first import, and without them pyright reports missing event methods (`Timer.tick`, …) in `wica.contrib.gradio`.
