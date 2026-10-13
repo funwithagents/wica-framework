@@ -6,7 +6,7 @@ tests:
 
 # Continuous integration
 
-**Status:** Stable
+**Status:** Implemented
 
 ## Purpose
 
@@ -44,7 +44,7 @@ WICA supports **macOS (arm64), Linux (x86_64 and arm64) and Windows (x86_64)** (
 
 ### The workflow
 
-One file, `.github/workflows/ci.yml`. It triggers on `pull_request`, on `push` to `main`, and on `workflow_dispatch`. Concurrency is one run per ref; a newer push cancels an older run **on a pull request only** — every push to `main` keeps its full verdict, live set included.
+One file, `.github/workflows/ci.yml`. It triggers on `pull_request`, on `push` to `main`, and on `workflow_dispatch` (the Actions tab's **Run workflow**, or `gh workflow run CI --ref <branch>` — GitHub offers it only once the workflow is on the default branch). Concurrency is one run per ref; a newer push cancels an older run **on a pull request only** — every push to `main` keeps its full verdict, live set included.
 
 | Job | When | What |
 |---|---|---|

@@ -1,8 +1,8 @@
 # CI on GitHub Actions
 
-**Status:** In progress
+**Status:** Done
 
-Build [ci.md](../specs/ci.md): one workflow running the static gate, the fast tier on Linux, macOS and Windows, the scripted-fake flows on every pull request, and the live provider set on pushes to `main`. Also states the supported platforms in [project.md](../specs/project.md) (`Updated` until the Windows and macOS fast-tier jobs are green, then back to `Implemented`) and closes [testing.md](../specs/testing.md)'s "CI wiring" open question. When this plan is `Done`, flip `ci.md` to `Implemented` and `project.md` back to `Implemented`.
+Build [ci.md](../specs/ci.md): one workflow running the static gate, the fast tier on Linux, macOS and Windows, the scripted-fake flows on every pull request, and the live provider set on pushes to `main`. Also states the supported platforms in [project.md](../specs/project.md) (`Updated` until the Windows and macOS fast-tier jobs are green, then back to `Implemented`) and closes [testing.md](../specs/testing.md)'s "CI wiring" open question. Now `Done`: `ci.md` is `Implemented` and `project.md` is back to `Implemented`.
 
 Shape taken from `reachy-mini-bridge`'s CI (its `specs/testing/ci.md`): pinned runner images, `astral-sh/setup-uv` with a cache on `uv.lock`, `uv sync --locked`, `fail-fast: false` on the platform matrix, `timeout-minutes` on every job, no secret required for a green run. Two differences come from WICA's own tiers. The bridge's live tier runs a free local simulator on Linux, while WICA's live set makes paid provider calls, so it runs on `main` only. And WICA's e2e tier also holds key-less scripted-fake flows, which get a job of their own on every pull request.
 
@@ -21,7 +21,7 @@ Checked locally (macOS, 2026-10-13): `actionlint` clean. `uv sync --locked` and 
 - [testing.md](../specs/testing.md): open question "CI wiring" closed (later questions renumbered), and a pointer to how the tiers map onto CI jobs. This is editorial, so the status stays `Implemented`.
 - [AGENTS.md](../AGENTS.md): a `.github/workflows/` row in the top-level layout, the CI note under "Live/e2e tests" (secrets under the key-env names) and under "Verification".
 
-### 3. First runs on GitHub: todo
+### 3. First runs on GitHub: done
 
 - Push the branch and open a pull request. Expect `check`, the `fast-tier` entries and `e2e-fake` to run, and `live` not to run.
 - **Windows** is the first run ever on that platform. The watch-list from the spec: the coarse 15.6 ms clock under Python 3.12 (stamps that tie, durations of zero) and the tight wall-time assertions in `tests/test_agent.py` (`< 0.15` s for the zero-window case, `< 0.5` s for the early flush). A failure there is fixed in WICA or in the test's margin, and recorded here.
@@ -32,6 +32,7 @@ Checked locally (macOS, 2026-10-13): `actionlint` clean. `uv sync --locked` and 
 - **Linux arm64 added** (`ubuntu-24.04-arm`) after the second run, as the on-robot target; Intel macOS recorded in [ci.md](../specs/ci.md) as untested, expected to work. [project.md](../specs/project.md) names the architectures.
 - **Fourth run (the e2e rename):** `fast-tier (macos-15)` failed `test_noop_renders_as_native_call_with_plain_ack` (`sink.event.wait` timed out), green on the three runs before. A test race, not a WICA bug: it waited for the first model call, not the end of the reaction, so on a slow runner the second trigger arrived while the step was still in flight and was dropped by design (single-in-flight, [agent.md](../specs/agent.md)). Fixed with the suite's own idiom (`len(model.calls) == 1 and not agent._busy`); the `_step` helper (9 call sites) had the same race and now takes the agent and waits for it to be idle. Not reproduced locally — the drop rule and the identical idiom in other tests are the evidence.
 - **Fast tier in parallel** (`pytest-xdist` in the `dev` group, `addopts = ["-n", "logical", "--maxprocesses", "8"]`, as reachy-mini-bridge and naoqi-sim): locally 43 s → about 17 s, three runs green, and three more green with 24 workers on 15 cores. `tests-e2e/conftest.py` forces that tier serial (`pytest_cmdline_main` → `numprocesses = 0`); checked that the fake flows run without workers and the fast tier with 8. [testing.md](../specs/testing.md) "Tooling" (plus `tests-e2e/conftest.py` in its frontmatter), [project.md](../specs/project.md), AGENTS.md "Commands", [ci.md](../specs/ci.md).
-- Add the five repository secrets (`WICA_ANTHROPIC_API_KEY`, `WICA_OPENAI_API_KEY`, `WICA_HF_TOKEN`, `WICA_GEMINI_API_KEY`, `WICA_MISTRAL_API_KEY`), then trigger `live` with `workflow_dispatch` on the branch. Confirm that `-rs` shows no provider skipping for a missing key.
-- After merge, set the required status checks on `main` (`check`, the four `fast-tier` entries, `e2e-fake`). This is a repository setting.
-- Record the per-job wall times here, then mark the plan `Done` and flip the two spec statuses.
+- **Final run (parallel tier), three attempts, all green:** fast tier Linux 39 s, Linux arm64 31 s, macOS 52 s, Windows 46 s (the test run itself 20–30 s each, the rest the sync); `check` 21 s; `e2e-fake` 19 s.
+- **Secrets:** all five set as repository secrets (2026-10-13): `WICA_ANTHROPIC_API_KEY`, `WICA_OPENAI_API_KEY`, `WICA_HF_TOKEN`, `WICA_GEMINI_API_KEY`, `WICA_MISTRAL_API_KEY`.
+- **`live` before merge: not possible.** GitHub offers `workflow_dispatch` only for a workflow on the default branch, and `ci.yml` reaches `main` with this PR, so the manual run planned here cannot happen on the branch. The live set itself passed against all five providers locally on this branch (27 passed, 2026-10-13); its first CI run is the merge's own push to `main`, whose `-rs` should list no provider skip.
+- **Required status checks** (`check`, the four `fast-tier` entries, `e2e-fake`): a repository setting, set on GitHub after merge — outside the repo and outside this plan.

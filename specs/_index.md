@@ -13,9 +13,9 @@ The name breaks down as:
 
 | Spec | Description | Status |
 |---|---|---|
-| [project.md](project.md) | Project structure and tooling: Python version, the supported platforms (macOS arm64, Linux x86_64/arm64, Windows), packaging with uv, layout conventions | Updated |
+| [project.md](project.md) | Project structure and tooling: Python version, the supported platforms (macOS arm64, Linux x86_64/arm64, Windows), packaging with uv, layout conventions | Implemented |
 | [testing.md](testing.md) | Testing strategy: deterministic default tier plus opt-in full-loop fake/live e2e tier, functional-test philosophy, per-test `World` isolation, provider-parametrized live set | Implemented |
-| [ci.md](ci.md) | Continuous integration on GitHub's hosted runners: static gate on Linux, the fast tier on Linux/macOS/Windows, the key-less scripted-fake flows on every pull request, the live provider set on pushes to `main` with keys from repository secrets (absent secret → skip) | Stable |
+| [ci.md](ci.md) | Continuous integration on GitHub's hosted runners: static gate on Linux, the fast tier on Linux/macOS/Windows, the key-less scripted-fake flows on every pull request, the live provider set on pushes to `main` with keys from repository secrets (absent secret → skip) | Implemented |
 | [config.md](config.md) | Plain framework config objects: direct construction plus strict dictionary/JSON parsing, provider/model/API key/system prompt, deferred reference resolution | Implemented |
 | [content.md](content.md) | Neutral, provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`) shared across World, Agent, Inputs, Commands | Implemented |
 | [events.md](events.md) | Generic, project-agnostic `Event[T]` pub/sub primitive: synchronous subscribe/unsubscribe/emit with subscriber isolation, a standalone dependency leaf | Implemented |
