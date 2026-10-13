@@ -1,0 +1,108 @@
+# Continuous integration — specs/ci.md.
+#
+# Four jobs side by side, none waiting on another: `check` (lint, format, types) on Linux;
+# `fast-tier` (the default `pytest`) once per supported platform — Linux (x86_64 and arm64),
+# macOS (arm64), Windows — since that is where a platform's own event loop, clocks and paths meet the World's shared
+# loop and its threads; `e2e-fake` (the always-run, key-less scripted-fake flows of
+# tests-e2e/) on Linux; and `live` (the provider-parametrized live set) on Linux, only on a
+# push to main or a manual run — never on a pull request, since every case is a paid call.
+# The live set is plain HTTP to each provider, so one platform covers it.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push supersedes a pull request's run in flight; every push to main keeps its own
+  # verdict, live set included.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: lint, format, types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync (dev group, against the lock)
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check .
+      - name: Format check
+        run: uv run ruff format --check .
+      - name: Gradio's type stubs (written to site-packages on first import, not shipped)
+        run: uv run python -c "import gradio"
+      - name: Type check
+        run: uv run pyright
+
+  fast-tier:
+    name: fast tier (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      # One entry per supported platform, images pinned by name; one platform's failure
+      # leaves the others running. Linux arm64 is the on-robot target (a Raspberry Pi, a
+      # Jetson): it proves every locked dependency installs there. Intel macOS is untested
+      # (specs/ci.md "Platforms").
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync (dev group, against the lock)
+        run: uv sync --locked
+      - name: Fast tier
+        run: uv run pytest
+
+  e2e-fake:
+    name: e2e tier, scripted fake
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync (dev group, against the lock)
+        run: uv sync --locked
+      - name: Scripted-fake flows (no network, no key, never skip)
+        run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs
+
+  live:
+    name: e2e tier, live providers
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync (dev group, against the lock)
+        run: uv sync --locked
+      - name: Live set (one case per provider config)
+        # One repository secret per committed e2e config, under the config's own
+        # `api_key_env` name. A secret the repository does not hold comes out empty and
+        # that provider's cases skip (`MissingEnvError → pytest.skip`); `-rs` lists them.
+        env:
+          WICA_ANTHROPIC_API_KEY: ${{ secrets.WICA_ANTHROPIC_API_KEY }}
+          WICA_OPENAI_API_KEY: ${{ secrets.WICA_OPENAI_API_KEY }}
+          WICA_HF_TOKEN: ${{ secrets.WICA_HF_TOKEN }}
+          WICA_GEMINI_API_KEY: ${{ secrets.WICA_GEMINI_API_KEY }}
+          WICA_MISTRAL_API_KEY: ${{ secrets.WICA_MISTRAL_API_KEY }}
+        run: uv run pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py -rs

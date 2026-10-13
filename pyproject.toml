@@ -51,6 +51,8 @@ dev = [
     # Span tests use the SDK's in-memory exporter (see tests/conftest.py); wica itself never
     # imports the SDK.
     "opentelemetry-sdk>=1.20",
+    # Runs the fast tier in parallel (`addopts` below).
+    "pytest-xdist>=3.8.0",
 ]
 # The runnable example only (examples/conversation_demo/app.py); kept out of core deps.
 # Run with: uv run --group demo python -m examples.conversation_demo.app
@@ -73,6 +75,12 @@ testpaths = ["tests"]
 # Put the repo root on sys.path so tests can import the `examples` package (the runnable demo);
 # `wica` itself resolves via the installed editable package, not this.
 pythonpath = ["."]
+# The fast tier runs in parallel (pytest-xdist), as reachy-mini-bridge's and naoqi-sim's: it is
+# sleep-bound (coalescing windows, step loops and `wait_until` deadlines run in real time) more
+# than compute-bound. Capped at eight: each worker is a whole interpreter. `logical` counts
+# logical cores, as `auto` may count physical ones. `-n 0` runs it serially.
+# tests-e2e/conftest.py forces that tier serial. See specs/testing.md ("Tooling").
+addopts = ["-n", "logical", "--maxprocesses", "8"]
 
 [tool.pyright]
 include = ["src", "tests", "tests-e2e"]

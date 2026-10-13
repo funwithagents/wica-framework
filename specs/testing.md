@@ -2,6 +2,7 @@
 code:
   - pyproject.toml
   - tests-e2e/support.py
+  - tests-e2e/conftest.py
   - tests-e2e/e2e.anthropic.config.json
   - tests-e2e/e2e.openai.config.json
   - tests-e2e/e2e.huggingface-hub.config.json
@@ -36,6 +37,8 @@ Tests split into two directories, and the split is structural — a directory bo
 
 - **`tests/` is the normal dev loop.** Fast, deterministic, no real network, no API key. `pyproject.toml`'s `testpaths = ["tests"]` points the default `uv run pytest` here, so this is what runs on every change and what any contributor or CI can run with zero credentials.
 - **`tests-e2e/` is opt-in.** It is the **full-loop tier** — tests that exercise the Agent's whole step loop. Its *live-provider* tests call a real LLM (network, an API key, non-deterministic output, and it costs money), so the tier is deliberately *not* collected by the default run. Because `testpaths` already excludes it, no pytest marker or `--run-e2e` flag is needed: the physical separation is the whole mechanism. Run it explicitly (`uv run pytest tests-e2e`). One kind of test here is the exception to "network + non-deterministic": the **always-run scripted-fake flows** (below) need no key and never skip.
+
+**On CI** ([ci.md](ci.md)) the split carries over as jobs: the fast tier on every pull request and every supported platform, the scripted-fake flows on every pull request, the live set on pushes to `main` with the repository's keys.
 
 The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_command.py`, `test_config.py`, `test_content.py`, `test_events.py`, `test_fake_model.py`, `test_wica.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_wica.py`, `test_fake_flows.py`) rather than modules. The runnable **example** is tested the same way, one tier per grain: its presenter logic in the fast tier (`tests/test_conversation_demo.py`) and its whole wiring end-to-end in the full-loop tier (`tests-e2e/test_example_flow.py`, an always-run scripted-fake flow — see below). Both are governed by [conversation-demo.md](conversation-demo.md), so they sit outside the `src/wica`-module-mirroring rule; importing the `examples` package under pytest is what `pyproject.toml`'s `pythonpath = ["."]` enables.
 
@@ -85,12 +88,12 @@ The provider/extra surface these configs select from is specced in [config.md](c
 
 ## Tooling
 
-- **`pytest`** is the runner; **`ruff`** lints/formats; **`pyright`** (`standard` mode) type-checks. All three are the gate after any change — lint, type check, and tests must pass before work is considered done (see [AGENTS.md](../AGENTS.md), "Verification").
+- **`pytest`** is the runner, with **`pytest-xdist`** running the fast tier in parallel: `addopts = ["-n", "logical", "--maxprocesses", "8"]` in `pyproject.toml`, as reachy-mini-bridge and naoqi-sim do. The tier is sleep-bound (coalescing windows, step loops and `wait_until` deadlines run in real time), so spreading it over workers cuts a laptop run from about 43 s to about 17 s; the floor is the slowest single test. `-n 0` runs it serially. Each worker is its own interpreter, so per-test isolation (a fresh `World` and loop per test, the OpenTelemetry in-memory exporter) holds per worker. A test that sends a second trigger must wait for the first reaction to **end** (`not agent._busy`), not just for the model call — under parallel load a trigger arriving while the step is in flight is dropped by design ([agent.md](agent.md)). **`tests-e2e/` stays serial:** its `conftest.py` sets `numprocesses = 0` in `pytest_cmdline_main`, since parallel live cases would only hit provider rate limits and the scripted-fake flows take seconds; it loads only when that tier is collected, so the fast tier keeps its workers.
+- **`ruff`** lints/formats; **`pyright`** (`standard` mode) type-checks. All three are the gate after any change — lint, type check, and tests must pass before work is considered done (see [AGENTS.md](../AGENTS.md), "Verification").
 - **`pyright` covers test code too:** its `include` is `src`, `tests`, and `tests-e2e`, so tests are type-checked alongside the library rather than being a blind spot.
 - The concrete commands (`uv run ruff check .`, `uv run pyright`, `uv run pytest`, and the sourced-env e2e invocations) live in [AGENTS.md](../AGENTS.md).
 
 ## Open questions
 
-1. **CI wiring.** Nothing here sets up continuous integration. The default `tests/` tier is CI-ready (deterministic, no credentials), and the e2e tier is designed to skip cleanly when keys are absent — but actually running either on a hosted runner, and scheduling the credentialed e2e tier with secrets, is unbuilt. Today all testing is a local, manual command.
-2. **e2e assertion depth.** The live tests assert coarse behavior (non-empty output, a Command was invoked). Whether richer live assertions are worth their flakiness/cost — or whether a recorded-cassette approach (replaying captured provider responses in the fast tier) would cover more without the live tax — is unexplored.
-3. **Provider matrix growth.** `PROVIDER_CONFIGS` lists the three providers WICA supports today. As providers are added (or the extras change), the parametrization grows with them; there's no automated check that every supported provider has a committed e2e config, so that pairing is kept honest by hand for now.
+1. **e2e assertion depth.** The live tests assert coarse behavior (non-empty output, a Command was invoked). Whether richer live assertions are worth their flakiness/cost — or whether a recorded-cassette approach (replaying captured provider responses in the fast tier) would cover more without the live tax — is unexplored.
+2. **Provider matrix growth.** `PROVIDER_CONFIGS` lists the three providers WICA supports today. As providers are added (or the extras change), the parametrization grows with them; there's no automated check that every supported provider has a committed e2e config — nor that CI's `live` job maps a secret for each ([ci.md](ci.md) "Secrets") — so that pairing is kept honest by hand for now.

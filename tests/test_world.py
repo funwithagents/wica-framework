@@ -4,7 +4,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -775,6 +775,26 @@ def test_get_prompt_entries_omits_excluded_and_orders_by_timestamp(world: World)
     world.update("first", "1-updated")
     entries = world.get_prompt_entries()
     assert [e.key for e in entries] == ["second", "first"]
+
+
+def test_prompt_order_breaks_timestamp_ties_by_update_order(
+    world: World, monkeypatch: pytest.MonkeyPatch
+):
+    # A coarse clock (Python 3.12 on Windows ticks every ~15.6 ms) stamps close updates with
+    # the same timestamp; freezing the World's clock makes every version tie, so only the
+    # tie-breaker decides the order — the most recently updated entry still comes last.
+    frozen = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr("wica.world.now", lambda: frozen)
+    world.register("a", str, serialize_fn=identity_serialize, include_in_prompt=True)
+    world.register("b", str, serialize_fn=identity_serialize, include_in_prompt=True)
+
+    world.update("b", "1")
+    world.update("a", "1")
+    assert [e.key for e in world.get_prompt_entries()] == ["b", "a"]
+    assert [e.key for e, _ in world.get_prompt_snapshot()] == ["b", "a"]
+
+    world.update("b", "2")
+    assert [e.key for e in world.get_prompt_entries()] == ["a", "b"]
 
 
 def test_render_full_prompt_omits_excluded_entries(world: World):

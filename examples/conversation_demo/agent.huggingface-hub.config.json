@@ -1,8 +1,9 @@
 {
   "agent": {
     "provider": "huggingface-hub",
-    "model": "Qwen/Qwen2.5-72B-Instruct",
-    "hf_provider": "deepinfra",
+    "model": "openai/gpt-oss-120b",
+    "hf_provider": "cerebras",
+    "context_window": 128000,
     "api_key_env": "WICA_HF_TOKEN",
     "system_prompt_file": "prompts/wica.md"
   }
