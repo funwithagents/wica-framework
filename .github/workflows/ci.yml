@@ -3,7 +3,7 @@
 # Four jobs side by side, none waiting on another: `check` (lint, format, types) on Linux;
 # `fast-tier` (the default `pytest`) once per supported platform — Linux (x86_64 and arm64),
 # macOS (arm64), Windows — since that is where a platform's own event loop, clocks and paths meet the World's shared
-# loop and its threads; `full-loop-fake` (the always-run, key-less scripted-fake flows of
+# loop and its threads; `e2e-fake` (the always-run, key-less scripted-fake flows of
 # tests-e2e/) on Linux; and `live` (the provider-parametrized live set) on Linux, only on a
 # push to main or a manual run — never on a pull request, since every case is a paid call.
 # The live set is plain HTTP to each provider, so one platform covers it.
@@ -67,8 +67,8 @@ jobs:
       - name: Fast tier
         run: uv run pytest
 
-  full-loop-fake:
-    name: full-loop tier, scripted fake
+  e2e-fake:
+    name: e2e tier, scripted fake
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -83,7 +83,7 @@ jobs:
         run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs
 
   live:
-    name: full-loop tier, live providers
+    name: e2e tier, live providers
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15

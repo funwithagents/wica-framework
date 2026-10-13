@@ -10,7 +10,7 @@ tests:
 
 ## Purpose
 
-Run the verification gate of [AGENTS.md](../AGENTS.md) — lint, type check, tests — on GitHub's hosted runners for every pull request and every push to `main`, so it is a machine's verdict on each change and not only a local command. CI runs what the tiers of [testing.md](testing.md) are designed to run: the fast tier on every supported platform, the always-run scripted-fake flows of the full-loop tier, and — on `main` only — the live provider set with the repository's keys. Like [testing.md](testing.md) this is a cross-cutting practice, not a runtime concept: nothing here ships in the library, and the one file that implements it is the workflow.
+Run the verification gate of [AGENTS.md](../AGENTS.md) — lint, type check, tests — on GitHub's hosted runners for every pull request and every push to `main`, so it is a machine's verdict on each change and not only a local command. CI runs what the tiers of [testing.md](testing.md) are designed to run: the fast tier on every supported platform, the always-run scripted-fake flows of the e2e tier, and — on `main` only — the live provider set with the repository's keys. Like [testing.md](testing.md) this is a cross-cutting practice, not a runtime concept: nothing here ships in the library, and the one file that implements it is the workflow.
 
 ## Decided
 
@@ -35,7 +35,7 @@ WICA supports **macOS (arm64), Linux (x86_64 and arm64) and Windows (x86_64)** (
 
 `ruff check .`, `ruff format --check .` and `pyright` give the same verdict on every platform, so they run once, on Linux. `ruff format --check .` is the CI form of the `ruff format .` the AGENTS.md command list runs (Ruff formats no Markdown here, so `.` is safe). **Gradio's type stubs come first:** Gradio's wheel ships no `.pyi` for its components — `component_meta` writes them into site-packages the first time `gradio` is imported — so on a fresh venv pyright cannot see generated event methods (`Timer.tick`, `Dropdown.change`) and reports errors on the contrib. The job imports `gradio` once before `pyright`; the same applies to a fresh local clone (see [AGENTS.md](../AGENTS.md) "Commands").
 
-### The full-loop tier, split by its two kinds
+### The e2e tier, split by its two kinds
 
 [testing.md](testing.md) gives `tests-e2e/` two kinds of test with opposite costs, and CI treats them as two jobs, selected **by file** (not `-k`, which matches on test names and would drift as tests are added):
 
@@ -50,7 +50,7 @@ One file, `.github/workflows/ci.yml`. It triggers on `pull_request`, on `push` t
 |---|---|---|
 | `check` | every event | `uv sync --locked`, then `ruff check .`, `ruff format --check .`, `pyright` |
 | `fast-tier` | every event | `uv sync --locked`, then `pytest` (the default `tests/` tier) — **once per platform**: `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `windows-2025` |
-| `full-loop-fake` | every event | `uv sync --locked`, then `pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs` |
+| `e2e-fake` | every event | `uv sync --locked`, then `pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs` |
 | `live` | push to `main`, `workflow_dispatch` | `uv sync --locked`, then `pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py -rs` with the provider keys mapped from secrets |
 
 None waits on another, so a run takes as long as its slowest job. Every job carries a `timeout-minutes` well under GitHub's default, so a hung loop fails in minutes, not hours.
@@ -60,11 +60,11 @@ None waits on another, so a run takes as long as its slowest job. Every job carr
 - **One repository secret per committed e2e config, under the config's own `api_key_env` name** — `WICA_ANTHROPIC_API_KEY`, `WICA_OPENAI_API_KEY`, `WICA_HF_TOKEN`, `WICA_GEMINI_API_KEY`, `WICA_MISTRAL_API_KEY` (the table in [AGENTS.md](../AGENTS.md) "Live/e2e tests") — mapped onto the same environment variable in the `live` job's test step only.
 - **No secret is required.** A secret the repository does not hold comes out as an empty variable, which `resolve_api_key` treats as unset (`MissingEnvError`), so that provider's cases **skip** — the job stays green with any subset of keys, none included. `-rs` lists the skips in the job log; a provider that should have run and skipped is a missing or misnamed secret.
 - **Adding a provider** adds a config to `PROVIDER_CONFIGS`, a row to the AGENTS.md key table, and a line to the `live` job's `env` — the same hand-kept pairing [testing.md](testing.md) open question 2 already notes.
-- **Required status checks on `main`** are `check`, the four `fast-tier` entries and `full-loop-fake` — the jobs that run on a pull request. `live` cannot be required (it never runs on one). Requiring them is a repository setting on GitHub, outside the repo.
+- **Required status checks on `main`** are `check`, the four `fast-tier` entries and `e2e-fake` — the jobs that run on a pull request. `live` cannot be required (it never runs on one). Requiring them is a repository setting on GitHub, outside the repo.
 
 ## Relationship to the other specs
 
-- **[testing.md](testing.md):** the two tiers, the fake/live split inside the full-loop tier and the skip-without-a-key rule CI runs on. CI is the hosted run of that strategy, with no rule of its own about what a test does.
+- **[testing.md](testing.md):** the two tiers, the fake/live split inside the e2e tier and the skip-without-a-key rule CI runs on. CI is the hosted run of that strategy, with no rule of its own about what a test does.
 - **[project.md](project.md):** the supported platforms CI's matrix verifies, the `dev` group the sync installs, `.github/workflows/` in the repo shape.
 - **[config.md](config.md):** `api_key_env` and the empty-is-unset resolution that make a missing secret a skip.
 - **[AGENTS.md](../AGENTS.md):** the verification gate CI automates and the key-env table the secrets mirror.
