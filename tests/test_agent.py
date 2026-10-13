@@ -1328,7 +1328,9 @@ def test_noop_renders_as_native_call_with_plain_ack(loop, world, sink):
     agent.start()
 
     world.update("input", "first")
-    wait_until(lambda: len(model.calls) == 1)
+    # Wait for the reaction to end, not just the model call: a trigger arriving while the step
+    # is still in flight is dropped (single-in-flight), and the second step would never run.
+    wait_until(lambda: len(model.calls) == 1 and not agent._busy)
 
     world.update("input", "second")
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
@@ -1355,11 +1357,17 @@ def test_noop_renders_as_native_call_with_plain_ack(loop, world, sink):
 
 
 def _step(
-    model: ProgrammableChatModel, world: World, key: str, value: str, n_calls: int
+    agent: Agent,
+    model: ProgrammableChatModel,
+    world: World,
+    key: str,
+    value: str,
+    n_calls: int,
 ) -> None:
-    """Trigger a step by updating `key` and wait until the model has been called n_calls times."""
+    """Trigger a step by updating `key` and wait until the model has been called n_calls times
+    and the reaction has ended — so the next `_step`'s trigger is not dropped as in-flight."""
     world.update(key, value)
-    wait_until(lambda: len(model.calls) >= n_calls)
+    wait_until(lambda: len(model.calls) >= n_calls and not agent._busy)
 
 
 def _rendered_user_text(model: ProgrammableChatModel, call_index: int) -> str:
@@ -1381,11 +1389,11 @@ def test_history_renders_an_unregistered_entry_from_its_captured_serializer(
     world.register("mood", str, serialize_fn=lambda v, p: [TextPart(f"mood={v}")])
     agent.start()
     world.update("mood", "happy")
-    _step(model, world, "speech", "one", 1)
+    _step(agent, model, world, "speech", "one", 1)
     assert "mood=happy" in _rendered_user_text(model, 0)
 
     world.unregister("mood")  # would KeyError at render time before D3
-    _step(model, world, "speech", "two", 2)
+    _step(agent, model, world, "speech", "two", 2)
     # observation 1 still renders as it did, from its captured serializer
     assert "mood=happy" in _rendered_user_text(model, 1)
     agent.stop()
@@ -1402,13 +1410,13 @@ def test_reregistering_a_key_does_not_rewrite_earlier_observations(loop, world, 
     world.register("mood", str, serialize_fn=lambda v, p: [TextPart(f"OLD:{v}")])
     agent.start()
     world.update("mood", "happy")
-    _step(model, world, "speech", "one", 1)
+    _step(agent, model, world, "speech", "one", 1)
     first_render = _rendered_user_text(model, 0)
 
     world.unregister("mood")
     world.register("mood", str, serialize_fn=lambda v, p: [TextPart(f"NEW:{v}")])
     world.update("mood", "calm")
-    _step(model, world, "speech", "two", 2)
+    _step(agent, model, world, "speech", "two", 2)
     # The first observation is byte-identical to what step one sent (cache-stable prefix) …
     assert _rendered_user_text(model, 1).startswith(first_render.split("</entry>")[0])
     assert "OLD:happy" in _rendered_user_text(model, 1)
@@ -1433,7 +1441,7 @@ def test_application_entry_under_agent_command_prefix_uses_its_own_serializer(
     )
     agent.start()
     world.update("agent:command:mine", "x")
-    _step(model, world, "speech", "one", 1)
+    _step(agent, model, world, "speech", "one", 1)
     assert "MINE:x" in _rendered_user_text(model, 0)  # not "(no command)" / not a crash
     agent.stop()
 
@@ -2524,13 +2532,13 @@ def test_observation_leaves_out_entries_whose_serializer_returns_empty(
     world.register("mood", str, serialize_fn=_hide_when_none)
     agent.start()
 
-    _step(model, world, "speech", "one", 1)
+    _step(agent, model, world, "speech", "one", 1)
     first = _rendered_user_text(model, 0)
     assert 'key="speech"' in first
     assert "mood" not in first  # no hollow <entry key="mood"> block either
 
     world.update("mood", "happy")
-    _step(model, world, "speech", "two", 2)
+    _step(agent, model, world, "speech", "two", 2)
     second = _rendered_user_text(model, 1)
     assert 'key="mood"' in second
     assert "mood=happy" in second
@@ -2549,7 +2557,7 @@ def test_all_omitted_observation_renders_as_a_placeholder_user_message(
     world.register("silent", str, serialize_fn=lambda v, p: [], triggers_llm_call=True)
     agent.start()
 
-    _step(model, world, "silent", "x", 1)
+    _step(agent, model, world, "silent", "x", 1)
     humans = [m for m in model.calls[0] if isinstance(m, HumanMessage)]
     assert len(humans) == 1
     assert humans[0].content == [{"type": "text", "text": _EMPTY_OBSERVATION}]
@@ -2557,7 +2565,7 @@ def test_all_omitted_observation_renders_as_a_placeholder_user_message(
         model.calls[0][1], HumanMessage
     )  # a user turn follows the system prompt
 
-    _step(model, world, "silent", "y", 2)
+    _step(agent, model, world, "silent", "y", 2)
     assert _no_consecutive_human_messages(model.calls[1])
     humans = [m for m in model.calls[1] if isinstance(m, HumanMessage)]
     assert [m.content for m in humans] == [[_EMPTY_OBSERVATION_BLOCK]] * 2
