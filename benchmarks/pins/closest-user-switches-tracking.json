@@ -1,0 +1,76 @@
+{
+  "name": "closest-user-switches-tracking",
+  "description": "The demo persona's tracking rule, made measurable: a new closest user is tracked; nobody close stops the tracking.",
+  "requires": {
+    "inputs": [
+      "closest_user"
+    ],
+    "commands": [
+      "switch_user_tracking"
+    ]
+  },
+  "timeout_s": 60,
+  "checks": [
+    "no_noop_on_input",
+    "no_failed_reactions",
+    "no_colliding_cancel"
+  ],
+  "params": {},
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "set_closest_user",
+          "args": {
+            "value": "u2"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "switch_user_tracking",
+            "where": {
+              "user_id": "u2"
+            },
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_closest_user",
+          "args": {
+            "value": ""
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "switch_user_tracking",
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "finish",
+          "args": {
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

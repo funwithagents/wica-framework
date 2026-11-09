@@ -1,0 +1,50 @@
+{
+  "name": "direct-question",
+  "description": "A direct question is answered, not noop'ed.",
+  "requires": {
+    "inputs": [
+      "speech_input"
+    ],
+    "output_command": true
+  },
+  "timeout_s": 60,
+  "checks": [
+    "answers_each_input",
+    "no_noop_on_input",
+    "no_failed_reactions",
+    "no_colliding_cancel"
+  ],
+  "params": {},
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "What can you do?"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "finish",
+          "args": {
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

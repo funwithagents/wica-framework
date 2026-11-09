@@ -20,6 +20,7 @@ _NON_CONCEPT_MODULES = {
     "contrib/__init__.py",
     "contrib/gradio/__init__.py",
     "testing/__init__.py",
+    "benchmark/__init__.py",
 }
 
 

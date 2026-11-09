@@ -1,0 +1,234 @@
+{
+  "_comment": "WICA demo benchmark matrix (specs/benchmark.md, 'The matrix'). One entry per model under test; 'agent' is the config's agent block, merged over 'agent_defaults' (the demo's persona, so every row drives the same robot). Model ids as committed in the demo's agent.<provider>.config.json files and verified by the live e2e tier. Optional per-entry keys: tags (filter with --tags / --exclude-tags; 'default' = the demo's committed model for that provider, 'api' = hosted, 'fixture' = no network, scripted), enabled (false = opt-in with --include-disabled), requires_env (extra env vars that gate the entry), notes. Add a row per model to compare; keep one 'default' per provider.",
+  "agent_defaults": {
+    "system_prompt_file": "../examples/conversation_demo/prompts/wica.md"
+  },
+  "entries": [
+    {
+      "id": "fake",
+      "agent": {
+        "provider": "fake",
+        "model": "scripted",
+        "system_prompt": "You are a test robot.",
+        "model_kwargs": {
+          "delay_s": 0,
+          "script": [
+            {
+              "tool_calls": [
+                {
+                  "name": "say",
+                  "args": {
+                    "text": "Hello! Nice to meet you."
+                  }
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "noop",
+                  "args": {}
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "say",
+                  "args": {
+                    "text": "I can chat with you, dance and show emotions."
+                  }
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "noop",
+                  "args": {}
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "say",
+                  "args": {
+                    "text": "Once upon a time a little robot named Bolt wanted to dance. Every night it practiced alone in the workshop. Its first steps were clumsy and it fell many times. Slowly the moves became smooth and joyful. One day it danced for everyone and they cheered."
+                  },
+                  "id": "story"
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "cancel_command",
+                  "args": {
+                    "call_id": "story"
+                  }
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "say",
+                  "args": {
+                    "text": "Okay, I'll stop."
+                  }
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "noop",
+                  "args": {}
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "say",
+                  "args": {
+                    "text": "Hi Alex, nice to meet you."
+                  }
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "say",
+                  "args": {
+                    "text": "Yes!"
+                  }
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "noop",
+                  "args": {}
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "noop",
+                  "args": {}
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "say",
+                  "args": {
+                    "text": "Goodbye! See you soon."
+                  }
+                }
+              ]
+            },
+            {
+              "tool_calls": [
+                {
+                  "name": "noop",
+                  "args": {}
+                }
+              ]
+            }
+          ],
+          "default": {
+            "tool_calls": [
+              {
+                "name": "noop",
+                "args": {}
+              }
+            ]
+          }
+        }
+      },
+      "enabled": false,
+      "tags": [
+        "fixture"
+      ],
+      "notes": "The key-less path: a scripted fake that plays the whole `conversation` session (one scripted model call per step, the long story cancelled by id), so `conversation` passes and `commands` does not. Harness floor; opt in with --only fake --include-disabled."
+    },
+    {
+      "id": "anthropic/claude-haiku-4-5",
+      "agent": {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5",
+        "api_key_env": "WICA_ANTHROPIC_API_KEY"
+      },
+      "tags": [
+        "api",
+        "default"
+      ],
+      "notes": "The demo's committed default (agent.config.json)."
+    },
+    {
+      "id": "openai/gpt-4o",
+      "agent": {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_key_env": "WICA_OPENAI_API_KEY"
+      },
+      "tags": [
+        "api",
+        "default"
+      ],
+      "notes": "agent.openai.config.json."
+    },
+    {
+      "id": "huggingface-hub/gpt-oss-120b@cerebras",
+      "agent": {
+        "provider": "huggingface-hub",
+        "model": "openai/gpt-oss-120b",
+        "hf_provider": "cerebras",
+        "context_window": 128000,
+        "api_key_env": "WICA_HF_TOKEN"
+      },
+      "tags": [
+        "api",
+        "default"
+      ],
+      "notes": "agent.huggingface-hub.config.json: the Hub's dedicated construction path, routed to Cerebras."
+    },
+    {
+      "id": "google-genai/gemini-3.8-flash",
+      "agent": {
+        "provider": "google_genai",
+        "model": "gemini-3.8-flash",
+        "context_window": 1048576,
+        "api_key_env": "WICA_GEMINI_API_KEY",
+        "model_kwargs": {
+          "thinking_level": "low"
+        }
+      },
+      "tags": [
+        "api",
+        "default"
+      ],
+      "notes": "agent.google-genai.config.json."
+    },
+    {
+      "id": "mistralai/ministral-3b-latest",
+      "agent": {
+        "provider": "mistralai",
+        "model": "ministral-3b-latest",
+        "api_key_env": "WICA_MISTRAL_API_KEY"
+      },
+      "tags": [
+        "api",
+        "default"
+      ],
+      "notes": "agent.mistralai.config.json."
+    }
+  ]
+}

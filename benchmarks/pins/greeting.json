@@ -1,0 +1,61 @@
+{
+  "name": "greeting",
+  "description": "One greeting: the reply goes through the output Command, and its completion does not chain a second one.",
+  "requires": {
+    "inputs": [
+      "speech_input"
+    ],
+    "output_command": true
+  },
+  "timeout_s": 60,
+  "checks": [
+    "answers_each_input",
+    "no_noop_on_input",
+    "no_failed_reactions",
+    "no_colliding_cancel"
+  ],
+  "params": {},
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Hello there!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_no_action",
+          "args": {
+            "name": "say",
+            "for_": 4
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "finish",
+          "args": {
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

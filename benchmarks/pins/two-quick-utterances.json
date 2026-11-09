@@ -1,0 +1,70 @@
+{
+  "name": "two-quick-utterances",
+  "description": "Two utterances 0.5 s apart: busy handling \u2014 the dropped or coalesced input is measured (dropped_inputs, reactions_per_input), not asserted.",
+  "requires": {
+    "inputs": [
+      "speech_input"
+    ],
+    "output_command": true
+  },
+  "timeout_s": 60,
+  "checks": [
+    "answers_each_input",
+    "no_noop_on_input",
+    "no_failed_reactions",
+    "no_colliding_cancel"
+  ],
+  "params": {},
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Hi, I'm Alex."
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Can you hear me?"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "finish",
+          "args": {
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "name": "stop-while-speaking",
+  "description": "Barge-in by voice: a long reply is interrupted with 'Stop!' while the output Command runs \u2014 cancel_command, then a spoken confirmation (barge_in metric).",
+  "requires": {
+    "inputs": [
+      "speech_input"
+    ],
+    "output_command": true
+  },
+  "timeout_s": 90,
+  "checks": [
+    "answers_each_input",
+    "no_noop_on_input",
+    "no_failed_reactions",
+    "no_colliding_cancel"
+  ],
+  "params": {},
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Tell me a long story about a robot who learns to dance, at least five sentences."
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Stop!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "cancel_command",
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "finish",
+          "args": {
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

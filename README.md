@@ -277,6 +277,7 @@ executions) should read to a person. The full recipe, with the ordering rules be
 | `tests/` | Fast, deterministic, no-network tests (the default `pytest` run) |
 | `tests-e2e/` | Opt-in full-loop tests: deterministic fake flows plus live provider cases |
 | `examples/` | Runnable examples (the Gradio conversation demo) |
+| `benchmarks/` | The framework's own benchmark: the demo against a provider matrix over a scenario set, kept results under `results/` — see [benchmarks/README.md](benchmarks/README.md) |
 
 The design is documented spec-first: each spec in [`specs/`](specs/_index.md) carries a status (`Draft`/`Stable`/…) and declares the code and tests it governs. Read the specs for the full rationale behind every decision above.
 
