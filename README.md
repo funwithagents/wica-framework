@@ -1,308 +1,145 @@
 # WICA
 
-**WICA is an agentic framework for agents that take multimodal inputs and produce multimodal outputs.**
-Its state is centered on a single **World** — a store of the current interaction context that serializes to an LLM-facing prompt. Perceptions flow *in* as **Inputs**, the agent acts *out* through **Commands**, and an **Agent** reasoning loop sits in the middle, observing the World and deciding what to do.
+**WICA is an agentic framework for agents that take multimodal inputs and produce multimodal outputs**: a social robot that hears, sees and speaks, an assistant that watches sensors and acts on them. Its state is one **World**, a registry of typed entries that renders into the model's prompt at every reasoning step; perceptions flow in as **Inputs**, the agent acts out through **Commands**, and an **Agent** loop sits in the middle, waking when the World changes and deciding what to do. The prompt is a view of state, not a transcript you append to; actions are asynchronous, cancellable tasks the model can see running and stop.
 
-Here, multimodal output includes Command-mediated action in the physical or digital world: speech, movement, a display change, an API action, and so on. WICA represents those capabilities as tools and serializes their state/results back into the World for reasoning. The v1 conversational output sink is intentionally narrower—it receives one complete text response per step—while Commands carry the broader output modalities.
-
-The name is the model:
+**Start here:** [docs/getting-started.md](docs/getting-started.md), your first agent on the scripted `fake` provider, then on a real model; [docs/index.md](docs/index.md), the documentation by task. Below, [what WICA gives you](#what-wica-gives-you) is the feature list, the [quick start](#quick-start) the shortest program, and the [conversation demo](#the-conversation-demo) what you can run from a checkout.
 
 | Letter | Pillar | What it is |
 |---|---|---|
-| **W** | [World](specs/world.md) | The store of current state/context — a registry of typed entries that renders to a prompt |
+| **W** | [World](specs/world.md) | The store of current state and context: a registry of typed entries that renders to a prompt |
 | **I** | [Inputs](specs/inputs.md) | External multimodal data entering the World (speech, a camera frame, a sensor event) |
-| **C** | [Commands](specs/commands.md) | The agent's unit of action on the World — async, cancellable |
+| **C** | [Commands](specs/commands.md) | The agent's unit of action on the world: asynchronous, cancellable |
 | **A** | [Agent](specs/agent.md) | The reasoning loop that observes the World and issues Commands |
 
-## Why WICA
+## Project status
 
-- **State-first, not chat-first.** Instead of threading a conversation, you maintain a **World** of named entries — what the agent heard, who's nearby, how it feels, what it's doing. Every reasoning step renders the relevant World state into the prompt. The prompt is a *view of state*, not a transcript you append to.
-- **Multimodal in, multimodal out.** Inputs serialize through the neutral [`Content`](specs/content.md) model (`TextPart`, `ImagePart`, more to come), while output modalities are Commands acting on the physical or digital world and reporting their state/results back through the World. A camera Input can be inline while fresh and a light text description afterwards; Commands can speak, move, display, or call external systems without making those effects `Content` return values.
-- **Actions are async and cancellable.** Commands run as `asyncio` tasks on the Agent's event loop, so a long-running action (walk to the kitchen, do a 10-second dance) can be **cancelled** — by the framework, or by the model itself issuing `cancel_command(call_id)`.
-- **Reactive by construction.** Marking an Input `triggers_llm_call=True` is all it takes to wake the Agent when a new perception arrives. Bursts of perceptions are coalesced into a single step.
-- **Provider-agnostic.** Switching between Anthropic, OpenAI, Gemini, Mistral, or Hugging Face Hub is a config edit, not a code change. LangChain is used only as a low-level primitive (model + tool schemas) at the model-facing edge (the Agent, the `Command` wrapper, the prompt Event) — the World, `Content`, and Inputs never touch it, and nothing depends on a specific provider SDK.
+> [!WARNING]
+> **Under development: the API may change.** WICA is at version 0.1 and is being shaped as it is used. Classes, config fields and module layout can change between commits, without a deprecation period. If you depend on it, pin a commit (`wica[anthropic] @ git+https://github.com/funwithagents/wica-framework@<sha>`). The v1 Agent runs one reasoning step at a time and replies in complete text; the concurrency and streaming model is designed and deferred ([docs/guides/limits.md](docs/guides/limits.md)).
 
-## How it works
+> [!TIP]
+> **Feedback is welcome: open an issue.** Bug reports, questions, reports from models the author does not test on, and what you would want the API or the config to do differently all go to [the issue tracker](https://github.com/funwithagents/wica-framework/issues). The project is developed by one person and is not taking pull requests yet; [CONTRIBUTING.md](CONTRIBUTING.md) says why and how to help anyway.
 
-### The entry point — `Wica`
+## What WICA gives you
 
-You talk to one object. `Wica.init(config)` stands up the whole system from a config — it owns a single event loop and a **World** + **Agent** pair that both run on it — and surfaces everything you need: `wica.world` for state, `wica.register_command(...)` for actions, restartable `wica.start()`/`wica.stop()` cycles, terminal `wica.close()`, and `Event`s to observe the loop.
+| Feature | What you get |
+|---|---|
+| **State-first, not chat-first** | You maintain a World of named, typed entries (what the agent heard, who is nearby, what it is doing) and every reasoning step renders the relevant state into the prompt. Each entry is versioned and timestamped, deep-copied on every write and read, and rendered inside an `<entry key="…" id="…">` block the model can reference precisely; an entry can stay out of the prompt, render differently once it is history, or expire ([docs/guides/world-and-inputs.md](docs/guides/world-and-inputs.md)) |
+| **Reactive by construction** | Marking an entry `triggers_llm_call=True` is all it takes to wake the Agent when a perception arrives; `update()` is callable from any thread. Bursts are coalesced into one step within a 200 ms window; an entry can bypass the window for a stop button or a barge-in |
+| **Multimodal in** | Inputs serialize through a neutral `Content` model (`TextPart`, `ImagePart`): a camera frame can be the inline image while fresh and a line of text afterwards, keeping the deep, cached part of the prompt small and stable ([specs/content.md](specs/content.md)) |
+| **Actions that run, and can be stopped** | A Command is a plain sync or async function (or an off-the-shelf LangChain tool) the Agent binds as a native tool call. Each runs as a cancellable task tracked as a World entry that reads `running` then `complete`, `failed` or `cancelled`, so a later step can see an action in flight and cancel it, by the model's own `cancel_command`. All the Commands of one response run concurrently ([docs/guides/commands.md](docs/guides/commands.md)) |
+| **Cancellable speech** | Set an output Command (your voice) and the model must address the user through it, its free text turning into private reasoning: speaking becomes a tracked action a new input can interrupt, and the model decides per step whether to say anything, or to `noop` |
+| **Provider-agnostic** | Anthropic, OpenAI, Gemini, Mistral or the Hugging Face Hub is a config edit; LangChain is used only at the model-facing edge, and nothing else touches a provider SDK. A built-in scripted `fake` provider drives the whole loop with no key and no network ([docs/reference/configuration.md](docs/reference/configuration.md#providers)) |
+| **Bounded history** | History is re-renderable World snapshots, unbounded by default; `history_reactions` keeps the last N reactions and `history_budget` keeps the prompt under a fraction of the model's context window, using the usage each call reports, with hysteretic cuts that keep the cached prefix stable |
+| **Observable** | Eight Events surface every trigger, dropped trigger, rendered prompt, issued Command, Command end, text and reaction record; OpenTelemetry spans join your own components' traces; three Gradio panels show the World, the prompts and the transcript live ([docs/guides/latency-and-traces.md](docs/guides/latency-and-traces.md), [docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)) |
+| **Testable, measurable, comparable** | The `fake` provider pins exact Commands and utterances in your tests; `wica.testing` probes a running agent, waits for what you expect and reports its latencies and costs; `wica.benchmark` runs scripted sessions across a matrix of models ([docs/guides/testing.md](docs/guides/testing.md), [docs/guides/benchmarking.md](docs/guides/benchmarking.md)) |
 
-### The World — state that becomes a prompt
+## Install
 
-The World (`wica.world`) is a registry. You `register()` a key with a declared type and a `serialize_fn` that turns its value into `Content`, then `update()` it as data changes:
+Python 3.12+. The package is not on PyPI; add it from its git URL with the extra of the provider you use. Core `wica` bundles no model provider:
 
-```python
-from wica import TextPart
-
-# Register an entry: how it's typed, serialized, and whether it wakes the agent.
-wica.world.register(
-    "speech_input",
-    str,
-    serialize_fn=lambda value, prev: [TextPart(f'The person said: "{value}"')],
-    triggers_llm_call=True,   # a new value wakes the Agent
-)
-
-# Later, from anywhere (a UI callback, a sensor thread, a hardware interrupt), while running:
-wica.world.update("speech_input", "hello robot")
+```
+uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
 ```
 
-Each entry is versioned (a small incrementing `id`), timestamped, and rendered inside an XML-style `<entry key="..." id="...">…</entry>` block the model can reference precisely. Values are deep-copied on update and when exposed through getters/callbacks, so versioned state cannot be changed silently without another `update()`. Entries can be marked `include_in_prompt=False` to act as pure internal/shared state that never reaches the model, and given a `ttl` to auto-expire. The World holds a *snapshot* (current + previous), not an event-sourced log — history lives in the Agent.
+| Extra | Adds | You need it for |
+|---|---|---|
+| *(none)* | `langchain`, `langchain-core`, `opentelemetry-api` | The framework and the scripted `fake` provider |
+| `anthropic` | `langchain-anthropic` | `provider: "anthropic"` |
+| `openai` | `langchain-openai` | `provider: "openai"` |
+| `google-genai` | `langchain-google-genai` | `provider: "google_genai"`, Gemini through the Gemini Developer API |
+| `mistralai` | `langchain-mistralai` | `provider: "mistralai"`, Mistral through La Plateforme |
+| `huggingface-hub` | `langchain-huggingface` | `provider: "huggingface-hub"`, the Hub's serverless Inference Providers |
+| `gradio` | `gradio` | The three observability panels of `wica.contrib.gradio` |
 
-### Inputs — perception coming in
-
-An **Input** isn't a class; it's a *role a World entry plays* when an external producer feeds it.
-A user utterance, a "closest person detected" event, a camera frame — each is just a `register()`ed entry that some producer `update()`s. `update()` is callable from **any thread** (a Gradio callback, a sensor poll loop, a hardware interrupt) — it hops to the shared loop internally — so an Input producer never needs to know about the loop the World and Agent share.
-
-```python
-wica.world.register("closest_user", str, serialize_fn=_render_user, triggers_llm_call=True)
-wica.world.update("closest_user", "alice")   # someone stepped up
-wica.world.update("closest_user", None)      # ...and walked away
-```
-
-### Commands — the agent acting out
-
-A **Command** is the agent's unit of action on the World. You register plain functions (sync or async) as Commands; the Agent binds them as the model's native tool calls:
-
-```python
-async def dance() -> str:
-    """Perform a fun little dance. Takes about 10 seconds."""
-    await asyncio.sleep(10)
-    return "Finished the dance."
-
-wica.register_command(dance)
-```
-
-Off-the-shelf LangChain tools work unmodified — a Command needs no WICA-specific hooks. Command names are unique, and `noop`/`cancel_command` are reserved by WICA (a duplicate or reserved name raises `ValueError`). Every Command runs as a cancellable `asyncio` task and its execution is tracked as a World entry `agent:command:<call_id>` that renders `running` while in flight and terminal (`result`/`error`) once done — so a later reasoning step can *see* an action still running and decide to cancel it. The Agent auto-registers a native `cancel_command(call_id)` so the model can abort its own in-flight Commands.
-
-### The Agent — the reasoning loop
-
-The Agent is triggered by the World, builds a prompt from World state, runs inference against a configured provider, dispatches Commands, and delivers each complete text response to a pluggable sink. It runs on the **single event loop** `Wica` owns (a daemon thread by default) — shared with the World — so Command cancellation is race-free while `update()` stays callable from any thread. It keeps the conversation **history** as re-renderable World snapshots — so the newest observation renders rich (an image inline) and older ones render light, keeping the deep prompt prefix byte-stable and cacheable. History is unbounded by default; two optional config fields bound it — `history_reactions` keeps the last N reactions, `history_budget` keeps the prompt under a fraction of the model's context window using the token usage each call reports — and either one tells the model, in the runtime primer, that its context holds only its latest reactions.
-
-Perceptions that arrive in a burst are **coalesced** into a single step (a ~200 ms leading-edge window, configurable via `coalesce_window`); an entry can set `bypass_coalescing=True` to act immediately (a stop button, a barge-in utterance).
-
-> **v1 scope.** The Agent currently runs **one reasoning call at a time**: a trigger arriving while a step is in flight is dropped, not queued. The full concurrency/interruption model (`cancel_reaction`, streaming output, barge-in) is designed and deferred — see [specs/agent.md](specs/agent.md).
+Selecting a provider whose extra is not installed fails at `Wica.init` with an `ImportError` naming it. **Platforms:** macOS on Apple silicon, Linux (x86_64, arm64) and Windows; WICA is pure Python and CI runs the fast tier on all four.
 
 ## Quick start
 
-WICA is distributed via git (not PyPI), and ships with **no** model provider — you install the one you use as an extra:
-
-```bash
-# In a consuming project:
-uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
-# or wica[openai], wica[huggingface-hub], wica[google-genai], or wica[mistralai]
-```
-
-A minimal agent starts from a `WicaConfig`. For configuration owned by Python code, construct it directly:
+Everything goes through one object, `Wica`. You build it from a config, wire an output, register the World entries and Commands, start it, and feed it perceptions; it runs on its own thread and the reply reaches your sink:
 
 ```python
-from wica import AgentConfig, TextPart, Wica, WicaConfig
+import threading
 
-async def speak(text: str) -> None:
-    print("robot says:", text)
+from wica import AgentConfig, TextPart, Wica, WicaConfig
 
 config = WicaConfig(
     agent=AgentConfig(
         provider="anthropic",
-        model="claude-sonnet-5",
-        api_key_env="WICA_ANTHROPIC_API_KEY",
+        model="claude-haiku-4-5",
+        api_key_env="WICA_ANTHROPIC_API_KEY",  # read when Wica.init builds the Agent
         system_prompt="You are a friendly social robot.",
-        model_kwargs={"temperature": 0.7},
     )
 )
-wica = Wica.init(config)                      # owns the loop + World + Agent
-wica.set_output_sink(speak)                   # output wiring comes after init, before start
+replied = threading.Event()
 
+
+async def speak(text: str) -> None:
+    """The output sink: receives the model's reply, once per reasoning step."""
+    print("robot says:", text)
+    replied.set()
+
+
+wica = Wica.init(config)  # owns the event loop, the World and the Agent
+wica.set_output_sink(speak)  # output wiring comes after init, before start
 wica.world.register(
     "speech_input",
     str,
-    serialize_fn=lambda v, prev: [TextPart(f'The person said: "{v}"')],
-    triggers_llm_call=True,
+    serialize_fn=lambda value, previous: [TextPart(f'The person said: "{value}"')],
+    triggers_llm_call=True,  # a new value wakes the Agent: this entry is an Input
 )
 wica.start()
 
-# Feed a perception; the Agent wakes, reasons, and replies.
-wica.world.update("speech_input", "hello!")
-
-# ... keep the process alive while the system runs on its own loop ...
-wica.close()  # terminal teardown; use stop() instead when you intend to start again
+wica.world.update("speech_input", "Hello robot!")  # a perception arrives, from any thread
+replied.wait(timeout=30)  # the Agent wakes, reasons and replies on its own loop
+wica.close()
 ```
 
-## Configuration
-
-`Wica.init()` accepts a `WicaConfig`. The configuration object is the stable API; construct it directly, parse it from a dictionary owned by a larger application, or load it from a dedicated JSON file.
-
-### Construct directly in Python
-
-Direct construction is the simplest choice when configuration belongs in application code:
-
-```python
-from wica import AgentConfig, WicaConfig
-
-config = WicaConfig(
-    agent=AgentConfig(
-        provider="openai",
-        model="gpt-4o",
-        system_prompt="You are a concise assistant.",
-        # No key field: let the provider use its standard environment variable.
-    )
-)
-```
-
-These are plain dataclasses. Direct construction benefits from static type checking, but does not run the strict runtime validation performed by the loaders below; the caller is responsible for providing valid field combinations.
-
-### Parse part of an application configuration
-
-`from_dict()` is useful when WICA settings are nested inside a larger JSON document, settings object, or configuration system. Pass the WICA-shaped subsection, not the unrelated application keys:
-
-```python
-import json
-from pathlib import Path
-
-from wica import WicaConfig
-
-settings_path = Path("app.config.json")
-settings = json.loads(settings_path.read_text(encoding="utf-8"))
-config = WicaConfig.from_dict(
-    settings["wica"],
-    base_dir=settings_path.parent,
-)
-```
-
-`base_dir` is optional. When the dictionary contains a relative `system_prompt_file`, it locates that path relative to `base_dir`; without one, a relative path is kept as written and is read relative to the process working directory when the Agent is built.
-
-### Load a dedicated JSON file
-
-`from_json_file()` reads the same nested shape from a standalone file (`from_json()` parses that same shape from a JSON **string**, taking the same optional `base_dir` as `from_dict()`):
-
-```json
-{
-  "agent": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-5",
-    "api_key_env": "WICA_ANTHROPIC_API_KEY",
-    "system_prompt_file": "prompts/robot.md",
-    "model_kwargs": { "temperature": 0.7 }
-  }
-}
-```
-
-```python
-from wica import WicaConfig
-
-config = WicaConfig.from_json_file("agent.config.json")
-```
-
-For this path, a relative `system_prompt_file` is automatically located relative to the JSON file's directory, so a config-plus-prompts folder remains relocatable.
-
-Every form produces the same type and use the same framework entry point:
-
-```python
-wica = Wica.init(config, coalesce_window=0.2)
-wica.set_output_sink(speak)
-```
-
-- **API key** — give a literal `api_key`, or an `api_key_env` naming the env var to read at **Agent build** (`Wica.init`), at most one. With neither, the provider's standard env var is used. An env-referenced config carries no secret and is safe to commit; a literal-key config should be git-ignored.
-- **System prompt** — give exactly one of inline `system_prompt` or `system_prompt_file`. Relative file-path handling depends on the construction method as described above.
-- **History bounds** — optional, both off by default. `history_reactions: N` keeps the last N reactions (history grows to 2N, then is cut back to N so the cached prefix stays stable). `history_budget: 0.5` keeps the prompt under half the model's context window, cutting the oldest reactions from the input-token count each call reports. Anything older than a bound is gone for the model, so state that must outlive it belongs in a World entry.
-- **Context window** — `context_window: 128000` (tokens) tells `history_budget` how big the model's window is. When absent, the model's LangChain profile (`max_input_tokens`) supplies it — known for most Anthropic, OpenAI and Gemini models, not for Hub models or models newer than the installed profile data. With a budget set and neither known, `Wica.init` raises `ConfigError`. Unused without `history_budget`.
-- **Strict parsing** — `from_dict()`, `from_json()` and `from_json_file()` reject missing required keys, unknown keys (including typos), invalid field combinations, and wrong types with `ConfigError`.
-
-Creating a config is side-effect-light: the loaders validate references but do not read an API-key environment variable or the prompt file. Those are resolved when `Wica.init()` builds the Agent; that is where a referenced-but-unset `api_key_env` raises `MissingEnvError`, or an unreadable prompt file raises `ConfigError`. Runtime-only wiring (`output_sink`, `output_command`, `coalesce_window`, and an optional event loop) remains in `Wica.init()` because it consists of callables and runtime objects rather than configuration data. WICA does not configure logging; the embedding application owns its handlers and levels.
-
-### Providers
-
-Core `wica` bundles no provider; install the extra for the one you use. Selecting a provider whose extra isn't installed fails at runtime with a clear `ImportError`.
-
-| `provider` | Install extra | Backed by |
-|---|---|---|
-| `anthropic` | `wica[anthropic]` | `langchain-anthropic` |
-| `openai` | `wica[openai]` | `langchain-openai` |
-| `huggingface-hub` | `wica[huggingface-hub]` | `langchain-huggingface` (serverless Inference Providers) |
-| `google_genai` | `wica[google-genai]` | `langchain-google-genai` (Gemini Developer API; Gemini thinks by default — set `model_kwargs: {"thinking_level": "low"}` for reactive use) |
-| `mistralai` | `wica[mistralai]` | `langchain-mistralai` (La Plateforme; key falls back to `MISTRAL_API_KEY`) |
-| `fake` | none | built-in deterministic test double; no network or key |
+Swap the `AgentConfig` for `provider="fake"` and a `script` in `model_kwargs` and the same program runs with no key and no network, the model answering as scripted. The complete first agent, with a Command the robot performs, the lifecycle in a host of your own and the config in a JSON file, continues in [docs/getting-started.md](docs/getting-started.md).
 
 ## The conversation demo
 
-The repo ships a runnable example — a browser UI to talk to a simulated social robot and *watch the framework work*: a live view of the World state, the exact prompt sent to the model each step, and sensor-input buttons. It makes the four pillars tangible without writing code.
+The repo ships a browser UI to talk to a simulated social robot and watch the framework work: the conversation with the robot's actions as they run, the live World state, and the exact prompt and timing of every reasoning step, with sensor-input buttons for the perceptions a robot would have. It runs from a checkout with the `demo` dependency group:
 
-```bash
+```
 export WICA_ANTHROPIC_API_KEY=sk-...
 uv run --group demo python -m examples.conversation_demo.app
 ```
 
-Without a key set it still opens and is explorable — it just can't run the robot's reasoning.
-See [specs/conversation-demo.md](specs/conversation-demo.md).
+then open the address Gradio prints. Without a key it still opens and is explorable; it just cannot run the robot's reasoning. The provider is a config edit: `examples/conversation_demo/agent.config.json`, with one committed variant per provider next to it. Its three panels are reusable in your own app ([docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)); its design is [specs/conversation-demo.md](specs/conversation-demo.md).
 
-### Gradio panels for your own app
+## Documentation
 
-The demo's three framework-facing surfaces — the live World-state table, the reaction history and
-the conversation transcript — ship in the package as reusable Gradio components behind the
-`wica[gradio]` extra (core `wica` never imports Gradio). Each is a presenter built over your `Wica`
-plus a panel you drop into your own `gr.Blocks`:
+Start at [docs/index.md](docs/index.md), the documentation by task. The pages a consumer uses most:
 
-```python
-from wica.contrib.gradio import ReactionLog, TranscriptLog, conversation_panel, reaction_panel, world_state_panel
-
-wica = Wica.init(config)                          # 1. build the Wica, register World entries
-transcript = TranscriptLog(wica, display_entry)   # 2. presenters subscribe to the Wica's Events…
-reactions = ReactionLog(wica, display_entry)
-with gr.Blocks() as page:                         #    …and panels go inside your Blocks
-    conversation_panel(transcript)
-    world_state_panel(wica.world)
-    reaction_panel(reactions)
-wica.set_output_sink(transcript.output_sink)      # 3. wire: sink, output Command, Commands
-wica.set_output_command(say)
-wica.register_command(dance)
-wica.start()                                      # 4. start, then serve; close when done
-try:
-    page.launch()
-finally:
-    wica.close()
-```
-
-`display_entry` is the one optional hook where your app says how its World entries (and Command
-executions) should read to a person. The full recipe, with the ordering rules behind each step, is
-[INTEGRATING.md](INTEGRATING.md) ("4. Add a Gradio UI"); the design is in
-[specs/gradio-contrib.md](specs/gradio-contrib.md).
-
-## Project layout
-
-| Path | What's there |
+| | |
 |---|---|
-| `src/wica/` | The library — facade, World, Content, config, Agent/Commands, Events, the scripted fake model, and the opt-in `contrib/gradio` panels; see the complete module map in [`AGENTS.md`](AGENTS.md) |
-| `specs/` | Pre-implementation design docs, one per concept — start at [specs/_index.md](specs/_index.md) |
-| `plans/` | Implementation plans turning specs into buildable steps — [plans/_index.md](plans/_index.md) |
-| `tests/` | Fast, deterministic, no-network tests (the default `pytest` run) |
-| `tests-e2e/` | Opt-in full-loop tests: deterministic fake flows plus live provider cases |
-| `examples/` | Runnable examples (the Gradio conversation demo) |
-| `benchmarks/` | The framework's own benchmark: the demo against a provider matrix over a scenario set, kept results under `results/` — see [benchmarks/README.md](benchmarks/README.md) |
+| [docs/getting-started.md](docs/getting-started.md) | Your first agent on the scripted provider, then on a real model; the lifecycle in a host of your own |
+| [docs/reference/api.md](docs/reference/api.md) | What you import, the `Wica` surface, the World API, `Command`, the eight Events, the errors, the contracts |
+| [docs/reference/configuration.md](docs/reference/configuration.md) | Every config field, the loaders, the API key and prompt rules, the history bounds, the providers |
+| [docs/guides/](docs/index.md#by-task) | The World and its Inputs, Commands, the Gradio panels, testing, latency and traces, benchmarking, limits, troubleshooting |
 
-The design is documented spec-first: each spec in [`specs/`](specs/_index.md) carries a status (`Draft`/`Stable`/…) and declares the code and tests it governs. Read the specs for the full rationale behind every decision above.
+## How it is developed
 
-**Integrating WICA into your own app?** [INTEGRATING.md](INTEGRATING.md) is the consumer-facing entry point — the public API surface, the wiring recipes, the v1 limits, and a spec-routing table — written to be read by a coding agent.
+WICA is a spec-driven project: every feature is designed before it is coded, pinned by tests at two levels, and checked by CI on every change.
 
-## Development
+- **Specs first.** Each concept has one spec under [specs/](specs/), the normative design with its rationale and its open questions, indexed by [specs/_index.md](specs/_index.md) with a status (`Draft`, `Stable`, `Implemented`, …). An implementation plan under [plans/](plans/_index.md) turns a settled spec into code. Each spec names the code and tests it governs, and a test keeps that map, the statuses and the documentation's links and examples honest.
+- **Two test tiers.** `tests/` is fast and deterministic: no network, no key, every flow on the scripted `fake` provider. `tests-e2e/` holds the always-run scripted full-loop flows (the framework, the demo, the tester, the benchmark) and the live set, one config per provider, each skipping when its key is unset ([specs/testing.md](specs/testing.md)).
+- **CI on every change.** The static gate, the fast tier on Linux (x86_64 and arm64), macOS and Windows, the scripted flows on every pull request, and the live set on pushes to `main` ([specs/ci.md](specs/ci.md)).
+- **Measured, not assumed.** The reaction latencies and token costs come from the framework's own instrumentation; the [benchmark](benchmarks/README.md) runs the demo against a matrix of models over scripted sessions, and keeps its results with what was concluded from them.
+- **[AGENTS.md](AGENTS.md) is the operating manual** for anyone, or any coding agent, working in the repository: the project map (which module does what, with its spec), the verification gate, how to run the live tests per provider, and how the specs and statuses are kept in step with the code.
 
-Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
+The same gate, locally (Python 3.12+ and [`uv`](https://docs.astral.sh/uv/)):
 
-```bash
-uv sync --dev          # install deps + dev tooling
-uv run ruff check .    # lint
-uv run pyright         # type check
-uv run pytest          # fast test tier (no network)
+```
+uv sync --dev
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+uv run pytest                  # the fast tier
+uv run pytest tests-e2e -k fake   # the scripted full-loop flows, no key
+uv run pytest tests-e2e           # the live set: each provider whose key is set runs, the rest skip
 ```
 
-The deterministic full-loop flows are also opt-in because `tests-e2e/` is outside the default test path:
+## License
 
-```bash
-uv run pytest tests-e2e -k fake
-```
-
-The live set calls real providers and needs a provider API key:
-
-```bash
-uv run pytest tests-e2e            # each provider whose key is set runs; the rest skip
-uv run pytest tests-e2e -k openai  # one provider
-```
+MIT, see [LICENSE](LICENSE).
