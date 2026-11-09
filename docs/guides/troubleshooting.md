@@ -16,6 +16,7 @@ The checks for each symptom, in the order to make them, each pointing at the pag
 - **Was the trigger dropped?** A trigger arriving while a step is in flight is dropped, not queued. Subscribe to `wica.on_agent_trigger_dropped`, or look for the `dropped` line in the logs ([limits.md](limits.md)).
 - **Is it the window?** The first 200 ms after a trigger are the coalescing window; a reaction shorter than that is not possible by design ([world-and-inputs.md](world-and-inputs.md#bursts-are-coalesced)).
 - **Did the model answer with nothing?** A reaction whose `outcome` is `empty` (no text, no Command) or `noop` reaches no sink. Subscribe to `wica.on_agent_reaction_ended`, or open the reaction panel ([latency-and-traces.md](latency-and-traces.md)).
+- **Did the model call time out?** A call longer than `model_timeout` (10 s by default) is abandoned: the reaction's `outcome` is `model_timeout` and an ERROR log line names the deadline. A slow reasoning model needs a higher value ([../reference/configuration.md](../reference/configuration.md#the-agent-block)).
 - **Is the process still alive?** The system runs on a daemon thread: a script that reaches its end exits with it. Wait on an event the sink sets, or serve something, as in [../getting-started.md](../getting-started.md#your-first-agent).
 
 ## The model does not do what I expect

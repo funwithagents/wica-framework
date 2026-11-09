@@ -50,7 +50,7 @@ class TokenUsage:
     cache_read_tokens: int | None
 
 
-ReactionOutcome = Literal["ok", "empty", "model_error", "cancelled"]
+ReactionOutcome = Literal["ok", "empty", "model_error", "model_timeout", "cancelled"]
 
 
 @dataclass(frozen=True)

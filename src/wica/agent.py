@@ -574,6 +574,9 @@ class Agent:
         # Read for the wica.agent.model span's GenAI attributes (see specs/instrumentation.md).
         self._provider = config.provider
         self._model_name = config.model
+        # Deadline on one whole model call (None = none); see specs/agent.md ("Model-call
+        # deadline").
+        self._model_timeout = config.model_timeout
         self._world = world
         # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
         # here. The Agent runs its tasks/timers/cancellation on it but never starts or stops it. See
@@ -1022,7 +1025,7 @@ class Agent:
             trace_id, span_id = _span_ids(builder.span)
             # Emitted after _busy is cleared, so a subscriber sees "the Agent is free again" and
             # the record at the same moment. Fires for every reaction that started, whatever its
-            # outcome (ok/empty/model_error/cancelled) — see specs/instrumentation.md ("Layer 1").
+            # outcome (ok/empty/model_error/model_timeout/cancelled) — see specs/instrumentation.md ("Layer 1").
             self.on_reaction_ended.emit(
                 ReactionTrace(
                     reaction_id=builder.reaction_id,
@@ -1077,6 +1080,7 @@ class Agent:
         builder.prompt_ready_at = now()
 
         builder.model_started_at = now()
+        deadline = asyncio.timeout(self._model_timeout)
         try:
             with tracer().start_as_current_span(
                 "wica.agent.model",
@@ -1086,7 +1090,8 @@ class Agent:
                     "gen_ai.request.model": self._model_name,
                 },
             ) as model_span:
-                response = await self._bound_model.ainvoke(messages)
+                async with deadline:
+                    response = await self._bound_model.ainvoke(messages)
                 builder.usage = _token_usage(response)
                 if builder.usage is not None:
                     model_span.set_attributes(
@@ -1102,6 +1107,20 @@ class Agent:
             # step here frees the single-in-flight loop for the next trigger. CancelledError is a
             # BaseException and keeps propagating. See specs/agent.md ("Instrumentation").
             builder.model_ended_at = now()
+            if isinstance(exc, TimeoutError) and deadline.expired():
+                # Our deadline, not a provider's own TimeoutError: asyncio.timeout cancelled the
+                # call. Same ending, its own outcome. A stop() cancellation is not caught here. See
+                # specs/agent.md ("Model-call deadline").
+                builder.outcome = "model_timeout"
+                builder.error = (
+                    f"model call exceeded its {self._model_timeout:g} s deadline"
+                )
+                _logger.error(
+                    "%s; step abandoned (trigger: %s)",
+                    builder.error,
+                    _describe_entry(representative),
+                )
+                return
             builder.outcome = "model_error"
             builder.error = str(exc)
             _logger.exception(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -581,3 +582,28 @@ def test_is_running_polled_from_the_loop_thread_does_not_deadlock_stop():
     )
     assert wica.is_running is False
     wica.close()
+
+
+def test_model_timeout_from_config_bounds_the_model_call(wica_factory):
+    # The fake model sleeps 5 s per call; the config's 0.1 s deadline abandons the step.
+    config = fake_config([{"text": "too late"}], delay_s=5)
+    config = WicaConfig(agent=dataclasses.replace(config.agent, model_timeout=0.1))
+    sink = RecordingSink()
+    wica = wica_factory(config, output_sink=sink, coalesce_window=0)
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+
+    def on_reaction(t: ReactionTrace) -> None:
+        traces.append(t)
+        done.set()
+
+    wica.on_agent_reaction_ended.subscribe(on_reaction)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+
+    wica.world.update("speech", "hello")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert traces[0].outcome == "model_timeout"
+    assert sink.texts == []

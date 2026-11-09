@@ -93,7 +93,7 @@ class ReactionTrace:
     prompt_ready_at: datetime | None          # None when cancelled before rendering completed
     model_started_at: datetime | None         # None when cancelled before the model call started
     model_ended_at: datetime | None           # None when cancelled before the response
-    outcome: Literal["ok", "empty", "model_error", "cancelled"]
+    outcome: Literal["ok", "empty", "model_error", "model_timeout", "cancelled"]
     error: str | None
     text_length: int
     sink_duration: float | None               # seconds; None when no text
@@ -120,7 +120,7 @@ The Agent gains three `Event`s, surfaced on the facade like the existing ones ([
 
 | Event | Type | Emitted |
 |---|---|---|
-| `on_reaction_ended` / `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | **once at the end of every reaction that started**, whatever its outcome — a normal one, an empty response, a model error, a cancellation by `stop()`. Emitted from `_run_batch`'s `finally`, after `_busy` is cleared, so a subscriber sees "the Agent is free again" and the record at the same moment |
+| `on_reaction_ended` / `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | **once at the end of every reaction that started**, whatever its outcome — a normal one, an empty response, a model error, a model call past its deadline (`model_timeout`, see [agent.md](agent.md), "Model-call deadline"), a cancellation by `stop()`. Emitted from `_run_batch`'s `finally`, after `_busy` is cleared, so a subscriber sees "the Agent is free again" and the record at the same moment |
 | `on_trigger_dropped` / `wica.on_agent_trigger_dropped` | `Event[WorldEntry]` | once per trigger dropped because a reaction was in flight — the counterpart of `on_trigger`, which only fires for triggers a reaction observed. Replaces inference (pairing raw against observed triggers with a timeout) with a signal |
 | `on_command_ended` / `wica.on_agent_command_ended` | `Event[CommandTrace]` | once per dispatched Command when its terminal state is written, with the reaction that issued it. This is the generic "any Command finished" signal that [agent.md](agent.md) open question #5 asks for, without a broadcast World entry: a consumer no longer needs a per-`call_id` listener just to learn when and how a Command ended |
 

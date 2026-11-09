@@ -58,6 +58,7 @@ config = WicaConfig.from_json_file("agent.config.json")
 | `agent.hf_provider` | no | `huggingface-hub` only: the Hub backend that serves the model (`auto`, `fireworks-ai`, …). Default `auto` |
 | `agent.history_reactions` | no | A positive integer: keep the last N reactions in the prompt. Default unbounded. See [History bounds](#history-bounds) |
 | `agent.history_budget` | no | A number in `(0, 1]`: keep the prompt under this fraction of the model's context window. Default off. See [History bounds](#history-bounds) |
+| `agent.model_timeout` | no | Seconds one model call may take, the provider's retries included; past it the step is abandoned with the `model_timeout` outcome and the Agent is free for the next input. Default `10`; `null` removes the deadline. Raise it for a slow reasoning model. See [specs/agent.md](../../specs/agent.md), "Model-call deadline" |
 | `agent.context_window` | no | The context window in tokens, for `history_budget`; absent, the model's LangChain profile supplies it. Unused without a budget |
 
 Runtime values that are callables or runtime objects are not configuration and stay on `Wica.init` and the wiring calls: the coalescing window (`Wica.init(config, coalesce_window=0.2)`), an injected event loop (`loop=`), the output sink and output Command (`set_output_sink`, `set_output_command`).

@@ -89,8 +89,8 @@ def render_messages(messages: list[BaseMessage]) -> str:
 def render_reaction_trace(trace: ReactionTrace) -> str:
     """The reaction's ReactionTrace as readable text: outcome, the derived measures (only the ones
     whose underlying stamp exists — a cancelled reaction has no model_latency), token usage,
-    dispatched commands, noop, the error on a model_error outcome, and the OpenTelemetry trace id
-    when an SDK is installed. See specs/instrumentation.md ("Layer 1", "Metrics")."""
+    dispatched commands, noop, the error on a model_error or model_timeout outcome, and the
+    OpenTelemetry trace id when an SDK is installed. See specs/instrumentation.md ("Layer 1", "Metrics")."""
     lines = [f"reaction {trace.reaction_id} — {trace.outcome}"]
     latency = reaction_latency(trace)
     if latency is not None:
