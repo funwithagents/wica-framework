@@ -1,210 +1,30 @@
 {
   "name": "commands",
-  "description": "The demo's own actions in one session, the user waiting for idle between turns: a background emotion change while the robot is still speaking, a dance stopped two seconds in, the closest user appearing and leaving. The script only drives the conversation; what is judged is the rule list (acted on each request, cancelled on 'Stop!', did not comment on its own mood).",
-  "requires": {
-    "inputs": [
-      "speech_input",
-      "emotion",
-      "closest_user"
-    ],
-    "commands": [
-      "dance",
-      "switch_user_tracking"
-    ],
-    "output_command": true
-  },
-  "timeout_s": 240,
+  "description": "The demo's own actions: a mood change while the robot speaks, a dance stopped two seconds in, a user walking up and walking away. The user waits for the robot to be idle between turns.",
   "checks": [
     "no_noop_on_input",
     "no_failed_reactions",
-    "no_colliding_cancel",
-    {
-      "name": "cancels_when_asked",
-      "args": {
-        "requests": [
-          {
-            "key": "speech_input",
-            "value": "Stop!"
-          }
-        ]
-      }
-    },
-    {
-      "name": "acts_when_asked",
-      "args": {
-        "requests": [
-          {
-            "key": "speech_input",
-            "value": "Please dance for me!",
-            "command": "dance"
-          },
-          {
-            "key": "closest_user",
-            "value": "u2",
-            "command": "switch_user_tracking",
-            "where": {
-              "user_id": "u2"
-            }
-          },
-          {
-            "key": "closest_user",
-            "value": "",
-            "command": "switch_user_tracking"
-          }
-        ]
-      }
-    },
-    {
-      "name": "quiet_on_background_change",
-      "args": {
-        "keys": [
-          "emotion"
-        ]
-      }
-    }
+    "no_colliding_cancel"
   ],
-  "params": {},
-  "script": [
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Hi!"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_output",
-          "args": {
-            "within": 30
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_emotion",
-          "args": {
-            "value": "happy"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Please dance for me!"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_action",
-          "args": {
-            "name": "dance",
-            "within": 30
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 2
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Stop!"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_closest_user",
-          "args": {
-            "value": "u2"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_closest_user",
-          "args": {
-            "value": ""
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "finish",
-          "args": {
-            "verdict": "pass"
-          }
-        }
-      ]
-    }
+  "steps": [
+    {"input": {"speech_input": "Hi!"}},
+    {"wait": "speaking"},
+    {"input": {"emotion": "happy"}},
+    {"check": "quiet_on_background_change"},
+    {"wait": "idle"},
+    {"input": {"speech_input": "Please dance for me!"}},
+    {"check": {"acts_when_asked": "dance"}},
+    {"wait": {"running": "dance"}},
+    {"wait": {"seconds": 2}},
+    {"input": {"speech_input": "Stop!"}},
+    {"check": "cancels_when_asked"},
+    {"check": "answers_each_input"},
+    {"wait": "idle"},
+    {"input": {"closest_user": "u2"}},
+    {"check": {"acts_when_asked": {"switch_user_tracking": {"user_id": "u2"}}}},
+    {"wait": "idle"},
+    {"input": {"closest_user": ""}},
+    {"check": {"acts_when_asked": "switch_user_tracking"}},
+    {"wait": "idle"}
   ]
 }

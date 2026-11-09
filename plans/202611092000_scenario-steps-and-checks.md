@@ -1,6 +1,6 @@
 # Scenario steps: input, wait, expect, check
 
-**Status:** Todo
+**Status:** Done
 
 Implements the "Scenarios" section of [specs/wica-tester.md](../specs/wica-tester.md) and the matching revision of [specs/benchmark.md](../specs/benchmark.md) (status `Updated`). Replaces the first cut of PR #8, which kept the fake-model script as the scenario format and put the check arguments in a separate list.
 
@@ -37,9 +37,17 @@ Data and docs:
 5. Rewrite the two sessions and the probe; run the fake `conversation` three times for determinism.
 6. Docs; specs back to `Implemented` (benchmark) and phase notes (tester); this plan `Done`.
 
+## Done 2026-11-09 — what moved during implementation
+
+- `run_scenario` plays the steps **directly** on the `TestRun` (driver (a)), for pytests and the benchmark alike; the scripted tester plays `to_script`'s translation. No second `Wica` per benchmark run.
+- `"speaking"` and `{"running": name}` mean "has started since the last input", not "is running now": decidable from the timeline even for a Command short enough to end before the wait looks.
+- The benchmark's `Completed` is renamed `RunResult` (`scored` when its outcome is `completed`), since "completed" is now an outcome.
+- `TestRun.set` is refused after a stop, so a scripted tester whose chain is still unwinding cannot write past it.
+- The scripted tester's failed expect or stall ends the chain (`run.stop`), where it used to continue.
+
 ## Verification
 
 - `uv run ruff check .`, `uv run ruff format --check .`, `uv run pyright` — clean.
-- `uv run pytest` — the fast tier.
-- The e2e-fake set (`test_fake_flows`, `test_example_flow`, `test_tester_flows`, `test_demo_bench_fake`) — key-less, passes.
-- `uv run --group demo python -m benchmarks.bench --only fake --include-disabled --scenario conversation --out <scratch>` — completed, every check kept.
+- `uv run pytest` — the fast tier: 486 passed.
+- The e2e-fake set (`test_fake_flows`, `test_example_flow`, `test_tester_flows`, `test_demo_bench_fake`) — key-less, 14 passed.
+- `uv run --group demo python -m benchmarks.bench --only fake --include-disabled --scenario conversation --out <scratch>` — completed, every check kept, three runs alike.

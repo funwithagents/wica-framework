@@ -9,7 +9,7 @@ from pathlib import Path
 
 from benchmarks.bench import MATRIX, SCENARIOS_DIR, DemoTarget
 from wica.benchmark import (
-    Completed,
+    RunResult,
     load_matrix,
     run_matrix,
     run_once,
@@ -49,9 +49,15 @@ def test_the_workload_loads():
 def test_the_conversation_session_passes_through_the_demo_target(tmp_path: Path):
     conversation = load_scenario(SCENARIOS_DIR / "conversation.json")
     outcome = run_once(DemoTarget(FAKE), conversation, repetition=1, out_dir=tmp_path)
-    assert isinstance(outcome, Completed)
-    assert outcome.report.ok, [f for f in outcome.report.findings if not f.ok]
-    assert outcome.checks == conversation.check_names
+    assert isinstance(outcome, RunResult)
+    report = outcome.report
+    assert report.outcome == "completed", report.stopped_at
+    assert report.ok, [f for f in report.findings if not f.ok]
+    # Every check judged: the four whole-run ones, then the one on "Stop!".
+    assert tuple(f.expectation for f in report.checks()) == conversation.check_names
+    stop = report.checks()[-1]
+    assert stop.expectation == "cancels_when_asked"
+    assert stop.detail.startswith("on input 4 (speech_input='Stop!')")
     m = outcome.measures
     # Seven user utterances, every one answered through `say`; the confirmation after the
     # cancel is issued on the completion step, so it counts as the one unprompted output.
@@ -64,7 +70,7 @@ def test_the_conversation_session_passes_through_the_demo_target(tmp_path: Path)
 def test_the_greeting_probe_passes_through_the_demo_target(tmp_path: Path):
     greeting = greeting_probe()
     outcome = run_once(DemoTarget(FAKE), greeting, repetition=1, out_dir=tmp_path)
-    assert isinstance(outcome, Completed)
+    assert isinstance(outcome, RunResult)
     assert outcome.report.ok, [f for f in outcome.report.findings if not f.ok]
     assert (
         outcome.measures["output_calls"] == 1 and outcome.measures["output_words"] == 5

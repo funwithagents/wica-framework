@@ -1,181 +1,27 @@
 {
   "name": "conversation",
-  "description": "One representative session with the robot, the user waiting for it to be idle before speaking again (expect_idle, no timers): a greeting, a question, a long story interrupted by 'Stop!' as soon as it starts, two utterances half a second apart, a goodbye. The script only drives the conversation; what is judged is the rule list.",
-  "requires": {
-    "inputs": [
-      "speech_input"
-    ],
-    "output_command": true
-  },
-  "timeout_s": 300,
+  "description": "One representative session with the robot: a greeting, a question, a long story interrupted by 'Stop!' as soon as the robot starts speaking, two utterances half a second apart, a goodbye. The user waits for the robot to be idle between turns. Generic: it needs only speech_input and an output Command.",
   "checks": [
     "answers_each_input",
     "no_noop_on_input",
     "no_failed_reactions",
-    "no_colliding_cancel",
-    {
-      "name": "cancels_when_asked",
-      "args": {
-        "requests": [
-          {
-            "key": "speech_input",
-            "value": "Stop!"
-          }
-        ]
-      }
-    }
+    "no_colliding_cancel"
   ],
-  "params": {},
-  "script": [
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Hello there!"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 90
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "What can you do?"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 90
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Tell me a long story about a robot who learns to dance, at least five sentences."
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_output",
-          "args": {
-            "within": 30
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Stop!"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 90
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Hi, I'm Alex."
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 0.5
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Can you hear me?"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 90
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "set_speech_input",
-          "args": {
-            "value": "Thanks, that's all for now. Goodbye!"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_idle",
-          "args": {
-            "within": 90
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "finish",
-          "args": {
-            "verdict": "pass"
-          }
-        }
-      ]
-    }
+  "steps": [
+    {"input": {"speech_input": "Hello there!"}},
+    {"wait": "idle"},
+    {"input": {"speech_input": "What can you do?"}},
+    {"wait": "idle"},
+    {"input": {"speech_input": "Tell me a long story about a robot who learns to dance, at least five sentences."}},
+    {"wait": "speaking"},
+    {"input": {"speech_input": "Stop!"}},
+    {"check": "cancels_when_asked"},
+    {"wait": "idle"},
+    {"input": {"speech_input": "Hi, I'm Alex."}},
+    {"wait": {"seconds": 0.5}},
+    {"input": {"speech_input": "Can you hear me?"}},
+    {"wait": "idle"},
+    {"input": {"speech_input": "Thanks, that's all for now. Goodbye!"}},
+    {"wait": "idle"}
   ]
 }

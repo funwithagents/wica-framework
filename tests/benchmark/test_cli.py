@@ -20,13 +20,11 @@ def _step(command: str, /, **args: Any) -> dict[str, Any]:
 
 GREETING = {
     "name": "greeting",
-    "requires": {"inputs": ["speech_input"], "output_command": True},
     "timeout_s": 15,
     "checks": ["answers_each_input", "no_noop_on_input"],
-    "script": [
-        _step("set_speech_input", value="hello"),
-        _step("expect_output", within=3),
-        _step("finish", verdict="pass"),
+    "steps": [
+        {"input": {"speech_input": "hello"}},
+        {"wait": "idle", "within": 5},
     ],
 }
 
@@ -100,7 +98,7 @@ def test_cli_runs_the_enabled_matrix_and_writes_the_batch(layout: dict[str, Path
     )  # a benchmark compares, it does not gate — even with `mute` failing
     assert "good/a / greeting #1: ok" in text and "good/b / greeting #2: ok" in text
     assert (
-        "mute / greeting #1: FAIL ['expect_output()', 'answers_each_input', 'no_noop_on_input']"
+        "mute / greeting #1: checks broken ['answers_each_input', 'no_noop_on_input']"
         in text
     )
     assert "fixture: skipped (disabled (use --include-disabled))" in text

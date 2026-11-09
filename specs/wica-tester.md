@@ -170,8 +170,10 @@ A **scenario** is a fixed user written as data: one JSON file, named by its stem
 **Wait — pacing, always explicit.** Nothing is implicit: a scenario that wants the SUT to have finished before the next input writes `{"wait": "idle"}`. The conditions:
 
 - `"idle"` — the SUT has finished reacting, read from the timeline with no timer: every write to a triggering Input seen (or dropped) by the Agent, every observed trigger consumed by a reaction that ended, every issued Command in a terminal state, and every completed Command whose completion re-triggers a step has had that trigger arrive (the Probe knows which Commands do), so the step a completion wakes is not missed in the gap between the two events.
-- `"speaking"` — the output Command is running, whatever its name: the moment to talk over the SUT.
-- `{"running": <Command>}` — that Command is running.
+- `"speaking"` — the output Command, whatever its name, has started since the last input: the moment to talk over the SUT.
+- `{"running": <Command>}` — that Command has started since the last input.
+
+"Started since the last input" rather than "running now": a condition the timeline can always decide, even when the Command is short enough to have ended before the wait looks.
 - `{"seconds": n}` — a deliberate delay, the only timer, for "two seconds into the dance".
 
 A wait that times out stops the run as **stalled** and names what was still running (or never started). Stalled and failed behave the same — the run ends, it is not a pass — and are labelled apart because they usually mean different things: *too slow, or never started the work the script leans on* versus *did the wrong thing*.
@@ -212,7 +214,7 @@ The built-in checks are generic: they hold for any WICA agent because the runtim
 
 **Requirements are derived, not written.** The Inputs a scenario writes (its `input` steps), the Commands it names (in waits, expects and check args) and whether it needs an output Command (`"speaking"`, `output` expects, the checks that read it) are what the SUT must expose; the runner checks them against the Probe before starting and skips a scenario whose SUT lacks one. `timeout_s` (default 300) bounds the whole run; `params` is an opaque object for whoever opens the SUT (an application's initial state).
 
-**One format, run three ways.** A pytest loads a scenario and runs it on a `TestRun` (`run_scenario(run, scenario)`); the scripted-fake tester runs the same steps, translated into its fake model's script (below); the benchmark runs it *k* times per model ([benchmark.md](benchmark.md)). The loader validates every step and names the file and the step index on an error.
+**One format, run three ways.** A pytest loads a scenario and plays it directly on a `TestRun` — `run_scenario(run, scenario)` writes the inputs, blocks on the waits and expects, stops on the first miss, and judges the checks if the run completed (`evaluate_checks`); the benchmark runs it the same way, *k* times per model ([benchmark.md](benchmark.md)); the scripted-fake tester plays the same steps translated into its fake model's script (`to_script`, below). A check's finding names its window in its detail — `whole run: …` or `on input 4 (speech_input='Stop!'): …`. The loader validates every step and names the file and the step index on an error.
 
 ### The shared Command set
 

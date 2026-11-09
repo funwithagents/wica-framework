@@ -29,6 +29,27 @@ from wica.testing.report import Finding, Report, SutEvent
 from wica.wica import Wica
 
 _SETTABLE_TYPES: tuple[type, ...] = (str, int, float, bool)
+
+SET_PREFIX = "set_"
+
+# The tester's fixed Command set (specs/wica-tester.md, "The shared Command set"); `set_<key>` is
+# the one open-ended family, one per settable SUT Input. `tests/testing/test_scripted_tester.py`
+# pins this set against what `build_tester` registers, so the two cannot drift.
+TESTER_COMMANDS = frozenset(
+    {
+        "wait",
+        "wait_for",
+        "expect_action",
+        "expect_output",
+        "expect_text",
+        "expect_no_action",
+        "expect_world",
+        "expect_latency",
+        "note",
+        "report_issue",
+        "finish",
+    }
+)
 _MIRROR_KEYS = ("sut:action", "sut:output", "sut:reasoning")
 
 
@@ -36,8 +57,9 @@ def _text(value: Any, previous: Any) -> Content:
     return [TextPart(str(value))]
 
 
-def _tool_name(key: str) -> str:
-    return "set_" + re.sub(r"[^A-Za-z0-9_]", "_", key)
+def set_command_name(key: str) -> str:
+    """The tester Command that writes the SUT Input *key*: `set_<key>`, sanitized."""
+    return SET_PREFIX + re.sub(r"[^A-Za-z0-9_]", "_", key)
 
 
 def build_tester(
@@ -106,7 +128,12 @@ def build_tester(
         tester.register_command(_set_command(run, key, entry_config.type))
 
     def ok_or_failed(finding: Finding) -> str:
-        return "ok" if finding.ok else f"failed: {finding.detail}"
+        """A failed expect stops the run as failed, a timed-out wait as stalled: the run's
+        `finished` is set, `run_script` returns, and any step still to come is refused."""
+        if finding.ok:
+            return "ok"
+        run.stop("stalled" if finding.kind == "wait" else "failed", finding.expectation)
+        return f"stopped: {finding.detail}"
 
     async def wait(seconds: float) -> str:
         """Let *seconds* pass before the next step."""
@@ -152,10 +179,10 @@ def build_tester(
         finding = await asyncio.to_thread(run.expect_no_action, name, for_=for_)
         return ok_or_failed(finding)
 
-    async def expect_idle(within: float = 30.0) -> str:
-        """Wait until the SUT has finished reacting: no step running, no Command running, no
-        completion left to wake a step. Use it between turns instead of a fixed wait."""
-        finding = await asyncio.to_thread(run.expect_idle, within=within)
+    async def wait_for(condition: str | dict[str, Any], within: float = 60.0) -> str:
+        """Pace the conversation: wait until *condition* holds — "idle", "speaking",
+        {"running": name} or {"seconds": n}."""
+        finding = await asyncio.to_thread(run.wait_for, condition, within=within)
         return ok_or_failed(finding)
 
     async def expect_world(key: str, equals: str, within: float = 5.0) -> str:
@@ -193,7 +220,7 @@ def build_tester(
         expect_output,
         expect_text,
         expect_no_action,
-        expect_idle,
+        wait_for,
         expect_world,
         expect_latency,
         note,
@@ -205,7 +232,7 @@ def build_tester(
 
 
 def _set_command(run: TestRun, key: str, entry_type: type) -> Command:
-    name = _tool_name(key)
+    name = set_command_name(key)
     fields: dict[str, Any] = {"value": (entry_type, ...)}
     args_schema = create_model(f"Set_{name}", **fields)
 

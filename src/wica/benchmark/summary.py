@@ -1,6 +1,11 @@
-"""The benchmark summary: one row per configuration pooled over every run (the global result),
-then per (scenario, configuration) pass rate, pass^k, what failed and the pooled distributions —
-and how a batch becomes a kept result. Implements specs/benchmark.md, "The summary".
+"""The benchmark summary: one row per configuration pooled over every run (the global result), a
+table of checks kept per configuration, then per (scenario, configuration) pass rate, pass^k and
+the pooled distributions — and how a batch becomes a kept result. Implements specs/benchmark.md,
+"The summary".
+
+A run that **stopped** (failed on an expect, stalled on a wait) counts as a failure for pass^k and
+is listed with the step it stopped at, but contributes to no other number: only **scored**
+(completed) runs feed compliance, the check table, latencies, tokens and measures.
 
 No thresholds anywhere: the summary is a comparison, the reader draws the line. A **batch** (one
 runner invocation, `write_summary` into its folder) is working data; a **result** (`write_result`)
@@ -22,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from wica.testing.report import MetricSummary, summarize
 
 if TYPE_CHECKING:
-    from wica.benchmark.runner import Completed, Skipped
+    from wica.benchmark.runner import RunResult, Skipped
 
 # Per-reaction samples pooled as distributions; the token counts are summed per run instead.
 _PER_RUN_TOTALS = ("input_tokens", "output_tokens")
@@ -31,19 +36,27 @@ _PER_RUN_TOTALS = ("input_tokens", "output_tokens")
 @dataclass(frozen=True)
 class Cell:
     """One (scenario, configuration) — or, with scenario `"*"`, one configuration over every
-    scenario: its runs, how many passed, what failed, and the pooled numbers — `metrics` over
-    every reaction of every run, `per_run` over one number per run (the measures, the token
-    totals, and the derived `compliance`, `answer_rate`, `*_per_turn`)."""
+    scenario: its runs and their outcomes, how many passed, the checks kept, and the pooled
+    numbers of the **scored** runs — `metrics` over every reaction, `per_run` over one number per
+    run (the measures, the token totals, and the derived `compliance`, `answer_rate`,
+    `*_per_turn`)."""
 
     scenario: str
     label: str
     runs: int
-    passed: int  # runs in which every rule held
-    failed: dict[str, int] = field(default_factory=dict)  # rules broken, with counts
-    script_missed: dict[str, int] = field(default_factory=dict)  # script expectations
-    rules: dict[str, tuple[int, int]] = field(
+    passed: int  # runs that completed and kept every check
+    scored: int = 0  # runs that completed
+    failed_runs: int = 0  # stopped on an expect
+    stalled_runs: int = 0  # stopped on a wait
+    stopped_at: dict[str, int] = field(
         default_factory=dict
-    )  # rule → (held, runs)
+    )  # where runs stopped, with counts
+    broken: dict[str, int] = field(
+        default_factory=dict
+    )  # checks broken, over scored runs
+    checks: dict[str, tuple[int, int]] = field(
+        default_factory=dict
+    )  # check → (kept, applied)
     metrics: dict[str, MetricSummary] = field(default_factory=dict)
     per_run: dict[str, MetricSummary] = field(default_factory=dict)
     cache_read_share: float | None = None
@@ -77,11 +90,11 @@ class Summary:
                 return cell
         return None
 
-    def _rule_names(self) -> list[str]:
-        """Every rule any run applied, the built-ins in registry order first."""
+    def _check_names(self) -> list[str]:
+        """Every check any scored run applied, the built-ins in registry order first."""
         from wica.testing.checks import CHECKS
 
-        seen = {rule for cell in self.totals for rule in cell.rules}
+        seen = {name for cell in self.totals for name in cell.checks}
         ordered = [name for name in CHECKS if name in seen]
         return ordered + sorted(seen - set(ordered))
 
@@ -134,21 +147,24 @@ class Summary:
             "",
             "Every run of every scenario pooled: the row a reader compares models by.",
             "",
-            "| config | runs | pass^k | compliance | answered | reaction p50 / p95 | "
-            "model p50 / p95 | tokens in / out per turn | words per turn | unprompted | "
-            "noops on input | dropped | rules broken | script missed |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "Stopped runs count against pass^k and in no other column.",
+            "",
+            "| config | runs | scored | failed | stalled | pass^k | compliance | answered | "
+            "reaction p50 / p95 | model p50 / p95 | tokens in / out per turn | words per turn | "
+            "unprompted | noops on input | dropped | checks broken | stopped at |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for label in self._row_labels():
             total = self.cell("*", label)
             if total is None:
                 lines.append(
                     f"| {label} | skipped: {_short(self._skip_reason(label, '*'), 60)} |"
-                    + " |" * 12
+                    + " |" * 15
                 )
                 continue
             lines.append(
-                f"| {label} | {total.runs} | {total.pass_k} | "
+                f"| {label} | {total.runs} | {total.scored} | {total.failed_runs} | "
+                f"{total.stalled_runs} | {total.pass_k} | "
                 f"{_percent(total.per_run.get('compliance'))} | "
                 f"{_percent(total.per_run.get('answer_rate'))} | "
                 f"{_p50_p95(total.metrics.get('reaction_latency'))} | "
@@ -159,27 +175,27 @@ class Summary:
                 f"{_median(total.per_run.get('unprompted_output'))} | "
                 f"{_median(total.per_run.get('noops_on_input'))} | "
                 f"{_median(total.per_run.get('dropped_inputs'))} | "
-                f"{_failed(total.failed)} | {sum(total.script_missed.values())} |"
+                f"{_failed(total.broken)} | {_failed(total.stopped_at)} |"
             )
-        rule_names = self._rule_names()
-        if rule_names:
+        check_names = self._check_names()
+        if check_names:
             lines += [
                 "",
-                "## Rules",
+                "## Checks",
                 "",
-                "Runs in which each rule held, over the runs that applied it.",
+                "Times each check was kept, over the times it was applied, in scored runs.",
                 "",
-                "| config | " + " | ".join(rule_names) + " |",
-                "|---|" + "---|" * len(rule_names),
+                "| config | " + " | ".join(check_names) + " |",
+                "|---|" + "---|" * len(check_names),
             ]
             for label in self._row_labels():
                 total = self.cell("*", label)
                 if total is None:
                     continue
                 cells = []
-                for rule in rule_names:
-                    held = total.rules.get(rule)
-                    cells.append("—" if held is None else f"{held[0]}/{held[1]}")
+                for name in check_names:
+                    kept = total.checks.get(name)
+                    cells.append("—" if kept is None else f"{kept[0]}/{kept[1]}")
                 lines.append(f"| {label} | " + " | ".join(cells) + " |")
         lines += ["", "## Configurations", ""]
         for label, agent in self.configs.items():
@@ -191,22 +207,23 @@ class Summary:
                 "",
                 f"## {scenario}",
                 "",
-                "| config | runs | passed | pass rate | pass^k | rules broken | reaction p50 / p95 | "
-                "model p50 / p95 | reactions/input p50 | unprompted | dropped | "
+                "| config | runs | passed | failed | stalled | pass rate | pass^k | checks broken | "
+                "reaction p50 / p95 | model p50 / p95 | reactions/input p50 | unprompted | dropped | "
                 "tokens in / out per run | cache read | words per run |",
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
             ]
             for label in self._row_labels():
                 cell = self.cell(scenario, label)
                 if cell is None:
                     reason = self._skip_reason(label, scenario)
                     lines.append(
-                        f"| {label} | skipped: {_short(reason, 60)} |" + " |" * 12
+                        f"| {label} | skipped: {_short(reason, 60)} |" + " |" * 14
                     )
                     continue
                 lines.append(
-                    f"| {label} | {cell.runs} | {cell.passed} | {cell.pass_rate:.0%} | "
-                    f"{cell.pass_k} | {_failed(cell.failed)} | "
+                    f"| {label} | {cell.runs} | {cell.passed} | {cell.failed_runs} | "
+                    f"{cell.stalled_runs} | {cell.pass_rate:.0%} | "
+                    f"{cell.pass_k} | {_failed(cell.broken)} | "
                     f"{_p50_p95(cell.metrics.get('reaction_latency'))} | "
                     f"{_p50_p95(cell.metrics.get('model_latency'))} | "
                     f"{_median(cell.metrics.get('reactions_per_input'))} | "
@@ -229,7 +246,7 @@ class Summary:
 
 
 def aggregate(
-    completed: Iterable[Completed],
+    completed: Iterable[RunResult],
     skipped: Iterable[Skipped],
     *,
     k: int,
@@ -241,8 +258,8 @@ def aggregate(
 ) -> Summary:
     """Pool the runs into one `Cell` per (scenario, configuration), in the order of *scenarios*
     then *configs*, and one total per configuration over every scenario (`totals`)."""
-    groups: dict[tuple[str, str], list[Completed]] = {}
-    by_label: dict[str, list[Completed]] = {}
+    groups: dict[tuple[str, str], list[RunResult]] = {}
+    by_label: dict[str, list[RunResult]] = {}
     for run in completed:
         groups.setdefault((run.scenario, run.label), []).append(run)
         by_label.setdefault(run.label, []).append(run)
@@ -276,26 +293,27 @@ def _cell_dict(cell: Cell) -> dict[str, Any]:
     }
 
 
-def _cell(scenario: str, label: str, runs: list[Completed]) -> Cell:
-    failed: Counter[str] = Counter()
+def _cell(scenario: str, label: str, runs: list[RunResult]) -> Cell:
+    broken: Counter[str] = Counter()
+    stopped_at: Counter[str] = Counter()
     pooled: dict[str, list[float]] = {}
     per_run: dict[str, list[float]] = {}
     cache_read = 0
     cache_input = 0
-    script_missed: Counter[str] = Counter()
-    rules: dict[str, list[int]] = {}
+    checks: dict[str, list[int]] = {}
+    scored = [run for run in runs if run.scored]
     for run in runs:
+        if not run.scored:
+            stopped_at[_stop_label(run)] += 1
+    for run in scored:
         report = run.report
-        for finding in report.findings:
-            if finding.expectation in run.checks:
-                held = rules.setdefault(finding.expectation, [0, 0])
-                held[1] += 1
-                if finding.ok:
-                    held[0] += 1
-                else:
-                    failed[finding.expectation] += 1
-            elif not finding.ok:
-                script_missed[finding.expectation] += 1
+        for finding in report.checks():
+            kept = checks.setdefault(finding.expectation, [0, 0])
+            kept[1] += 1
+            if finding.ok:
+                kept[0] += 1
+            else:
+                broken[finding.expectation] += 1
         for key, values in run.samples.items():
             if key in _PER_RUN_TOTALS:
                 per_run.setdefault(key, []).append(float(sum(values)))
@@ -315,27 +333,30 @@ def _cell(scenario: str, label: str, runs: list[Completed]) -> Cell:
         scenario=scenario,
         label=label,
         runs=len(runs),
-        passed=sum(1 for run in runs if _rules_held(run)),
-        failed=dict(failed),
-        script_missed=dict(script_missed),
-        rules={name: (held, total) for name, (held, total) in rules.items()},
+        passed=sum(1 for run in scored if run.report.ok),
+        scored=len(scored),
+        failed_runs=sum(1 for run in runs if run.report.outcome == "failed"),
+        stalled_runs=sum(1 for run in runs if run.report.outcome == "stalled"),
+        stopped_at=dict(stopped_at),
+        broken=dict(broken),
+        checks={name: (kept, applied) for name, (kept, applied) in checks.items()},
         metrics=_summaries(pooled),
         per_run=_summaries(per_run),
         cache_read_share=(cache_read / cache_input) if cache_input else None,
     )
 
 
-def _rules_held(run: Completed) -> bool:
-    """A run passes when every rule held. The script's own expectations only drive the
-    conversation; a missed one is reported apart (`script_missed`), never a failure."""
-    return all(f.ok for f in run.report.findings if f.expectation in run.checks)
+def _stop_label(run: RunResult) -> str:
+    """`"<outcome> <scenario> <step>"`, the step without its arguments — short enough to count."""
+    at = (run.report.stopped_at or "?").split("(")[0]
+    return f"{run.report.outcome} {run.scenario} {at}"
 
 
-def _derived(run: Completed) -> dict[str, float]:
+def _derived(run: RunResult) -> dict[str, float]:
     """The per-run rates: `compliance` (checks passed over checks run), `answer_rate` (turns
     answered over turns), and the token / word counts per turn."""
     derived: dict[str, float] = {}
-    checks = [f for f in run.report.findings if f.expectation in run.checks]
+    checks = run.report.checks()
     if checks:
         derived["compliance"] = sum(1 for f in checks if f.ok) / len(checks)
     turns = run.measures.get("turns", 0.0)
