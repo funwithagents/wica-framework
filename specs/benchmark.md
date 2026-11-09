@@ -1,7 +1,5 @@
 ---
 code:
-  - src/wica/testing/scenario.py
-  - src/wica/testing/checks.py
   - src/wica/testing/report.py
   - src/wica/benchmark/__init__.py
   - src/wica/benchmark/matrix.py
@@ -12,8 +10,6 @@ code:
   - benchmarks/matrix.json
   - benchmarks/scenarios
 tests:
-  - tests/testing/test_scenario.py
-  - tests/testing/test_checks.py
   - tests/benchmark/test_matrix.py
   - tests/benchmark/test_runner.py
   - tests/benchmark/test_summary.py
@@ -21,21 +17,20 @@ tests:
   - tests-e2e/test_demo_bench_fake.py
 ---
 
-# WICA benchmark: scenarios, checks and the runner
+# WICA benchmark: comparing models over scenarios
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
-[wica-tester.md](wica-tester.md) gives one run against one `Wica`: a timeline, measures and a report. A **benchmark** is many such runs compared — the same scenarios, against the same application, with a different model behind the Agent each time, repeated enough to see past model variance. This spec adds the three pieces that turn runs into a comparison, all of them application-agnostic:
+[wica-tester.md](wica-tester.md) gives one run against one `Wica`: a timeline, measures and a report. A **benchmark** is many such runs compared — the same scenarios, against the same application, with a different model behind the Agent each time, repeated enough to see past model variance. The scenarios it runs and the checks that judge them are the tester's ([wica-tester.md](wica-tester.md), "Scenarios"): a scenario is a fixed user as `input` / `wait` / `expect` / `check` steps, and a check is a rule judged after the run. A test asserts them; a benchmark **measures** them — how often each model keeps each check. This spec adds what turns runs into that comparison, application-agnostic:
 
-- a **scenario file**: a fixed user as a scripted tester script plus the checks to run over the result — for a benchmark, a **session** of several turns, the same workload for every model;
-- **rules**: a fixed list of generic rules every WICA agent is held to — the runtime primer's clauses and what any assistant persona promises — checked over a finished timeline, some reading which writes of the script they are about; what a benchmark measures is how often each model keeps each rule;
+- the **workload**: scenarios written as **sessions** of several turns, the same for every model, with few expects and many checks;
 - the **runner**: a config matrix × a scenario set × *k* repetitions, one report per run, one summary with **one row per model** pooled over every run (pass^k, rule compliance, turns answered, latency, tokens and words per turn) and then the same per scenario.
 
-It also ships the framework's own **reference benchmark**: the conversation demo ([conversation-demo.md](conversation-demo.md)) as the system under test, a matrix of models, and a workload of two session scenarios written against the demo's `speech_input` + `say` shape, run *k* times per model. That benchmark answers "how well does model X drive a WICA agent at all"; an application built on WICA (the first is `wica-interaction`, `wica-interaction/specs/benchmark.md`) reuses the runner, the format and the primer checks for its own target, and adds the checks its persona and body demand. The generic layer lives in the package (`wica.testing` for the per-run pieces, `wica.benchmark` for the runner) so that no application re-implements a runner, and so that two applications' numbers are produced the same way; the reference benchmark — target, matrix, scenarios, results — lives in a root `benchmarks/` folder outside the package, as nothing imports it (the layout `tts-engine` uses for its own benchmark).
+It also ships the framework's own **reference benchmark**: the conversation demo ([conversation-demo.md](conversation-demo.md)) as the system under test, a matrix of models, and a workload of two session scenarios written against the demo's `speech_input` + `say` shape, run *k* times per model. That benchmark answers "how well does model X drive a WICA agent at all"; an application built on WICA (the first is `wica-interaction`, `wica-interaction/specs/benchmark.md`) reuses the runner, the scenario format and the built-in checks for its own target, and adds the checks its persona and body demand. The generic layer lives in the package (`wica.testing` for scenarios and checks, `wica.benchmark` for the comparison) so that no application re-implements a runner, and so that two applications' numbers are produced the same way; the reference benchmark — target, matrix, scenarios, results — lives in a root `benchmarks/` folder outside the package, as nothing imports it (the layout `tts-engine` uses for its own benchmark).
 
-This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"): the runner and the demo scenario. Trace export (`report.to_scenario()`) stays with the live-LLM tester (phase 2), since it is the live tester's calls it exports; the scenario format below is what it will emit.
+This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"): the runner and the demo scenario. Trace export (`report.to_scenario()`) stays with the live-LLM tester (phase 2), since it is the live tester's calls it exports.
 
 ## Settled
 
@@ -43,67 +38,26 @@ This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"):
 
 - **Target** — an application stood up as a running `Wica` for one benchmark configuration, plus how to shut it down. The runner never builds a `Wica` itself; the application does, exactly as its entry point would (the demo's `build_system` + `wire` + `start`, the interaction app's `build_system` + `wire` + `_start`), so what is benchmarked is the real system with its real persona, Commands and seeding. Only the peripherals the application chooses to bypass are doubled, by the application.
 - **Configuration** — one model under test: an **entry** of the matrix file, whose `agent` block (provider, model, `hf_provider`, `api_key_env`, history settings) is what differs between entries; the persona is shared through the file's `agent_defaults`. Its **label** in every report is the entry's `id`. The file is the **matrix**.
-- **Scenario** — a fixed user: a tester script (driver (b) of the tester spec) and a list of check names, in one JSON file, named by its stem. A benchmark's scenarios are **sessions** — several user turns, paced as a person would pace them — so one run yields a whole conversation's worth of turns to measure; a scenario that pins one rule in a few steps is a regression probe, not a workload.
-- **Run** — one (configuration, scenario, repetition): one `TestRun`, one `Report`.
+- **Scenario** — a fixed user as `input` / `wait` / `expect` / `check` steps, one JSON file named by its stem ([wica-tester.md](wica-tester.md), "Scenarios"). A benchmark's scenarios are **sessions** — several user turns, paced as a person would pace them — so one run yields a whole conversation's worth of turns to measure; a scenario that pins one rule in a few steps is a regression probe, not a workload.
+- **Run** — one (configuration, scenario, repetition): one `TestRun`, one `Report`. Its outcome is `completed`, `failed` (an expect did not hold) or `stalled` (a wait timed out); only a completed run is **scored**.
 - **Batch** — one invocation of the runner: a matrix × a scenario set × *k*, written to one dated folder of per-run reports plus a summary. Working data, git-ignored.
 - **Result** — a batch worth keeping: its summary and manifest copied under `benchmarks/results/<YYYYMMDD-HHMM>_<name>/` with a hand-written description and findings. Committed, and the only thing a spec or plan cites.
-- **Rule** (in code, a *check*) — a pure function over a finished timeline producing one `Finding`: did the model keep this rule in this run. Rules are what a benchmark **measures**; a model's compliance is the share of rules it held, and a run passes when every rule held.
-- **Script expectation** — an `expect_*` step of the scenario's script. It only **drives** the conversation (wait until the reply is issued, until the agent is idle) so the next utterance lands where the scenario wants it; a missed one is reported apart (*script missed*) and never fails the run. Whatever is worth judging is a rule.
+- **Check** — a rule judged after the run (the tester's). What a benchmark measures is a model's **compliance**: the share of checks it kept over its scored runs, overall and per check.
 - **Measure** — a number taken from a run, never thresholded by the runner (the tester spec's "measures, not thresholds").
 
-### The scenario file
+### Scenarios and checks, as a benchmark uses them
 
-`src/wica/testing/scenario.py` — `Scenario` (frozen dataclass), `load_scenario(path)`, `load_scenarios(directory)` (every `*.json`, sorted by name), `TESTER_COMMANDS`.
+The format, the four step kinds, the built-in checks and their windows are the tester's ([wica-tester.md](wica-tester.md), "Scenarios"); a benchmark adds three rules of use:
 
-```json
-{
-  "name": "stop-while-dancing",
-  "description": "A dance is asked for, then stopped mid-way: cancel_command, then a spoken confirmation.",
-  "requires": {"inputs": ["speech_input"], "commands": ["dance"], "output_command": true},
-  "timeout_s": 60,
-  "checks": ["answers_each_input", "no_failed_reactions", "no_colliding_cancel"],
-  "params": {},
-  "script": [
-    {"tool_calls": [{"name": "set_speech_input", "args": {"value": "Please dance for me!"}}]},
-    {"tool_calls": [{"name": "expect_action", "args": {"name": "dance", "within": 15}}]},
-    {"tool_calls": [{"name": "set_speech_input", "args": {"value": "Stop!"}}]},
-    {"tool_calls": [{"name": "expect_action", "args": {"name": "cancel_command", "within": 15}}]},
-    {"tool_calls": [{"name": "expect_output", "args": {"within": 15}}]},
-    {"tool_calls": [{"name": "finish", "args": {"verdict": "pass"}}]}
-  ]
-}
-```
+- **Expects are few.** An expect stops the run, and a stopped run is not scored, so a benchmark scenario keeps them for what the session cannot continue without. What is compared between models is written as checks.
+- **Pacing is explicit and generous.** `wait` steps carry `within` budgets that include the slowest model's think time; a stall is reported, not scored.
+- **Checks sit on the input they judge**, and the session-wide ones (`no_failed_reactions`, `no_colliding_cancel`, …) at the top level.
 
-- `name` — must equal the file stem; the report's `scenario`.
-- `requires` — what the target must expose for the scenario to apply: input keys, Command names, and whether an output Command must be set. The runner **skips** a (configuration, scenario) pair whose target lacks any of them and says so in the summary, so one scenario directory can mix generic and application-specific scenarios. All three default to empty / `false`.
-- `timeout_s` — `run_script`'s budget; the tester spec's "did not call finish" finding applies.
-- `checks` — the rules to apply: each a name, or `{"name": …, "args": {…}}` for a rule that reads which writes of the script it is about (a stop request, a request for a Command, a background change). Names resolve against the runner's registry (below); an unknown name, a malformed entry or a rule listed twice is a load error. Absent ⇒ every registered rule that takes no args and whose own `requires` the target satisfies.
-- `params` — an opaque object handed to the target when it opens for this scenario (an application reads what it needs: the interaction app's initial motor state, for instance). The runner never reads it.
-- `script` — **verbatim** the fake model's script: one `tool_calls` list per step, each exactly one call to a tester Command (`set_<key>`, `expect_action`, `expect_output`, `expect_text`, `expect_no_action`, `expect_world`, `expect_latency`, `wait`, `note`, `report_issue`, `finish`), with JSON-object args. Kept verbatim rather than flattened so a recorded trace (phase 2's `to_scenario()`) drops in unchanged. Validation errors name the file and the step index.
+**A chained reply is a measure, not a failure.** The output Command's completion re-triggers a step so the model *may* chain a second utterance ([commands.md](commands.md), "The output Command"); a rule breaking on it would penalize designed behavior. The runner counts it (`output_calls`, `unprompted_output` below), next to the checks.
 
-**The script drives, the rules judge.** One script runs against every model, so its expectations only sequence the conversation: `expect_idle` between turns, `expect_output` or `expect_action` where the next write must land while something is running (the barge-in). They stay loose — a `say` happened, a Command by name, never wording — and `within` budgets include the model's think time. Everything the benchmark compares is a rule over the finished timeline. Wording and relevance are a judge's business (tester spec, open question 2).
+**Application checks.** The runner and the CLI take `extra_checks`, the tester's `build_registry` adds them beside the built-ins (the interaction app's `no_collision`, `spoken_style`, …), and its scenarios select them like any other.
 
-### Rules
-
-`src/wica/testing/checks.py` — `CheckFn = Callable[[list[SutEvent], CheckContext], Finding]`, where `CheckContext` carries what a rule may need beyond the timeline: the scenario, the output Command's name, the target's surface (its Inputs, which of them trigger, its Commands) and the rule's own `args` from the scenario. Each rule is one `Finding` (`expectation=<name>`, `ok`, a `detail` citing the offending event's `t` and name). A check never waits: it is a function of the finished timeline, run by `apply_checks(report, specs, context) -> Report` after `run_script` returns, which appends the findings to the report's, each rule seeing the context with its own args.
-
-The built-in rules are **generic**: they hold for any WICA agent because the runtime primer (`agent.md`, "System prompt") states them, or because any assistant persona promises them. A scenario lists the ones it applies; the three that take args say which writes of the script they are about:
-
-| Rule | Args | Primer clause | Breaks when |
-|---|---|---|---|
-| `answers_each_input` | — (needs an output Command) | "anything addressed to you should be answered" / "must be said by calling `<output>`" | a **turn** — from a write to one of the scenario's `requires.inputs` that triggers a step, whose trigger was *observed* (it appears among a reaction's triggers), to the next such write, or the end — in which the output Command is never issued. Writes one reaction saw together (coalesced) open one turn, at the earliest; a write whose trigger was dropped opens no turn of its own: it belongs to the step that saw it, so `two-quick-utterances` is measured (`dropped_inputs`, `reactions_per_input`), not failed. Scenario-selected like `no_noop_on_input`: a sensor entry is not addressed to the agent |
-| `no_noop_on_input` | — | "never use `noop` to skip an expected response" | a reaction triggered by a write to one of the scenario's `requires.inputs` ends in `noop` only (scenario-selected, since a passive entry may legitimately be ignored) |
-| `no_failed_reactions` | — | — | any `reaction_ended` with `outcome != "ok"` (model error, empty response) |
-| `no_colliding_cancel` | — | "When one action must finish before another starts, do not issue both together" | a reaction issues `cancel_command` together with another *action*. The output Command is allowed alongside: saying "okay, stopping" while cancelling is what a person does |
-| `cancels_when_asked` | `requests: [{key, value}]` — the writes that are stop requests | running work is cancelled when the person asks it to stop | after a listed write, `cancel_command` is not issued before the next write of the script |
-| `acts_when_asked` | `requests: [{key, value?, command, where?}]` — no `value` means any write to the key | an explicit request is acted on | after a listed write, the named Command (with the `where` args) is not issued before the next write |
-| `quiet_on_background_change` | `keys: [...]` — the background entries | "use `noop` when nothing new needs a response" | after a write to a listed key, the output Command is issued again before the next write: the robot commented on a change of its own state |
-
-**A chained reply is a measure, not a failure.** The output Command's completion re-triggers a step so the model *may* chain a second utterance ([commands.md](commands.md), "The output Command"); a rule breaking on it would penalize designed behavior. The runner counts it (`output_calls`, `unprompted_output` below), next to the rules.
-
-**The registry is open.** `CHECKS: dict[str, Check]` holds the built-ins, each with its `requires`; `build_registry(extra_checks)` adds an application's persona checks under their own names (the interaction app's `no_collision`, `spoken_style`, …) — the runner and the CLI take `extra_checks`, the loader takes the resulting `registry` — and a scenario file selects them like any other. A name clash with a built-in is an error.
-
-**Measures.** `measures(timeline, context) -> dict[str, float]` adds per run, next to the framework's metrics: `output_calls` (how many times the output Command was issued), `unprompted_output` (issued by a reaction with no external trigger — the chained reply after the output Command's completion counts here, and so does a spoken confirmation issued on the step a cancel's completion wakes), `noop_steps`, `failed_reactions`, `output_words` (summed words of the output Command's string args — a cost of the person's time), and the **turn numbers** a session is read by: `turns` (opened by the scenario's triggering inputs, as `answers_each_input` defines them), `turns_answered` (the output Command issued within the turn), `noops_on_input` (reactions that answered a write to a scenario input with `noop` alone). Written into the run's JSON under `"bench"`; pooled into the summary.
+**Measures.** `measures(timeline, context) -> dict[str, float]` adds per run, next to the framework's metrics: `output_calls` (how many times the output Command was issued), `unprompted_output` (issued by a reaction with no external trigger — the chained reply after the output Command's completion counts here, and so does a spoken confirmation issued on the step a cancel's completion wakes), `noop_steps`, `failed_reactions`, `output_words` (summed words of the output Command's string args — a cost of the person's time), and the **turn numbers** a session is read by: `turns` (opened by writes to triggering Inputs, as `answers_each_input` defines them), `turns_answered` (the output Command issued within the turn), `noops_on_input` (reactions that answered a write to a scenario input with `noop` alone). Written into the run's JSON under `"bench"`; pooled into the summary.
 
 ### The matrix
 
@@ -163,31 +117,35 @@ The selection flags are `select_entries`' (`tts-engine`'s vocabulary); an entry 
 
 ### The summary
 
+**Stopped runs are counted, never scored.** A run that stopped — `failed` on an expect or `stalled` on a wait — is a failure for pass^k and is listed with the step that stopped it, but contributes to **no other metric**: no compliance, no latency, no tokens, no measure. Its numbers describe a session that did not happen as written, and mixing them in would compare models on different conversations.
+
 **One row per configuration first** — every run of every scenario pooled, the row a reader compares models by (`Summary.totals`, scenario `"*"`):
 
 | Column | Meaning |
 |---|---|
-| runs, pass^k | runs over every scenario; 1 when every rule held in every one of them |
-| compliance | median over runs of *rules held ÷ rules applied* |
+| runs, scored, failed, stalled | runs over every scenario; how many completed and were scored; how many stopped, by kind |
+| pass^k | 1 when every run completed and kept every check, else 0 |
+| compliance | median over scored runs of *checks kept ÷ checks applied* |
 | answered | median over runs of *turns answered ÷ turns* |
-| `reaction_latency`, `model_latency` p50 / p95 | pooled over every reaction |
+| `reaction_latency`, `model_latency` p50 / p95 | pooled over every reaction of the scored runs |
 | tokens in / out per turn, words per turn | per-run totals divided by the run's turns, median over runs |
 | unprompted, noops on input, dropped | per-run counts, median over runs |
-| rules broken | which rules broke, with counts |
-| script missed | how many script expectations missed — a model too slow for the turn budgets, or one that never started the work a barge-in interrupts; read it before the rules, since a missed step can leave a rule with nothing to judge |
+| checks broken | which checks broke, with counts |
+| stopped at | the steps runs stopped at, with counts — read it before the rest, since a model that stops often is scored on few runs |
 
-Then **one table of rules**, one row per configuration and one column per rule any run applied (the built-ins first): *held / applied* over the configuration's runs. It answers "which rule does this model break" at a glance.
+Then **one table of checks**, one row per configuration and one column per check any scored run applied (the built-ins first): *kept / applied* over the configuration's scored runs. It answers "which rule does this model break" at a glance.
 
-The per-run rates (`compliance`, `answer_rate`, `input_tokens_per_turn`, `output_tokens_per_turn`, `words_per_turn`) are derived when pooling, from the run's check findings (`Completed.checks` names them), its measures and its token samples; they appear in `per_run` beside the measures.
+The per-run rates (`compliance`, `answer_rate`, `input_tokens_per_turn`, `output_tokens_per_turn`, `words_per_turn`) are derived when pooling, over scored runs only, from the run's check findings, its measures and its token samples; they appear in `per_run` beside the measures.
 
 Then **one table per scenario**, one row per configuration:
 
 | Column | Meaning |
 |---|---|
-| runs / passed | *k* and how many runs held every rule (script expectations do not count) |
+| runs / passed | *k*, and how many runs completed and kept every check |
+| failed, stalled | the stopped runs, by kind |
 | pass rate | passed ÷ runs |
 | pass^k | 1 when every run passed, else 0 — the "reliably follows the rules" bit |
-| rules broken | the rules that broke, with counts |
+| checks broken | the checks that broke over the scored runs, with counts |
 | `reaction_latency`, `model_latency` | p50 / p95 pooled over the runs' samples |
 | `reactions_per_input` p50, `unprompted_output`, `dropped_inputs` | the re-trigger chain's cost |
 | `input_tokens`, `output_tokens` per run (summed per run, median over runs); cache-read share over the reactions that report one | money |
@@ -204,15 +162,15 @@ A header lists each configuration's full `agent` block: the configuration under 
 `benchmarks/` — a root folder outside the package, the framework's own benchmark whole: the demo target and entry point, the matrix file, the scenario set, the batches and the results. Nothing imports it but its tests, so none of it is installed; it needs the `demo` group (the demo's presenters), which the package never requires.
 
 - `benchmarks/bench.py` — `DemoTarget(entry)`: `label` is the entry's id; `entry.skip_reason()` ⇒ `Skip` before anything starts (the demo's explore-only degrade is of no use to a benchmark); `WicaConfig.from_dict({"agent": entry.agent}, base_dir=entry.base_dir)`, `build_system(config)`; `wica is None` ⇒ `Skip(config_error)`; `wire(wica, TranscriptLog(wica, display_entry), SpeakingSlot())` (the presenters without the page, as the demo's own tests do); `wica.start()`. `close()`: `wica.close()`. `agent_config` is the file's `agent` block. `main()`: `cli(argv, target_factory=DemoTarget, default_matrix="benchmarks/matrix.json", default_scenarios="benchmarks/scenarios", default_runs="benchmarks/runs", default_results="benchmarks/results", prog="wica-demo-bench")`. Run from the repo root: `uv run --group demo python -m benchmarks.bench --k 5` (it imports the demo's `examples.conversation_demo.app`, which resolves from the root the way the tests' `pythonpath` does).
-- `benchmarks/matrix.json` — the matrix: `agent_defaults` carries the demo's persona (`../examples/conversation_demo/prompts/wica.md`, so the persona under test is the demo's own), and one `default`-tagged entry per provider carries the agent block of the demo's `agent.<provider>.config.json` (a copy of five short blocks, accepted so the matrix is one file and the demo's configs stay the demo's; the live smoke verifies the ids). More models are rows added here, `<provider>/<model>`, tagged to select on — the README's "Model catalog" says how. The `fake` entry is the key-less path: a scripted fake that greets once, `enabled: false` and tagged `fixture` so it never joins a default batch (it passes `greeting` only): `--only fake --include-disabled --scenario greeting`.
+- `benchmarks/matrix.json` — the matrix: `agent_defaults` carries the demo's persona (`../examples/conversation_demo/prompts/wica.md`, so the persona under test is the demo's own), and one `default`-tagged entry per provider carries the agent block of the demo's `agent.<provider>.config.json` (a copy of five short blocks, accepted so the matrix is one file and the demo's configs stay the demo's; the live smoke verifies the ids). More models are rows added here, `<provider>/<model>`, tagged to select on — the README's "Model catalog" says how. The `fake` entry is the key-less path: a scripted fake that plays the `conversation` session, `enabled: false` and tagged `fixture` so it never joins a default batch: `--only fake --include-disabled --scenario conversation`.
 - `benchmarks/scenarios/` — the scenario set below; `benchmarks/runs/` (ignored), `benchmarks/results/` and `benchmarks/README.md` — the batches and results, as above.
 
-**The workload**, `benchmarks/scenarios/`: two session scenarios, run *k* times per matrix entry, each a conversation paced like a person's — after an utterance the tester waits for the agent to be **idle** (`expect_idle`: the reply spoken, the step its completion wakes ended — no timer), so the next utterance is never dropped as busy; only the barge-in turns talk over the robot, after an `expect_output` / `expect_action` that makes them land while the work runs. A missed script step does not end the run.
+**The workload**, `benchmarks/scenarios/`: two session scenarios, run *k* times per matrix entry, each a conversation paced like a person's — after an utterance a `{"wait": "idle"}` holds the next one until the reply is spoken and the step its completion wakes has ended, so nothing is dropped as busy; only the barge-in inputs talk over the robot, after a `{"wait": "speaking"}` or `{"wait": {"running": "dance"}}`. Neither scenario has an expect: everything compared is a check.
 
-| Scenario | Session | Requires |
+| Scenario | Session (inputs, with the checks on each) | Top-level checks |
 |---|---|---|
-| `conversation` | "Hello there!" → "What can you do?" → a request for a long story, interrupted with "Stop!" as soon as the reply is issued → "Hi, I'm Alex." and "Can you hear me?" 0.5 s apart (busy handling) → "Thanks, that's all for now. Goodbye!". Seven user utterances. Rules: `answers_each_input` (so "Stop!" gets a spoken acknowledgement), `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel`, `cancels_when_asked` on "Stop!" | `speech_input`, an output Command — generic, so it runs unchanged against any application of that shape |
-| `commands` | "Hi!" then `set_emotion("happy")` while the robot still speaks → "Please dance for me!" → "Stop!" two seconds into the dance → `set_closest_user("u2")` → `set_closest_user("")`. Rules: `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel`, `cancels_when_asked` on "Stop!", `acts_when_asked` (dance; track `u2`; stop tracking), `quiet_on_background_change` on `emotion` (`answers_each_input` left out: a sensor write is not addressed to the agent) | `speech_input`, `emotion`, `closest_user`; `dance`, `switch_user_tracking`; the output Command — the demo's own |
+| `conversation` | "Hello there!" · "What can you do?" · a request for a long story · "Stop!" as soon as it is spoken (`cancels_when_asked`) · "Hi, I'm Alex." and "Can you hear me?" 0.5 s apart · "Thanks, that's all for now. Goodbye!" — generic: it needs only `speech_input` and an output Command | `answers_each_input` (so "Stop!" gets a spoken acknowledgement too), `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel` |
+| `commands` | "Hi!" · `emotion = "happy"` while it speaks (`quiet_on_background_change`) · "Please dance for me!" (`acts_when_asked: dance`) · "Stop!" two seconds into the dance (`cancels_when_asked`, `answers_each_input`) · `closest_user = "u2"` (`acts_when_asked: switch_user_tracking(user_id=u2)`) · `closest_user = ""` (`acts_when_asked: switch_user_tracking`) — the demo's own | `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel` |
 
 **No rule-by-rule micro scenarios ship.** A one-rule scenario run *k* times is a repeated e2e test, not a benchmark, and the session reports already name the clause a model broke — the failed check, the failed expectation, the timeline beside them. When a clean-context check of one rule is wanted (does a model that breaks a rule mid-session also break it cold?), a fifteen-line scenario file written for that model and run with `--scenarios <file>` does it; nothing needs committing.
 
@@ -220,14 +178,13 @@ A header lists each configuration's full `agent` block: the configuration under 
 
 Fast tier, `tests/testing/`:
 
-- `test_scenario.py` — a scenario round-trips; `name` ≠ stem, a step with two calls, an unknown tester Command, non-object args, an unknown check name each raise with the file and step index; `load_scenarios` orders by name.
-- `test_checks.py` — one passing and one failing hand-built timeline per built-in check (real `ReactionTrace` / `TriggerTrace` instances for the trigger-kind logic); `measures` on a known timeline, the turn numbers included; registering an extra check under a built-in's name raises.
+- The scenario format and the checks are tested with the tester ([wica-tester.md](wica-tester.md)): `tests/testing/test_scenario.py`, `test_checks.py`.
 - `tests/benchmark/test_matrix.py` — defaults merge under each entry, extra keys are kept, selection by id glob and tag, `skip_reason` against the environment, faults name the entry.
-- `tests/benchmark/test_runner.py`, `test_summary.py`, `test_cli.py` — the chain over the fake provider, key-less (`test_summary.py` also pins the totals, `compliance`, `answer_rate` and the per-turn numbers, and that the markdown opens with the per-configuration table): a target built in-test over a fake SUT (`speech_input` + `say`) with a script that satisfies `greeting`, `run_once` twice → both reports `ok`, the files exist, `aggregate` gives pass rate 1.0 and pass^k 1; a scripted model that `noop`s the greeting fails `no_noop_on_input` and pass^k is 0, while one that replies twice stays `ok` and moves `output_calls` to 2; a target raising `Skip` is a summary skip, not an error; a scenario whose `requires` the target lacks is skipped with the reason; `cli` selects entries by glob and tag, lists a disabled row as skipped unless opted in, and writes the summary.
+- `tests/benchmark/test_runner.py`, `test_summary.py`, `test_cli.py` — the chain over the fake provider, key-less (`test_summary.py` also pins the totals, `compliance`, `answer_rate` and the per-turn numbers, and that the markdown opens with the per-configuration table): a target built in-test over a fake SUT (`speech_input` + `say`) with a script that satisfies a greeting scenario, `run_once` twice → both reports `ok`, the files exist, `aggregate` gives pass rate 1.0 and pass^k 1; a scripted model that `noop`s the greeting breaks `no_noop_on_input` and pass^k is 0, while one that replies twice stays `ok` and moves `output_calls` to 2; a run stopped by an expect or a wait counts in pass^k and in the failed / stalled columns and in no other number; a target raising `Skip` is a summary skip, not an error; a scenario whose `requires` the target lacks is skipped with the reason; `cli` selects entries by glob and tag, lists a disabled row as skipped unless opted in, and writes the summary.
 
 Full-loop tier, one key-less file plus a rule, selected **by file** as [ci.md](ci.md) requires:
 
-- `tests-e2e/test_demo_bench_fake.py` — always-run, key-less: the whole `conversation` session through `DemoTarget` over the matrix's `fake` entry (its script plays every turn, the long story cancelled by a scripted tool-call id), asserting the report is `ok`, seven turns all answered, one unprompted output (the confirmation on the cancel's completion step) and both files written; a one-utterance greeting probe (`tests-e2e/support.greeting_probe`, a fixture, not benchmark data) likewise; the committed matrix loads with one enabled `default` per provider and the disabled fixture; the workload loads; a one-run `run_matrix` batch kept with `write_result` produces the five files, a `compliance` of 1 in the total, and leaves an existing `description.md` untouched. Joins the e2e-fake job.
+- `tests-e2e/test_demo_bench_fake.py` — always-run, key-less: the whole `conversation` session through `DemoTarget` over the matrix's `fake` entry (its script plays every turn, the long story cancelled by a scripted tool-call id), asserting the run completed with every check kept, seven turns all answered, one unprompted output (the confirmation on the cancel's completion step) and both files written; a one-utterance greeting probe (`tests-e2e/support.greeting_probe`, a fixture, not benchmark data) likewise; the committed matrix loads with one enabled `default` per provider and the disabled fixture; the workload loads; a one-run `run_matrix` batch kept with `write_result` produces the five files, a `compliance` of 1 in the total, and leaves an existing `description.md` untouched. Joins the e2e-fake job.
 - **No live test over the matrix.** The matrix is the benchmark's own list — models are added, disabled and retired as the benchmark's questions change, and each one carries its provider's quotas and latencies — so no test is parametrized over it: a matrix edit must never change what the test suite runs, and a model the key's plan cannot call must never turn `main` red. The live e2e set stays the fixed, scoped `PROVIDER_CONFIGS` list of [testing.md](testing.md); the matrix's models are exercised when the benchmark is run.
 
 Both import `benchmarks.bench` as the demo tests import `examples.conversation_demo.app` (the repo root on `sys.path`). One pytest run is a smoke test; the benchmark is the entry point with `--k`.
