@@ -2,6 +2,13 @@
 
 **WICA is an agentic framework for agents that take multimodal inputs and produce multimodal outputs**, such as a social robot that hears, sees and speaks, or an assistant that watches sensors and acts on them.
 
+How it works:
+
+- **The World** holds the agent's state: a registry of typed entries, rendered into the model's prompt at every reasoning step.
+- **Inputs** bring perceptions in: speech, a camera frame or a sensor event updates a World entry.
+- **The Agent** wakes when the World changes, reasons over it, and decides what to do.
+- **Commands** carry its actions out: speech, movement, an API call, each tracked back in the World.
+
 What sets it apart:
 
 - **The prompt is a view of state, not a transcript.** You keep a World of typed entries up to date, and every reasoning step renders it into the model's prompt.
