@@ -39,7 +39,7 @@ This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"):
 - **Target** — an application stood up as a running `Wica` for one benchmark configuration, plus how to shut it down. The runner never builds a `Wica` itself; the application does, exactly as its entry point would (the demo's `build_system` + `wire` + `start`, the interaction app's `build_system` + `wire` + `_start`), so what is benchmarked is the real system with its real persona, Commands and seeding. Only the peripherals the application chooses to bypass are doubled, by the application.
 - **Configuration** — one model under test: an **entry** of the matrix file, whose `agent` block (provider, model, `hf_provider`, `api_key_env`, history settings) is what differs between entries; the persona is shared through the file's `agent_defaults`. Its **label** in every report is the entry's `id`. The file is the **matrix**.
 - **Scenario** — a fixed user as `input` / `wait` / `expect` / `check` steps, one JSON file named by its stem ([wica-tester.md](wica-tester.md), "Scenarios"). A benchmark's scenarios are **sessions** — several user turns, paced as a person would pace them — so one run yields a whole conversation's worth of turns to measure; a scenario that pins one rule in a few steps is a regression probe, not a workload.
-- **Run** — one (configuration, scenario, repetition): one `TestRun`, one `Report`. Its outcome is `completed`, `failed` (an expect did not hold) or `stalled` (a wait timed out); only a completed run is **scored**.
+- **Run** — one (configuration, scenario, repetition): one `TestRun`, one `Report`. Its outcome is `completed` or `failed` (an expect did not hold, or a wait timed out); only a completed run is **scored**.
 - **Batch** — one invocation of the runner: a matrix × a scenario set × *k*, written to one dated folder of per-run reports plus a summary. Working data, git-ignored.
 - **Result** — a batch worth keeping: its summary and manifest copied under `benchmarks/results/<YYYYMMDD-HHMM>_<name>/` with a hand-written description and findings. Committed, and the only thing a spec or plan cites.
 - **Check** — a rule judged after the run (the tester's). What a benchmark measures is a model's **compliance**: the share of checks it kept over its scored runs, overall and per check.
@@ -50,7 +50,7 @@ This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"):
 The format, the four step kinds, the built-in checks and their windows are the tester's ([wica-tester.md](wica-tester.md), "Scenarios"); a benchmark adds three rules of use:
 
 - **Expects are few.** An expect stops the run, and a stopped run is not scored, so a benchmark scenario keeps them for what the session cannot continue without. What is compared between models is written as checks.
-- **Pacing is explicit and generous.** `wait` steps carry `within` budgets that include the slowest model's think time; a stall is reported, not scored.
+- **Pacing is explicit and generous.** `wait` steps carry `within` budgets that include the slowest model's think time; a timeout fails the run like a missed expect.
 - **Checks sit on the input they judge**, and the session-wide ones (`no_failed_reactions`, `no_colliding_cancel`, …) at the top level.
 
 **A chained reply is a measure, not a failure.** The output Command's completion re-triggers a step so the model *may* chain a second utterance ([commands.md](commands.md), "The output Command"); a rule breaking on it would penalize designed behavior. The runner counts it (`output_calls`, `unprompted_output` below), next to the checks.
@@ -117,35 +117,37 @@ The selection flags are `select_entries`' (`tts-engine`'s vocabulary); an entry 
 
 ### The summary
 
-**Stopped runs are counted, never scored.** A run that stopped — `failed` on an expect or `stalled` on a wait — is a failure for pass^k and is listed with the step that stopped it, but contributes to **no other metric**: no compliance, no latency, no tokens, no measure. Its numbers describe a session that did not happen as written, and mixing them in would compare models on different conversations.
+**Failed runs are counted, never scored.** A run that failed — an expect did not hold or a wait timed out — lowers the **completed** rate, counts against pass^k and is listed with the step that stopped it, but contributes to **no other metric**: no compliance, no latency, no tokens, no measure. Its numbers describe a session that did not happen as written, and mixing them in would compare models on different conversations.
+
+**Read completed before compliance.** Compliance is computed over completed runs only, so a model that fails hardest — never answers, returns empty responses, malformed tool calls — completes few runs and keeps a flattering compliance on the rest. The completed rate sits right before compliance in every table so the two are never read apart (the first batch's gpt-oss rows: 100% compliance, half the runs completed).
 
 **One row per configuration first** — every run of every scenario pooled, the row a reader compares models by (`Summary.totals`, scenario `"*"`):
 
 | Column | Meaning |
 |---|---|
-| runs, scored, failed, stalled | runs over every scenario; how many completed and were scored; how many stopped, by kind |
+| runs, completed | runs over every scenario; completed ÷ runs (the rest failed) |
 | pass^k | 1 when every run completed and kept every check, else 0 |
-| compliance | median over scored runs of *checks kept ÷ checks applied* |
+| compliance | median over completed runs of *checks kept ÷ checks applied* |
 | answered | median over runs of *turns answered ÷ turns* |
-| `reaction_latency`, `model_latency` p50 / p95 | pooled over every reaction of the scored runs |
+| `reaction_latency`, `model_latency` p50 / p95 | pooled over every reaction of the completed runs |
 | tokens in / out per turn, words per turn | per-run totals divided by the run's turns, median over runs |
 | unprompted, noops on input, dropped | per-run counts, median over runs |
 | checks broken | which checks broke, with counts |
 | stopped at | the steps runs stopped at, with counts — read it before the rest, since a model that stops often is scored on few runs |
 
-Then **one table of checks**, one row per configuration and one column per check any scored run applied (the built-ins first): *kept / applied* over the configuration's scored runs. It answers "which rule does this model break" at a glance.
+Then **one table of checks**, one row per configuration and one column per check any completed run applied (the built-ins first): *kept / applied* over the configuration's scored runs. It answers "which rule does this model break" at a glance.
 
-The per-run rates (`compliance`, `answer_rate`, `input_tokens_per_turn`, `output_tokens_per_turn`, `words_per_turn`) are derived when pooling, over scored runs only, from the run's check findings, its measures and its token samples; they appear in `per_run` beside the measures.
+The per-run rates (`compliance`, `answer_rate`, `input_tokens_per_turn`, `output_tokens_per_turn`, `words_per_turn`) are derived when pooling, over completed runs only, from the run's check findings, its measures and its token samples; they appear in `per_run` beside the measures.
 
 Then **one table per scenario**, one row per configuration:
 
 | Column | Meaning |
 |---|---|
-| runs / passed | *k*, and how many runs completed and kept every check |
-| failed, stalled | the stopped runs, by kind |
+| runs, completed | *k*, and completed ÷ runs |
+| passed | runs that completed and kept every check |
 | pass rate | passed ÷ runs |
 | pass^k | 1 when every run passed, else 0 — the "reliably follows the rules" bit |
-| checks broken | the checks that broke over the scored runs, with counts |
+| checks broken | the checks that broke over the completed runs, with counts |
 | `reaction_latency`, `model_latency` | p50 / p95 pooled over the runs' samples |
 | `reactions_per_input` p50, `unprompted_output`, `dropped_inputs` | the re-trigger chain's cost |
 | `input_tokens`, `output_tokens` per run (summed per run, median over runs); cache-read share over the reactions that report one | money |
@@ -180,7 +182,7 @@ Fast tier, `tests/testing/`:
 
 - The scenario format and the checks are tested with the tester ([wica-tester.md](wica-tester.md)): `tests/testing/test_scenario.py`, `test_checks.py`.
 - `tests/benchmark/test_matrix.py` — defaults merge under each entry, extra keys are kept, selection by id glob and tag, `skip_reason` against the environment, faults name the entry.
-- `tests/benchmark/test_runner.py`, `test_summary.py`, `test_cli.py` — the chain over the fake provider, key-less (`test_summary.py` also pins the totals, `compliance`, `answer_rate` and the per-turn numbers, and that the markdown opens with the per-configuration table): a target built in-test over a fake SUT (`speech_input` + `say`) with a script that satisfies a greeting scenario, `run_once` twice → both reports `ok`, the files exist, `aggregate` gives pass rate 1.0 and pass^k 1; a scripted model that `noop`s the greeting breaks `no_noop_on_input` and pass^k is 0, while one that replies twice stays `ok` and moves `output_calls` to 2; a run stopped by an expect or a wait counts in pass^k and in the failed / stalled columns and in no other number; a target raising `Skip` is a summary skip, not an error; a scenario whose `requires` the target lacks is skipped with the reason; `cli` selects entries by glob and tag, lists a disabled row as skipped unless opted in, and writes the summary.
+- `tests/benchmark/test_runner.py`, `test_summary.py`, `test_cli.py` — the chain over the fake provider, key-less (`test_summary.py` also pins the totals, `compliance`, `answer_rate` and the per-turn numbers, and that the markdown opens with the per-configuration table): a target built in-test over a fake SUT (`speech_input` + `say`) with a script that satisfies a greeting scenario, `run_once` twice → both reports `ok`, the files exist, `aggregate` gives pass rate 1.0 and pass^k 1; a scripted model that `noop`s the greeting breaks `no_noop_on_input` and pass^k is 0, while one that replies twice stays `ok` and moves `output_calls` to 2; a run stopped by an expect or a wait counts in pass^k and the completed rate and in no other number; a target raising `Skip` is a summary skip, not an error; a scenario whose `requires` the target lacks is skipped with the reason; `cli` selects entries by glob and tag, lists a disabled row as skipped unless opted in, and writes the summary.
 
 Full-loop tier, one key-less file plus a rule, selected **by file** as [ci.md](ci.md) requires:
 

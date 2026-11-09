@@ -121,9 +121,9 @@ The metric keys of the report are core's measure names (`reaction_latency`, `mod
 
 **Latency is a measure, not a threshold.** The Harness records distributions (min, median, p95 per metric) for analytics and model-to-model comparison; a scenario *may* add a threshold as an expectation (`expect_latency`), and no threshold is ever a built-in default.
 
-**Expectations wait, with a timeout**, over the timeline and the mirror World. They scan forward from a **watermark**: `set()` moves it to the end of the timeline as it stands *before* the write (the SUT may react before `set()` returns), and a matched expectation moves it past the match, so a sequence of expectations never re-matches an earlier event and repeating one means "the next one". On `TestRun` they are plain blocking calls (a pytest calls them from its own thread, never from the SUT's loop thread); as tester Commands they are async wrappers that run the same blocking call off the tester's loop (`asyncio.to_thread`), so a waiting expectation never blocks the tester's own World. The family: `expect_action(name, where=…, state=…, within=…)`, `expect_output(contains=…, within=…)`, `expect_text(contains=…, within=…)`, `expect_no_action(name, for_=…)`, `expect_world(key, equals=…)`, `expect_latency(metric, p95_below=…)`. Each completes with a pass/fail **finding**. Beside them, **`wait_for(condition, within=…)`** is the pacing call — `"idle"`, `"speaking"`, `{"running": name}`, `{"seconds": n}`, as "Scenarios" defines them — whose timeout is a *stall*, not a failed expectation; it does not move the watermark. `expect_output` matches the output Command whatever its name and cannot assume a `text` argument (the output Command's signature is application-defined), so it matches against the call's string-valued args unless the scenario names the arg. The same functions serve every driver: a pytest calls them directly on `TestRun`, a fake script or a live model calls them as tester Commands.
+**Expectations wait, with a timeout**, over the timeline and the mirror World. They scan forward from a **watermark**: `set()` moves it to the end of the timeline as it stands *before* the write (the SUT may react before `set()` returns), and a matched expectation moves it past the match, so a sequence of expectations never re-matches an earlier event and repeating one means "the next one". On `TestRun` they are plain blocking calls (a pytest calls them from its own thread, never from the SUT's loop thread); as tester Commands they are async wrappers that run the same blocking call off the tester's loop (`asyncio.to_thread`), so a waiting expectation never blocks the tester's own World. The family: `expect_action(name, where=…, state=…, within=…)`, `expect_output(contains=…, within=…)`, `expect_text(contains=…, within=…)`, `expect_no_action(name, for_=…)`, `expect_world(key, equals=…)`, `expect_latency(metric, p95_below=…)`. Each completes with a pass/fail **finding**. Beside them, **`wait_for(condition, within=…)`** is the pacing call — `"idle"`, `"speaking"`, `{"running": name}`, `{"seconds": n}`, as "Scenarios" defines them — whose timeout fails like an expectation (a `wait` finding, so a reader knows it was pacing); it does not move the watermark. `expect_output` matches the output Command whatever its name and cannot assume a `text` argument (the output Command's signature is application-defined), so it matches against the call's string-valued args unless the scenario names the arg. The same functions serve every driver: a pytest calls them directly on `TestRun`, a fake script or a live model calls them as tester Commands.
 
-The **report** is a dataclass serializable to JSON and Markdown: scenario, both sides' configs, the timeline, the metrics summary, the outcome (`completed`, `failed` or `stalled`, with the step that stopped it), findings (from expectations, then from checks), issues (soft, model-reported), and a verdict. `report.ok` — completed and every check held — is what a pytest asserts.
+The **report** is a dataclass serializable to JSON and Markdown: scenario, both sides' configs, the timeline, the metrics summary, the outcome (`completed` or `failed`, with the step that stopped it), findings (from expectations, then from checks), issues (soft, model-reported), and a verdict. `report.ok` — completed and every check held — is what a pytest asserts.
 
 ### Scenarios — input, wait, expect, check
 
@@ -132,7 +132,7 @@ A **scenario** is a fixed user written as data: one JSON file, named by its stem
 | Kind | Example | Runs | When it does not hold |
 |---|---|---|---|
 | `input` | `{"input": {"speech_input": "Stop!"}}` | at once: the user writes one Input | — the user acting |
-| `wait` | `{"wait": "idle"}`, `{"wait": "speaking"}`, `{"wait": {"running": "dance"}}`, `{"wait": {"seconds": 2}}` | blocks until the condition holds (`"within"`, default 60 s) | the run **stops as stalled**: the SUT never reached the state the script needs |
+| `wait` | `{"wait": "idle"}`, `{"wait": "speaking"}`, `{"wait": {"running": "dance"}}`, `{"wait": {"seconds": 2}}` | blocks until the condition holds (`"within"`, default 60 s) | the run **stops as failed**: the SUT never reached the state the script needs |
 | `expect` | `{"expect": {"action": "dance"}, "within": 20}` | blocks until it holds (`"within"`, default 30 s) | the run **stops as failed** |
 | `check` | `{"check": "cancels_when_asked"}`, `{"check": {"acts_when_asked": "dance"}}` | after the run, over the finished timeline | nothing during the run: a **result** — held or broken |
 
@@ -176,7 +176,7 @@ A **scenario** is a fixed user written as data: one JSON file, named by its stem
 "Started since the last input" rather than "running now": a condition the timeline can always decide, even when the Command is short enough to have ended before the wait looks.
 - `{"seconds": n}` — a deliberate delay, the only timer, for "two seconds into the dance".
 
-A wait that times out stops the run as **stalled** and names what was still running (or never started). Stalled and failed behave the same — the run ends, it is not a pass — and are labelled apart because they usually mean different things: *too slow, or never started the work the script leans on* versus *did the wrong thing*.
+A wait that times out stops the run as **failed**, exactly like an expect, and names what was still running or never started. A wait is an expectation with a default timeout: one outcome, and the stopping step (`wait_for(…)` or `expect_…(…)`) says which kind of miss it was.
 
 **Expect — an assertion.** A blocking condition over the timeline after the last input, from a watermark so a sequence of expects never re-matches an earlier event:
 
@@ -210,7 +210,7 @@ The built-in checks are generic: they hold for any WICA agent because the runtim
 
 `answers_each_input`, `no_noop_on_input`, `no_failed_reactions` and `no_colliding_cancel` read naturally either way — on a step for that input, top-level for every input. `cancels_when_asked`, `acts_when_asked` and `quiet_on_background_change` only mean something on a step. **The registry is open**: `CHECKS` holds the built-ins and `build_registry(extra_checks)` adds an application's own (a persona's style rules), selected by name like any other; a name clash is an error.
 
-**A run's outcome** is one of `completed`, `failed` (an expect did not hold — the step is named) or `stalled` (a wait timed out — the step is named). Checks are evaluated only on a **completed** run: a stopped run has no meaningful windows past the stop, and its outcome already says it is not a pass. `report.ok` is *completed and every check held*; a pytest asserts it, so a test can lean on checks as well as on expects.
+**A run's outcome** is `completed` or `failed` (an expect did not hold, or a wait timed out — the step is named). Checks are evaluated only on a **completed** run: a stopped run has no meaningful windows past the stop, and its outcome already says it is not a pass. `report.ok` is *completed and every check held*; a pytest asserts it, so a test can lean on checks as well as on expects.
 
 **Requirements are derived, not written.** The Inputs a scenario writes (its `input` steps), the Commands it names (in waits, expects and check args) and whether it needs an output Command (`"speaking"`, `output` expects, the checks that read it) are what the SUT must expose; the runner checks them against the Probe before starting and skips a scenario whose SUT lacks one. `timeout_s` (default 300) bounds the whole run; `params` is an opaque object for whoever opens the SUT (an application's initial state).
 
@@ -233,7 +233,7 @@ The tester's Command set *is* the Harness API: `set_<key>(value)` per SUT Input 
  {"tool_calls": [{"name": "finish",            "args": {"verdict": "pass"}}]}]
 ```
 
-A failed expect or a stalled wait ends the chain: the Command returns the stop and the tester's next step is `finish`, so the run ends at once with its outcome.
+A failed expect or a timed-out wait ends the chain: the Command returns the stop and the tester's next step is `finish`, so the run ends at once with its outcome.
 
 Two rules make it deterministic:
 

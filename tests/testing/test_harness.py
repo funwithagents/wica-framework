@@ -286,9 +286,9 @@ def test_wait_for_running_and_speaking_hold_once_started_since_the_last_input(
     try:
         run.set("prompt", "go")
         assert run.wait_for({"running": "slow"}, within=5).ok
-        stalled = run.wait_for({"running": "ghost"}, within=0.2)
-        assert not stalled.ok and stalled.kind == "wait"
-        assert "ghost has not started since the last input" in stalled.detail
+        timed_out = run.wait_for({"running": "ghost"}, within=0.2)
+        assert not timed_out.ok and timed_out.kind == "wait"
+        assert "ghost has not started since the last input" in timed_out.detail
         # "speaking" needs an output Command, which this SUT has none of.
         assert "no output Command" in run.wait_for("speaking", within=0.1).detail
         started = time.monotonic()

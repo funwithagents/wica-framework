@@ -58,7 +58,7 @@ class Skipped:
 class RunResult:
     """One run that ran (whatever its outcome): the report, and — for a completed run only — the
     per-run measures and the raw metric samples the summary pools. A stopped run carries none:
-    it is counted, never scored."""
+    it counts against pass^k and in no other number."""
 
     report: Report
     measures: dict[str, float]
@@ -66,7 +66,7 @@ class RunResult:
     repetition: int
 
     @property
-    def scored(self) -> bool:
+    def completed(self) -> bool:
         return self.report.outcome == "completed"
 
     @property

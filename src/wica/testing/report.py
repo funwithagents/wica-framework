@@ -67,7 +67,7 @@ class SutEvent:
 
 
 FindingKind = Literal["expect", "wait", "check", "other"]
-RunOutcome = Literal["completed", "failed", "stalled"]
+RunOutcome = Literal["completed", "failed"]
 
 
 @dataclass(frozen=True)
@@ -215,7 +215,7 @@ class Report:
     verdict: str | None  # "pass" | "fail" | None when finish() was never called
     summary: str | None
     outcome: RunOutcome = (
-        "completed"  # failed: an expect did not hold; stalled: a wait timed out
+        "completed"  # failed: an expect did not hold or a wait timed out
     )
     stopped_at: str | None = None  # the step that stopped the run, when it stopped
 

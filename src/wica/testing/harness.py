@@ -354,7 +354,7 @@ class TestRun:
 
     def wait_for(self, condition: WaitCondition, *, within: float = 60.0) -> Finding:
         """Pacing: blocks until *condition* holds, read from the timeline — no timer except
-        `{"seconds": n}`. A timeout is a **stall** (a `wait` finding), not a failed expectation.
+        `{"seconds": n}`. A timeout is a failed `wait` finding; a scenario stops the run on it, as on a failed expect.
         The watermark is not moved.
 
         - `"idle"` — the SUT has finished reacting: every write to a triggering Input seen (or
@@ -463,13 +463,13 @@ class TestRun:
                 Issue(severity=severity, what=what, evidence=evidence, t=_t())
             )
 
-    def stop(self, outcome: RunOutcome, at: str) -> None:
-        """End the run early: an expect did not hold (`"failed"`) or a wait timed out
-        (`"stalled"`) at step *at*. `finished` is set; a later write is refused."""
-        self._action("stop", outcome=outcome, at=at)
+    def stop(self, at: str) -> None:
+        """End the run early as **failed** at step *at*: an expect did not hold or a wait timed
+        out. `finished` is set; a later write is refused."""
+        self._action("stop", at=at)
         with self._cond:
             if self._outcome == "completed":
-                self._outcome = outcome
+                self._outcome = "failed"
                 self._stopped_at = at
             self._verdict = "fail"
         self.finished.set()

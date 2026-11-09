@@ -128,11 +128,11 @@ def build_tester(
         tester.register_command(_set_command(run, key, entry_config.type))
 
     def ok_or_failed(finding: Finding) -> str:
-        """A failed expect stops the run as failed, a timed-out wait as stalled: the run's
+        """A failed expect or a timed-out wait stops the run as failed: the run's
         `finished` is set, `run_script` returns, and any step still to come is refused."""
         if finding.ok:
             return "ok"
-        run.stop("stalled" if finding.kind == "wait" else "failed", finding.expectation)
+        run.stop(finding.expectation)
         return f"stopped: {finding.detail}"
 
     async def wait(seconds: float) -> str:

@@ -1,6 +1,6 @@
 """`run_once` / `run_matrix` over a fake target (specs/benchmark.md, "The target", "The runner"):
 the chain writes one report per run, a rule-breaking model breaks the checks, a chained reply is
-a measure, a stopped run is counted and not scored, a `Skip` or an unmet requirement is a summary
+a measure, a failed run counts and is not scored, a `Skip` or an unmet requirement is a summary
 skip."""
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def test_run_once_writes_both_files_and_returns_the_judged_report(
 ):
     target = fake_target()
     result = run_once(target, GREETING, repetition=1, out_dir=tmp_path)
-    assert isinstance(result, RunResult) and result.scored
+    assert isinstance(result, RunResult) and result.completed
     assert result.report.ok, [f for f in result.report.findings if not f.ok]
     assert tuple(f.expectation for f in result.report.checks()) == GREETING.check_names
     assert result.measures["output_calls"] == 1 and result.measures["noop_steps"] == 1
@@ -55,13 +55,15 @@ def test_a_model_that_noops_the_greeting_breaks_the_checks(
     tmp_path: Path, fake_target: Callable[..., FakeTarget]
 ):
     result = run_once(fake_target([NOOP]), GREETING, repetition=1, out_dir=tmp_path)
-    assert isinstance(result, RunResult) and result.scored  # it completed: it is scored
+    assert (
+        isinstance(result, RunResult) and result.completed
+    )  # it completed: it is scored
     broken = {f.expectation for f in result.report.checks() if not f.ok}
     assert broken == {"answers_each_input", "no_noop_on_input"}
     assert not result.report.ok
 
 
-def test_a_stopped_run_is_counted_and_not_scored(
+def test_a_failed_run_is_counted_and_not_scored(
     tmp_path: Path, fake_target: Callable[..., FakeTarget]
 ):
     needs_a_reply = Scenario(
@@ -76,7 +78,7 @@ def test_a_stopped_run_is_counted_and_not_scored(
     result = run_once(
         fake_target([NOOP]), needs_a_reply, repetition=1, out_dir=tmp_path
     )
-    assert isinstance(result, RunResult) and not result.scored
+    assert isinstance(result, RunResult) and not result.completed
     assert result.report.outcome == "failed"
     assert result.report.stopped_at == "step 1: expect_output()"
     assert (

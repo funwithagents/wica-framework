@@ -92,7 +92,7 @@ def test_a_failed_expectation_stops_the_scripted_run(
     assert not any(e.kind == "input_written" for e in report.timeline)
 
 
-def test_a_wait_that_times_out_stalls_the_scripted_run(
+def test_a_wait_that_times_out_fails_the_scripted_run(
     sut_factory: Callable[..., Wica],
 ):
     sut = sut_factory([{"text": ""}])
@@ -110,7 +110,7 @@ def test_a_wait_that_times_out_stalls_the_scripted_run(
         )
     finally:
         run.close()
-    assert report.outcome == "stalled" and not report.ok
+    assert report.outcome == "failed" and not report.ok
 
 
 def test_tester_commands_match_what_the_scripted_tester_registers(

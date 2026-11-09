@@ -1,7 +1,7 @@
 """Scenarios (specs/wica-tester.md, "Scenarios"): the four step kinds load and validate, the
 requirements are derived from the steps, the steps translate into the scripted tester's script,
-and `run_scenario` plays them on a fake SUT — completed (checks judged), failed on an expect,
-stalled on a wait."""
+and `run_scenario` plays them on a fake SUT — completed (checks judged), or failed on an expect
+or a wait that times out."""
 
 from __future__ import annotations
 
@@ -265,7 +265,7 @@ def test_a_failed_expect_stops_the_run_and_skips_the_checks(
     assert len(writes) == 1  # nothing was written past the stop
 
 
-def test_a_wait_that_times_out_stalls_the_run(sut_factory: Callable[..., Wica]):
+def test_a_wait_that_times_out_fails_the_run(sut_factory: Callable[..., Wica]):
     report = _play(
         sut_factory,
         [{"text": "no tools today"}],
@@ -274,9 +274,9 @@ def test_a_wait_that_times_out_stalls_the_run(sut_factory: Callable[..., Wica]):
             WaitStep({"running": "add"}, within=0.5),
         ),
     )
-    assert report.outcome == "stalled" and not report.ok
+    assert report.outcome == "failed" and not report.ok
     assert report.stopped_at is not None and report.stopped_at.startswith(
         "step 1: wait_for("
     )
-    stall = [f for f in report.findings if f.kind == "wait"][0]
-    assert "add has not started since the last input" in stall.detail
+    timeout = [f for f in report.findings if f.kind == "wait"][0]
+    assert "add has not started since the last input" in timeout.detail

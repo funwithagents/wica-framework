@@ -3,7 +3,7 @@ steps. Implements specs/wica-tester.md, "Scenarios".
 
 - `input` writes one SUT Input.
 - `wait` paces the conversation ("idle", "speaking", {"running": name}, {"seconds": n}); a timeout
-  stops the run as **stalled**.
+  stops the run as **failed**, like an expect.
 - `expect` asserts; a miss stops the run as **failed**.
 - `check` is a rule judged after a completed run, over the window of the input it follows (from
   that input to the next); top-level `checks` cover the whole run.
@@ -377,23 +377,23 @@ def run_scenario(
     run: TestRun, scenario: Scenario, *, registry: Mapping[str, Check] | None = None
 ) -> Report:
     """Play *scenario*'s steps on *run* (the SUT already started), stop on a failed expect or a
-    stalled wait, then judge the checks if the run completed. Returns the report."""
+    timed-out wait, then judge the checks if the run completed. Returns the report."""
     deadline = time.monotonic() + scenario.timeout_s
     for index, step in enumerate(scenario.steps):
         if time.monotonic() > deadline:
-            run.stop("stalled", f"step {index}: scenario timeout {scenario.timeout_s}s")
+            run.stop(f"step {index}: scenario timeout {scenario.timeout_s}s")
             break
         if isinstance(step, InputStep):
             run.set(step.key, step.value)
         elif isinstance(step, WaitStep):
             finding = run.wait_for(step.condition, within=step.within)
             if not finding.ok:
-                run.stop("stalled", f"step {index}: {finding.expectation}")
+                run.stop(f"step {index}: {finding.expectation}")
                 break
         elif isinstance(step, ExpectStep):
             finding = _play_expect(run, step)
             if not finding.ok:
-                run.stop("failed", f"step {index}: {finding.expectation}")
+                run.stop(f"step {index}: {finding.expectation}")
                 break
     else:
         run.finish("pass")
