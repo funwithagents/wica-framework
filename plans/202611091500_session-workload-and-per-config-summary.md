@@ -31,6 +31,10 @@ Follows plan `202611091100` the same day; the format, checks, runner, matrix and
 - **A confirmation after a cancel counts as unprompted output**: it is issued on the step the cancel's completion wakes, which has no external trigger. Consistent across models, and named in the spec so a reader does not misread the column.
 - **Cost per model is still out**: it needs a price per entry in the matrix; open question 6.
 
+## Revision 2026-11-09, after the first batch
+
+The first batch (`benchmarks/results/20261109-1417_first-look`) showed the pacing wrong: the one-second pause after a reply landed inside the step the reply's completion wakes, and drop-when-busy discarded the next utterance (two of seven in every run). Fixed by `TestRun.expect_idle` / the `expect_idle` tester Command (specs/wica-tester.md, "Harness"): no timer, the timeline says when every trigger is consumed, every Command terminal and every re-triggering completion's step woken. Both sessions end each turn with it. Same revision: the reasoning models run at the provider's floor (`reasoning_effort` low on the Claude 5.5 line, `minimal` for gpt-5-mini, `none` for gpt-5.6 through the Responses API, `thinking_level` low for Gemini) so latency compares like with like, and gpt-5.6 gets `use_responses_api`, since chat completions reject tools with reasoning for it.
+
 ## Verification
 
 - `uv run ruff check .`, `uv run ruff format --check .`, `uv run pyright` — clean.

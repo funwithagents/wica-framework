@@ -32,6 +32,7 @@ TESTER_COMMANDS = frozenset(
         "expect_output",
         "expect_text",
         "expect_no_action",
+        "expect_idle",
         "expect_world",
         "expect_latency",
         "note",

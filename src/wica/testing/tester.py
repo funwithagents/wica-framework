@@ -152,6 +152,12 @@ def build_tester(
         finding = await asyncio.to_thread(run.expect_no_action, name, for_=for_)
         return ok_or_failed(finding)
 
+    async def expect_idle(within: float = 30.0) -> str:
+        """Wait until the SUT has finished reacting: no step running, no Command running, no
+        completion left to wake a step. Use it between turns instead of a fixed wait."""
+        finding = await asyncio.to_thread(run.expect_idle, within=within)
+        return ok_or_failed(finding)
+
     async def expect_world(key: str, equals: str, within: float = 5.0) -> str:
         """Expect the SUT's World entry *key* to equal *equals*."""
         finding = await asyncio.to_thread(
@@ -187,6 +193,7 @@ def build_tester(
         expect_output,
         expect_text,
         expect_no_action,
+        expect_idle,
         expect_world,
         expect_latency,
         note,

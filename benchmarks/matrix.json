@@ -1,5 +1,5 @@
 {
-  "_comment": "WICA demo benchmark matrix (specs/benchmark.md, 'The matrix'). One entry per model under test; 'agent' is the config's agent block, merged over 'agent_defaults' (the demo's persona, so every row drives the same robot). Ids verified 2026-11-09 against each provider's models endpoint (Anthropic, Mistral, the Gemini API list, the Hub's inference_provider filter) or by a one-token chat probe (OpenAI; the key has no model-list scope) \u2014 see README.md, 'Model catalog'. Optional per-entry keys: tags (filter with --tags / --exclude-tags: 'default' = the demo's committed model for that provider; 'small' / 'mid' / 'large' = the provider's own tier words; 'reasoning' = thinks before answering; 'open' = open weights; 'api' = hosted; 'fixture' = no network, scripted), enabled (false = opt-in with --include-disabled), requires_env (extra env vars that gate the entry), notes.",
+  "_comment": "WICA demo benchmark matrix (specs/benchmark.md, 'The matrix'). One entry per model under test; 'agent' is the config's agent block, merged over 'agent_defaults' (the demo's persona, so every row drives the same robot). Ids verified 2026-11-09 against each provider's models endpoint (Anthropic, Mistral, the Gemini API list, the Hub's inference_provider filter) or by a one-token chat probe (OpenAI; the key has no model-list scope) \u2014 see README.md, 'Model catalog'. Optional per-entry keys: tags (filter with --tags / --exclude-tags: 'default' = the demo's committed model for that provider; 'small' / 'mid' / 'large' = the provider's own tier words; 'reasoning' = thinks before answering; 'open' = open weights; 'api' = hosted; 'fixture' = no network, scripted), enabled (false = opt-in with --include-disabled), requires_env (extra env vars that gate the entry), notes. Reasoning models run at the provider's floor (Anthropic reasoning_effort low \u2014 thinking cannot be off on the 5.5 line; OpenAI minimal / none; Gemini thinking_level low) so the latency column compares like with like: a conversational robot wants the fastest answer a model gives.",
   "agent_defaults": {
     "system_prompt_file": "../examples/conversation_demo/prompts/wica.md"
   },
@@ -178,39 +178,48 @@
       "agent": {
         "provider": "anthropic",
         "model": "claude-haiku-5-5",
-        "api_key_env": "WICA_ANTHROPIC_API_KEY"
+        "api_key_env": "WICA_ANTHROPIC_API_KEY",
+        "model_kwargs": {
+          "reasoning_effort": "low"
+        }
       },
       "tags": [
         "api",
         "small"
       ],
-      "notes": "Current Haiku; thinking on by default."
+      "notes": "Current Haiku; thinking on by default. Reasoning at the provider's floor (reasoning_effort=low)."
     },
     {
       "id": "anthropic/claude-sonnet-5-5",
       "agent": {
         "provider": "anthropic",
         "model": "claude-sonnet-5-5",
-        "api_key_env": "WICA_ANTHROPIC_API_KEY"
+        "api_key_env": "WICA_ANTHROPIC_API_KEY",
+        "model_kwargs": {
+          "reasoning_effort": "low"
+        }
       },
       "tags": [
         "api",
         "mid"
       ],
-      "notes": "Current Sonnet; thinking on by default."
+      "notes": "Current Sonnet; thinking on by default. Reasoning at the provider's floor (reasoning_effort=low)."
     },
     {
       "id": "anthropic/claude-opus-5-5",
       "agent": {
         "provider": "anthropic",
         "model": "claude-opus-5-5",
-        "api_key_env": "WICA_ANTHROPIC_API_KEY"
+        "api_key_env": "WICA_ANTHROPIC_API_KEY",
+        "model_kwargs": {
+          "reasoning_effort": "low"
+        }
       },
       "tags": [
         "api",
         "large"
       ],
-      "notes": "Current Opus; thinking always on."
+      "notes": "Current Opus; thinking always on. Reasoning at the provider's floor (reasoning_effort=low)."
     },
     {
       "id": "openai/gpt-4o",
@@ -257,28 +266,35 @@
       "agent": {
         "provider": "openai",
         "model": "gpt-5-mini",
-        "api_key_env": "WICA_OPENAI_API_KEY"
+        "api_key_env": "WICA_OPENAI_API_KEY",
+        "model_kwargs": {
+          "reasoning_effort": "minimal"
+        }
       },
       "tags": [
         "api",
         "small",
         "reasoning"
       ],
-      "notes": "Small reasoning model; latency is the question."
+      "notes": "Small reasoning model; latency is the question. Reasoning at the provider's floor (reasoning_effort=minimal)."
     },
     {
       "id": "openai/gpt-5.6",
       "agent": {
         "provider": "openai",
         "model": "gpt-5.6",
-        "api_key_env": "WICA_OPENAI_API_KEY"
+        "api_key_env": "WICA_OPENAI_API_KEY",
+        "model_kwargs": {
+          "use_responses_api": true,
+          "reasoning_effort": "none"
+        }
       },
       "tags": [
         "api",
         "large",
         "reasoning"
       ],
-      "notes": "Current flagship line (gpt-5.6-sol also answers)."
+      "notes": "Current flagship line (gpt-5.6-sol also answers); tools need the Responses API here. Reasoning at the provider's floor (use_responses_api=True, reasoning_effort=none)."
     },
     {
       "id": "google-genai/gemini-3.8-flash",
