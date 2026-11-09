@@ -68,6 +68,8 @@ The output Command runs through the **same uniform lifecycle** as any other Comm
 
 Shipping default is `True`; the constant exists so flipping the framework-wide default is a one-line change, not a refactor, and the per-Command flag lets one application choose differently without touching it. The choice is recorded, not hidden, precisely because the cost/behavior trade is real. `include_in_prompt` stays `True` regardless, so barge-in works either way.
 
+While the output Command is bound, the Agent also **forces a tool call** on every model call (`AgentConfig.force_tool_call`, default `true`), so a model cannot slip back to a plain-text reply the user never hears; doing nothing stays possible through `noop`. See [agent.md](agent.md), "Forcing a tool call".
+
 ### `noop` — the model choosing not to act
 
 LLMs are unreliable at returning *genuinely* empty output, so "reply with empty text to do nothing" is a fragile terminator. Instead the Agent **auto-registers a zero-argument WICA-native `noop` Command** (always, independent of any output Command — "the agent may choose not to react to an observation" is generally useful) that the model calls to signal *no reaction*.
