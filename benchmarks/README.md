@@ -12,7 +12,7 @@ it uses is `wica.benchmark`, the scenario format and checks are `wica.testing`'s
 | Path | What |
 |---|---|
 | `bench.py` | `DemoTarget` and the `wica-demo-bench` entry point |
-| `matrix.json` | the matrix: one entry per model under test (`id`, `agent` block, `tags`, `enabled`, `notes`), the demo's persona shared through `agent_defaults`; the `fake` fixture is its opt-in key-less row |
+| `matrix.json` | the matrix: one entry per model under test (`id`, `agent` block, `tags`, `enabled`, `notes`), nineteen models over five providers, the demo's persona shared through `agent_defaults`; the `fake` fixture is its opt-in key-less row — see "Model catalog" |
 | `scenarios/*.json` | **the workload**: `conversation` (a generic session — greeting, question, a story interrupted by "Stop!", two quick utterances, goodbye) and `commands` (the demo's own actions); each a fixed user as a scripted-tester script + the checks to run over the whole session |
 | `pins/*.json` | seven rule-by-rule micro scenarios (one primer clause each), for debugging a specific rule with `--scenarios benchmarks/pins`; not the workload, not run by CI beyond the `greeting` smoke |
 | `runs/<stamp>/` | **batches** — per-run reports and summaries, git-ignored working data |
@@ -49,11 +49,19 @@ and about a minute, so five models × two scenarios × five repetitions is on th
 
 ## Model catalog
 
-`matrix.json` lists one `default`-tagged row per provider — the model the demo's own
-`agent.<provider>.config.json` commits, verified by the live e2e tier — and is where more models go:
-one row per model to compare, the id as `<provider>/<model>`, a tag per family you want to select on.
-Add `enabled: false` for a row you do not want in every batch (an older snapshot, an expensive
-model), `requires_env` for a gate beyond the key variable.
+`matrix.json` has one row per model, `<provider>/<model>` (a suffix when the same model is reached several
+ways: `gpt-oss-120b@cerebras`). Every provider keeps its `default` row — the model the demo's own
+`agent.<provider>.config.json` commits — plus the provider's usual tiers, tagged `small` / `mid` / `large`
+(and `reasoning`, `open`) so a batch can select on them: `--tags small`, `--exclude-tags reasoning`.
+
+Ids were verified on 2026-11-09, as the `_comment` records: Anthropic and Mistral from their `GET /v1/models`
+(Mistral's aliases resolved: `mistral-small-latest` → `mistral-small-2603`, `mistral-medium-latest` →
+`mistral-medium-3.5`), Google from the Gemini API models list (`generateContent` models), Hugging Face from
+the Hub's `inference_provider` filter, OpenAI by a one-token chat request per id (the key has no model-list
+scope; `gpt-4.1-nano` and `o4-mini` are retired, `gpt-5.3` / `gpt-5.5-mini` / `gpt-5.6-mini` do not exist).
+Re-verify the same way when adding a row; a retired id shows up as `no_failed_reactions ×n` with a
+`model_error`, never silently. Add `enabled: false` for a row you do not want in every batch (an older
+snapshot, an expensive model), `requires_env` for a gate beyond the key variable.
 
 ## Keeping a result
 
