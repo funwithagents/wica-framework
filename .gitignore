@@ -10,6 +10,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Reports the toolkit-driven e2e tests write when run with --wica-report-dir (specs/wica-tester.md)
+tests-e2e/reports/
+
 # Claude Code personal settings (not shared)
 .claude/settings.local.json
 
