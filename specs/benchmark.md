@@ -19,7 +19,6 @@ tests:
   - tests/benchmark/test_summary.py
   - tests/benchmark/test_cli.py
   - tests-e2e/test_demo_bench_fake.py
-  - tests-e2e/test_demo_bench.py
 ---
 
 # WICA benchmark: scenarios, checks and the runner
@@ -219,10 +218,10 @@ Fast tier, `tests/testing/`:
 - `tests/benchmark/test_matrix.py` — defaults merge under each entry, extra keys are kept, selection by id glob and tag, `skip_reason` against the environment, faults name the entry.
 - `tests/benchmark/test_runner.py`, `test_summary.py`, `test_cli.py` — the chain over the fake provider, key-less (`test_summary.py` also pins the totals, `compliance`, `answer_rate` and the per-turn numbers, and that the markdown opens with the per-configuration table): a target built in-test over a fake SUT (`speech_input` + `say`) with a script that satisfies `greeting`, `run_once` twice → both reports `ok`, the files exist, `aggregate` gives pass rate 1.0 and pass^k 1; a scripted model that `noop`s the greeting fails `no_noop_on_input` and pass^k is 0, while one that replies twice stays `ok` and moves `output_calls` to 2; a target raising `Skip` is a summary skip, not an error; a scenario whose `requires` the target lacks is skipped with the reason; `cli` selects entries by glob and tag, lists a disabled row as skipped unless opted in, and writes the summary.
 
-Full-loop tier, two files, selected **by file** as [ci.md](ci.md) requires:
+Full-loop tier, one key-less file plus a rule, selected **by file** as [ci.md](ci.md) requires:
 
 - `tests-e2e/test_demo_bench_fake.py` — always-run, key-less: the whole `conversation` session through `DemoTarget` over the matrix's `fake` entry (its script plays every turn, the long story cancelled by a scripted tool-call id), asserting the report is `ok`, seven turns all answered, one unprompted output (the confirmation on the cancel's completion step) and both files written; a one-utterance greeting probe (`tests-e2e/support.greeting_probe`, a fixture, not benchmark data) likewise; the committed matrix loads with one enabled `default` per provider and the disabled fixture; the workload loads; a one-run `run_matrix` batch kept with `write_result` produces the five files, a `compliance` of 1 in the total, and leaves an existing `description.md` untouched. Joins the e2e-fake job.
-- `tests-e2e/test_demo_bench.py` — live: the greeting probe once through `DemoTarget` per enabled matrix entry (the cheapest probe that the provider drives the demo at all), asserting a reaction ended `ok` and `model_latency` has a sample — **not** that the model answered: one sample of a model's behavior is the benchmark's to measure with *k*, and must not turn `main` red. A `Skip` from the target (its `api_key_env` unset) becomes `pytest.skip`, the tier's rule ([testing.md](testing.md)). Joins the `live` job.
+- **No live test over the matrix.** The matrix is the benchmark's own list — models are added, disabled and retired as the benchmark's questions change, and each one carries its provider's quotas and latencies — so no test is parametrized over it: a matrix edit must never change what the test suite runs, and a model the key's plan cannot call must never turn `main` red. The live e2e set stays the fixed, scoped `PROVIDER_CONFIGS` list of [testing.md](testing.md); the matrix's models are exercised when the benchmark is run.
 
 Both import `benchmarks.bench` as the demo tests import `examples.conversation_demo.app` (the repo root on `sys.path`). One pytest run is a smoke test; the benchmark is the entry point with `--k`.
 

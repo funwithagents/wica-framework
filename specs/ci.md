@@ -40,7 +40,7 @@ WICA supports **macOS (arm64), Linux (x86_64 and arm64) and Windows (x86_64)** (
 [testing.md](testing.md) gives `tests-e2e/` two kinds of test with opposite costs, and CI treats them as two jobs, selected **by file** (not `-k`, which matches on test names and would drift as tests are added):
 
 - **Scripted-fake flows — every event, Linux.** `tests-e2e/test_fake_flows.py`, `tests-e2e/test_example_flow.py`, `tests-e2e/test_tester_flows.py` and `tests-e2e/test_demo_bench_fake.py`: no network, no key, deterministic, never skip. They run on every pull request like the fast tier. One platform: their platform-sensitive paths are the fast tier's, already covered on all three.
-- **Live provider set — push to `main` and manual runs, Linux.** `tests-e2e/test_smoke.py` and `tests-e2e/test_wica.py`, parametrized over `PROVIDER_CONFIGS`, plus `tests-e2e/test_demo_bench.py`, the benchmark smoke over `benchmarks/matrix.json` ([benchmark.md](benchmark.md)). Never on a pull request: every case is a paid call, the outcome is non-deterministic, and a fork's pull request receives no secret anyway. On `main` it gives each merged change a live verdict against every provider whose key the repository holds. **One platform:** the live set is HTTP to a provider — the operating system changes nothing it measures.
+- **Live provider set — push to `main` and manual runs, Linux.** `tests-e2e/test_smoke.py` and `tests-e2e/test_wica.py`, parametrized over `PROVIDER_CONFIGS` — a fixed list, never the benchmark's matrix ([testing.md](testing.md)). Never on a pull request: every case is a paid call, the outcome is non-deterministic, and a fork's pull request receives no secret anyway. On `main` it gives each merged change a live verdict against every provider whose key the repository holds. **One platform:** the live set is HTTP to a provider — the operating system changes nothing it measures.
 
 ### The workflow
 
@@ -51,13 +51,14 @@ One file, `.github/workflows/ci.yml`. It triggers on `pull_request`, on `push` t
 | `check` | every event | `uv sync --locked`, then `ruff check .`, `ruff format --check .`, `pyright` |
 | `fast-tier` | every event | `uv sync --locked`, then `pytest` (the default `tests/` tier, in parallel — [testing.md](testing.md) "Tooling") — **once per platform**: `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `windows-2025` |
 | `e2e-fake` | every event | `uv sync --locked`, then `pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py tests-e2e/test_tester_flows.py tests-e2e/test_demo_bench_fake.py -rs` |
-| `live` | push to `main`, `workflow_dispatch` | `uv sync --locked`, then `pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py tests-e2e/test_demo_bench.py -rs` with the provider keys mapped from secrets |
+| `live` | push to `main`, `workflow_dispatch` | `uv sync --locked`, then `pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py -rs` with the provider keys mapped from secrets |
 
 None waits on another, so a run takes as long as its slowest job — about a minute and a half end to end, most of it the sync. The fast tier's parallel run helps a runner less than a laptop: three or four cores, not fifteen. Every job carries a `timeout-minutes` well under GitHub's default, so a hung loop fails in minutes, not hours.
 
 ### Secrets
 
 - **One repository secret per committed e2e config, under the config's own `api_key_env` name** — `WICA_ANTHROPIC_API_KEY`, `WICA_OPENAI_API_KEY`, `WICA_HF_TOKEN`, `WICA_GEMINI_API_KEY`, `WICA_MISTRAL_API_KEY` (the table in [AGENTS.md](../AGENTS.md) "Live/e2e tests") — mapped onto the same environment variable in the `live` job's test step only.
+- **A rate-limited key skips, too.** A provider answering HTTP 429 (a rate limit or an exhausted quota) skips the test it failed rather than turning `main` red ([testing.md](testing.md) "Live tier"); `-rs` lists it with the provider's message.
 - **No secret is required.** A secret the repository does not hold comes out as an empty variable, which `resolve_api_key` treats as unset (`MissingEnvError`), so that provider's cases **skip** — the job stays green with any subset of keys, none included. `-rs` lists the skips in the job log; a provider that should have run and skipped is a missing or misnamed secret.
 - **Adding a provider** adds a config to `PROVIDER_CONFIGS`, a row to the AGENTS.md key table, and a line to the `live` job's `env` — the same hand-kept pairing [testing.md](testing.md) open question 2 already notes.
 - **Required status checks on `main`** are `check`, the four `fast-tier` entries and `e2e-fake` — the jobs that run on a pull request. `live` cannot be required (it never runs on one). Requiring them is a repository setting on GitHub, outside the repo.
