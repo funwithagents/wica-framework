@@ -39,8 +39,8 @@ WICA supports **macOS (arm64), Linux (x86_64 and arm64) and Windows (x86_64)** (
 
 [testing.md](testing.md) gives `tests-e2e/` two kinds of test with opposite costs, and CI treats them as two jobs, selected **by file** (not `-k`, which matches on test names and would drift as tests are added):
 
-- **Scripted-fake flows — every event, Linux.** `tests-e2e/test_fake_flows.py`, `tests-e2e/test_example_flow.py` and `tests-e2e/test_tester_flows.py`: no network, no key, deterministic, never skip. They run on every pull request like the fast tier. One platform: their platform-sensitive paths are the fast tier's, already covered on all three.
-- **Live provider set — push to `main` and manual runs, Linux.** `tests-e2e/test_smoke.py` and `tests-e2e/test_wica.py`, parametrized over `PROVIDER_CONFIGS`. Never on a pull request: every case is a paid call, the outcome is non-deterministic, and a fork's pull request receives no secret anyway. On `main` it gives each merged change a live verdict against every provider whose key the repository holds. **One platform:** the live set is HTTP to a provider — the operating system changes nothing it measures.
+- **Scripted-fake flows — every event, Linux.** `tests-e2e/test_fake_flows.py`, `tests-e2e/test_example_flow.py`, `tests-e2e/test_tester_flows.py` and `tests-e2e/test_demo_bench_fake.py`: no network, no key, deterministic, never skip. They run on every pull request like the fast tier. One platform: their platform-sensitive paths are the fast tier's, already covered on all three.
+- **Live provider set — push to `main` and manual runs, Linux.** `tests-e2e/test_smoke.py` and `tests-e2e/test_wica.py`, parametrized over `PROVIDER_CONFIGS`, plus `tests-e2e/test_demo_bench.py`, the benchmark smoke over `benchmarks/matrix.json` ([benchmark.md](benchmark.md)). Never on a pull request: every case is a paid call, the outcome is non-deterministic, and a fork's pull request receives no secret anyway. On `main` it gives each merged change a live verdict against every provider whose key the repository holds. **One platform:** the live set is HTTP to a provider — the operating system changes nothing it measures.
 
 ### The workflow
 
@@ -50,8 +50,8 @@ One file, `.github/workflows/ci.yml`. It triggers on `pull_request`, on `push` t
 |---|---|---|
 | `check` | every event | `uv sync --locked`, then `ruff check .`, `ruff format --check .`, `pyright` |
 | `fast-tier` | every event | `uv sync --locked`, then `pytest` (the default `tests/` tier, in parallel — [testing.md](testing.md) "Tooling") — **once per platform**: `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `windows-2025` |
-| `e2e-fake` | every event | `uv sync --locked`, then `pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs` |
-| `live` | push to `main`, `workflow_dispatch` | `uv sync --locked`, then `pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py -rs` with the provider keys mapped from secrets |
+| `e2e-fake` | every event | `uv sync --locked`, then `pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py tests-e2e/test_tester_flows.py tests-e2e/test_demo_bench_fake.py -rs` |
+| `live` | push to `main`, `workflow_dispatch` | `uv sync --locked`, then `pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py tests-e2e/test_demo_bench.py -rs` with the provider keys mapped from secrets |
 
 None waits on another, so a run takes as long as its slowest job — about a minute and a half end to end, most of it the sync. The fast tier's parallel run helps a runner less than a laptop: three or four cores, not fifteen. Every job carries a `timeout-minutes` well under GitHub's default, so a hung loop fails in minutes, not hours.
 

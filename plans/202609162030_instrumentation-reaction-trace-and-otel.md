@@ -480,6 +480,6 @@ Spec: "Consumers → Exporters". File: [examples/conversation_demo/app.py](../ex
 ## Step 8 — Statuses and final verification
 
 1. [specs/instrumentation.md](../specs/instrumentation.md): change `prompt_ready_at` and `model_started_at` in the `ReactionTrace` sketch to `datetime | None` with a short note (a reaction cancelled while rendering never reaches them) — editorial. Then `Stable` → `Implemented`, and the row in [specs/_index.md](../specs/_index.md).
-2. [specs/_analysis.md](../specs/_analysis.md) P1: append one sentence that `on_trigger_dropped` and `ReactionTrace.busy_time` now make the drop and the busy interval measurable.
+2. `analysis/_analysis.md` P1: append one sentence that `on_trigger_dropped` and `ReactionTrace.busy_time` now make the drop and the busy interval measurable.
 3. This plan: `Todo` → `Done`, and its row in [plans/_index.md](_index.md).
 4. Final verification: `uv run ruff check .`, `uv run ruff format .`, `uv run pyright`, `uv run pytest`, `uv run pytest tests-e2e -k "fake or example"` all pass, and `uv run pytest tests/test_project_map.py` is green.

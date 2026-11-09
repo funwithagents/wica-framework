@@ -32,7 +32,7 @@ A toolkit for testing a `Wica` instance **through its own World**: a **Probe** t
 
 Today the full-loop tier ([testing.md](testing.md)) hand-rolls its observation each time — `wait_until`, `find_command_entry`, per-key listeners, a `RecordingSink` copied across three files — and records nothing about *when* things happened. The toolkit replaces that boilerplate with one observation layer and adds what a hand-written test never has: reaction latencies, dropped-input detection, cost per turn and a report, with no change to what the test asserts.
 
-The background survey, the comparison with the field and the brainstorm minutes live in [_wica-tester-study.md](_wica-tester-study.md); this spec records the settled design. The framework changes the toolkit needed shipped first (plans `202609131341` and `202609141552`), so everything below builds on the public surface as it is.
+The background survey, the comparison with the field and the brainstorm minutes live in `analysis/_wica-tester-study.md` (local working notes, not committed); this spec records the settled design. The framework changes the toolkit needed shipped first (plans `202609131341` and `202609141552`), so everything below builds on the public surface as it is.
 
 ## Settled
 
@@ -67,7 +67,7 @@ Three things stay on the tester's side, by design:
 |---|---|
 | The SUT's transcript (`Agent._history` is private) | `on_agent_prompt` yields the exact rendered messages of every step; the Harness records them. |
 | Timestamps on Events | The **framework** stamps them ([instrumentation.md](instrumentation.md)): every reaction ends with an `on_agent_reaction_ended` record carrying the phase stamps, every Command with an `on_agent_command_ended` record, and a dropped trigger fires `on_agent_trigger_dropped`. The Harness reads those stamps for every latency measure and stamps only its *own* actions on arrival. (Reversed on 2026-09-16 — before that the Harness stamped `time.monotonic()` itself and inferred step boundaries from event order.) |
-| Detecting an input dropped while a step was in flight ([_analysis.md](_analysis.md) P1) | That is a *finding*, not a blocker: the framework's `on_agent_trigger_dropped` ([instrumentation.md](instrumentation.md)) names each one, and the Harness reports the count as **dropped triggers**. |
+| Detecting an input dropped while a step was in flight (`analysis/_analysis.md` P1, local notes) | That is a *finding*, not a blocker: the framework's `on_agent_trigger_dropped` ([instrumentation.md](instrumentation.md)) names each one, and the Harness reports the count as **dropped triggers**. |
 
 The toolkit never touches the application's output sink. Free text is observed through `on_agent_text`; the sink stays the single replaceable slot the application owns.
 
@@ -173,12 +173,12 @@ The toolkit is adopted **by test kind, not by era**. Nothing is migrated wholesa
 | `tests-e2e/test_wica.py` (live providers, parametrized over `PROVIDER_CONFIGS`) | Per-provider construction and tool calling end to end, coarse assertions | **Become driver (a) consumers.** Loop correctness is already pinned deterministically by the fake flows, so this costs no independence, and it removes the duplicated helpers (`wait_until`, `find_command_entry`, `RecordingSink`), lets the `noop` case wait on a `command_issued` record instead of reading `Agent._history`, and records each provider's reaction latency and pure model latency as a by-product. Assertions stay behavioral; no latency threshold is added. |
 | `tests-e2e/test_example_flow.py` (the demo over the fake) | The example's wiring and its Gradio presenters | Partly a scenario (phase 4); the presenter assertions (transcript items, prompt log, Speaking slot) stay Python, since the Harness does not observe them. |
 
-**Reports are kept, not discarded.** `tests-e2e/support.py` gains a report directory (a pytest option or fixture) so every toolkit-driven live run writes `<test>-<provider>.json`, one comparable artifact per provider per run. A single pytest run is a **smoke test, not a benchmark**: one sample per provider. Provider comparison belongs to a **scenario runner** that repeats a scenario *k* times, aggregates the distributions per provider, and reports pass^k — parametrized over `PROVIDER_CONFIGS` the same way the live set is, and skipping a provider whose key is unset.
+**Reports are kept, not discarded.** `tests-e2e/support.py` gains a report directory (a pytest option or fixture) so every toolkit-driven live run writes `<test>-<provider>.json`, one comparable artifact per provider per run. A single pytest run is a **smoke test, not a benchmark**: one sample per provider. Provider comparison belongs to the **benchmark runner** ([benchmark.md](benchmark.md)): it repeats a scenario *k* times over a matrix of config files (its own, not `PROVIDER_CONFIGS`, which stays the live set's), aggregates the distributions per configuration, reports pass^k, and skips a configuration whose key is unset.
 
 ### Placement and dependencies
 
-- `src/wica/testing/` — a subpackage (`probe.py`, `harness.py`, `tester.py`, `report.py`; a `judge.py` later), imported explicitly like `wica.fake_model` and **not** re-exported from `wica/__init__.py`: it is test tooling. It depends only on core `wica` and adds no dependency, hence no extra. A live tester or judge builds its model through `build_chat_model` from an `AgentConfig`, the same path as everything else.
-- Scenarios live in `tests-e2e/scenarios/`; the first one targets the conversation demo (`build_system` + `wire`, over fake or live) as the reference for writing more.
+- `src/wica/testing/` — a subpackage (`probe.py`, `harness.py`, `tester.py`, `report.py`; `scenario.py`, `checks.py` for the per-run pieces of [benchmark.md](benchmark.md), whose runner is the sibling `src/wica/benchmark/` subpackage; a `judge.py` later), imported explicitly like `wica.fake_model` and **not** re-exported from `wica/__init__.py`: it is test tooling. It depends only on core `wica` and adds no dependency, hence no extra. A live tester or judge builds its model through `build_chat_model` from an `AgentConfig`, the same path as everything else.
+- Scenarios live in `benchmarks/scenarios/`; the first one targets the conversation demo (`build_system` + `wire`, over fake or live) as the reference for writing more.
 - The plan that creates the subpackage adds its modules to the AGENTS.md project map and to this spec's `code:` frontmatter, and its tests to `tests:`, in the same change — the frontmatter above names only the framework surface the toolkit consumes, because the drift guard requires every listed path to exist.
 
 ### Phases
@@ -187,8 +187,8 @@ Each phase is its own plan:
 
 1. **Probe + Harness + shared Command set + report**, driven from Python (a) and by a scripted-fake tester `Wica` (b). Fast-tier unit tests over a fake SUT; a `tests-e2e` scenario (always-run, `-k tester`) of fake tester vs fake SUT; one `test_fake_flows.py` case migrated; the live set migrated with the report directory. **Built** by plan `202611061400` (2026-11-06); the spec stays `Stable` until phases 2–4 are built.
 2. **Live-LLM tester** (c): triggering mirror entries, silence heartbeat, prompt assembly, visibility presets. Tests: live tester vs fake SUT, parametrized over `PROVIDER_CONFIGS`.
-3. **Trace export and the scenario runner**: `report.to_scenario()`, repeated runs, pass^k and per-provider distributions.
-4. **Demo scenario** in `tests-e2e/scenarios/` against the conversation demo.
+3. **The scenario runner**: repeated runs, pass^k and per-provider distributions — specified on its own as [benchmark.md](benchmark.md) (scenario file format, primer-level checks, the `Target` protocol, the runner and summary, a shared CLI), since applications built on WICA reuse it for their own benchmarks. `report.to_scenario()` moves to phase 2: it exports the live tester's calls, and the benchmark spec's scenario format is what it emits. **Built** by plan `202611091100` (2026-11-09) as `wica.testing.scenario` / `wica.testing.checks` and the `wica.benchmark` subpackage.
+4. **Demo scenario set** in `benchmarks/scenarios/` against the conversation demo — the framework's reference benchmark, also in [benchmark.md](benchmark.md). **Built** by the same plan; phase 2 is the one still open.
 
 Cost note for live-vs-live: with the output-Command re-trigger chain on both sides, one tester utterance costs about two SUT calls plus two or three tester calls; a ten-turn scenario is roughly fifty calls. Fine for an opt-in tier, never for the default run.
 
@@ -200,4 +200,4 @@ Deferrals, not blockers to phase 1.
 2. **Post-hoc judge.** A separate grading pass over the saved trace, with a rubric, possibly a different model, run *k* times, is the field's consistent practice (actor flags, harness measures, judge grades). Deferred past phase 3; the in-loop `report_issue` is v1's only model-side judgement.
 3. **Testing the software with itself.** The tester is a `Wica`, chosen over importing another agentic framework. A framework regression can then break the SUT and the tester at once and produce confusing failures. The mitigation is structural — the fake-flow tests stay independent of the toolkit — but whether the toolkit needs its own smoke test against a hand-rolled SUT double is unexplored.
 4. **Report persistence.** Where reports accumulate across runs (a git-ignored directory, an artifact store) and how two runs are compared is unspecified beyond "one JSON per run".
-5. **Dropped-input reporting vs. the P1 fix.** If [_analysis.md](_analysis.md) P1 (run one more step when a trigger was dropped while busy) is adopted, the "dropped inputs" metric changes meaning: the input is no longer lost, only late. The metric then reports the delay instead.
+5. **Dropped-input reporting vs. the P1 fix.** If `analysis/_analysis.md` P1 (run one more step when a trigger was dropped while busy) is adopted, the "dropped inputs" metric changes meaning: the input is no longer lost, only late. The metric then reports the delay instead.

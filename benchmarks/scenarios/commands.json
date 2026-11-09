@@ -1,0 +1,225 @@
+{
+  "name": "commands",
+  "description": "The demo's own actions in one session: an emotion change while the robot speaks (the re-trigger step must noop), a dance stopped mid-way (cancel, then a spoken confirmation), and the closest-user tracking rule (track the new user; stop when nobody is close). Demo-specific: skips on a target without dance, switch_user_tracking and the emotion entry.",
+  "requires": {
+    "inputs": [
+      "speech_input",
+      "emotion",
+      "closest_user"
+    ],
+    "commands": [
+      "dance",
+      "switch_user_tracking"
+    ],
+    "output_command": true
+  },
+  "timeout_s": 180,
+  "checks": [
+    "no_noop_on_input",
+    "no_failed_reactions",
+    "no_colliding_cancel"
+  ],
+  "params": {},
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Hi!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_emotion",
+          "args": {
+            "value": "happy"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_no_action",
+          "args": {
+            "name": "say",
+            "for_": 4
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Please dance for me!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "dance",
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 2
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Stop!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "cancel_command",
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "say",
+            "state": "complete",
+            "within": 60
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_closest_user",
+          "args": {
+            "value": "u2"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "switch_user_tracking",
+            "where": {
+              "user_id": "u2"
+            },
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_closest_user",
+          "args": {
+            "value": ""
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "switch_user_tracking",
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "finish",
+          "args": {
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

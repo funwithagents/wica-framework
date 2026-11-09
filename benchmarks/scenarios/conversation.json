@@ -1,0 +1,302 @@
+{
+  "name": "conversation",
+  "description": "One representative session with the robot, paced like a person who waits for it to finish speaking: a greeting, a question, a long story interrupted by 'Stop!' (barge-in, cancel then a spoken confirmation), two utterances half a second apart (busy handling), a goodbye and silence after it. The benchmark's workload; the per-turn measures and the primer checks read the whole session.",
+  "requires": {
+    "inputs": [
+      "speech_input"
+    ],
+    "output_command": true
+  },
+  "timeout_s": 240,
+  "checks": [
+    "answers_each_input",
+    "no_noop_on_input",
+    "no_failed_reactions",
+    "no_colliding_cancel"
+  ],
+  "params": {},
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Hello there!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "say",
+            "state": "complete",
+            "within": 60
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "What can you do?"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "say",
+            "state": "complete",
+            "within": 60
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Tell me a long story about a robot who learns to dance, at least five sentences."
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 25
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Stop!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "cancel_command",
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 15
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "say",
+            "state": "complete",
+            "within": 60
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Hi, I'm Alex."
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Can you hear me?"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "say",
+            "state": "complete",
+            "within": 60
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 2
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "set_speech_input",
+          "args": {
+            "value": "Thanks, that's all for now. Goodbye!"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_output",
+          "args": {
+            "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_action",
+          "args": {
+            "name": "say",
+            "state": "complete",
+            "within": 60
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "wait",
+          "args": {
+            "seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_no_action",
+          "args": {
+            "name": "say",
+            "for_": 4
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "finish",
+          "args": {
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

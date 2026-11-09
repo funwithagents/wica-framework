@@ -83,7 +83,7 @@ pythonpath = ["."]
 addopts = ["-n", "logical", "--maxprocesses", "8"]
 
 [tool.pyright]
-include = ["src", "tests", "tests-e2e"]
+include = ["src", "tests", "tests-e2e", "benchmarks"]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.12"

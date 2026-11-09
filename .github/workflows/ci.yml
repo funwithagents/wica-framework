@@ -80,7 +80,7 @@ jobs:
       - name: Sync (dev group, against the lock)
         run: uv sync --locked
       - name: Scripted-fake flows (no network, no key, never skip)
-        run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py tests-e2e/test_tester_flows.py -rs
+        run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py tests-e2e/test_tester_flows.py tests-e2e/test_demo_bench_fake.py -rs
 
   live:
     name: e2e tier, live providers
@@ -98,11 +98,12 @@ jobs:
       - name: Live set (one case per provider config)
         # One repository secret per committed e2e config, under the config's own
         # `api_key_env` name. A secret the repository does not hold comes out empty and
-        # that provider's cases skip (`MissingEnvError → pytest.skip`); `-rs` lists them.
+        # that provider's cases skip (`MissingEnvError → pytest.skip`, the benchmark target's
+        # `Skip` likewise); `-rs` lists them.
         env:
           WICA_ANTHROPIC_API_KEY: ${{ secrets.WICA_ANTHROPIC_API_KEY }}
           WICA_OPENAI_API_KEY: ${{ secrets.WICA_OPENAI_API_KEY }}
           WICA_HF_TOKEN: ${{ secrets.WICA_HF_TOKEN }}
           WICA_GEMINI_API_KEY: ${{ secrets.WICA_GEMINI_API_KEY }}
           WICA_MISTRAL_API_KEY: ${{ secrets.WICA_MISTRAL_API_KEY }}
-        run: uv run pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py -rs
+        run: uv run pytest tests-e2e/test_smoke.py tests-e2e/test_wica.py tests-e2e/test_demo_bench.py -rs

@@ -13,6 +13,13 @@ __pycache__/
 # Reports the toolkit-driven e2e tests write when run with --wica-report-dir (specs/wica-tester.md)
 tests-e2e/reports/
 
+# Benchmark batches (specs/benchmark.md): working data; kept results live in benchmarks/results/
+benchmarks/runs/
+
+# Local working notes (the tester study, the codebase analysis, the todo list) — referenced from
+# specs and plans as `analysis/...`, deliberately not committed.
+analysis/
+
 # Claude Code personal settings (not shared)
 .claude/settings.local.json
 

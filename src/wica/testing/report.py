@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -112,12 +113,12 @@ def summarize(samples: list[float]) -> MetricSummary | None:
     )
 
 
-def compute_metrics(
+def metric_samples(
     timeline: list[SutEvent], *, output_command_name: str | None
-) -> tuple[dict[str, MetricSummary], int]:
-    """The metrics of a timeline, as `(summaries by key, dropped-input count)`. A metric with no
-    sample is omitted from the dict. See the module docstring for which come from the framework's
-    records and which are timeline heuristics."""
+) -> dict[str, list[float]]:
+    """The raw samples behind `compute_metrics`, by metric key — what a benchmark pools across
+    runs before summarizing (specs/benchmark.md, "The summary"). See the module docstring for
+    which come from the framework's records and which are timeline heuristics."""
     samples: dict[str, list[float]] = {}
 
     def add(key: str, value: float | None) -> None:
@@ -167,13 +168,25 @@ def compute_metrics(
             ):
                 add("barge_in", event.t - pending_inputs.pop(0))
 
-    dropped = sum(1 for e in timeline if e.kind == "trigger_dropped")
+    return samples
+
+
+def dropped_inputs(timeline: list[SutEvent]) -> int:
+    return sum(1 for e in timeline if e.kind == "trigger_dropped")
+
+
+def compute_metrics(
+    timeline: list[SutEvent], *, output_command_name: str | None
+) -> tuple[dict[str, MetricSummary], int]:
+    """The metrics of a timeline, as `(summaries by key, dropped-input count)`. A metric with no
+    sample is omitted from the dict."""
+    samples = metric_samples(timeline, output_command_name=output_command_name)
     metrics = {
         key: summary
         for key, values in samples.items()
         if (summary := summarize(values)) is not None
     }
-    return metrics, dropped
+    return metrics, dropped_inputs(timeline)
 
 
 @dataclass(frozen=True)
@@ -257,12 +270,20 @@ class Report:
             )
         return "\n".join(lines) + "\n"
 
-    def write(self, path: Path) -> None:
+    def write(self, path: Path, *, extra: Mapping[str, Any] | None = None) -> None:
         """Write the report as `.json` or `.md` by suffix (JSON for anything else); creates the
-        parent directories."""
+        parent directories. *extra* is merged into the JSON document (a benchmark's `"bench"`
+        key — specs/benchmark.md); the Markdown is unchanged by it."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = self.to_markdown() if path.suffix == ".md" else self.to_json()
+        if path.suffix == ".md":
+            text = self.to_markdown()
+        elif extra:
+            text = json.dumps(
+                {**self.to_dict(), **extra}, indent=2, default=_json_default
+            )
+        else:
+            text = self.to_json()
         path.write_text(text, encoding="utf-8")
 
 

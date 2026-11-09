@@ -3,7 +3,7 @@
 **Status:** Done
 
 Closes the two framework gaps the WicaTester study still lists after the prerequisites shipped
-([specs/_wica-tester-study.md](../specs/_wica-tester-study.md), §2 G7–G8; decision §8.7 —
+(`analysis/_wica-tester-study.md`, §2 G7–G8; decision §8.7 —
 prerequisites first). Both are additive; the only behavior change is opt-in (a Command may now
 choose not to re-trigger).
 
