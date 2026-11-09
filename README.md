@@ -9,11 +9,6 @@ How it works:
 - **The Agent** wakes when the World changes, reasons over it, and decides what to do.
 - **Commands** carry its actions out: speech, movement, an API call, each tracked back in the World.
 
-What sets it apart:
-
-- **The prompt is a view of state, not a transcript.** You keep a World of typed entries up to date, and every reasoning step renders it into the model's prompt.
-- **Actions run as tasks the model can see and stop.** Commands are asynchronous and cancellable, and their state is part of the World the model reads.
-
 **Start here:**
 
 - [docs/getting-started.md](docs/getting-started.md): your first agent on the scripted `fake` provider, then on a real model.
