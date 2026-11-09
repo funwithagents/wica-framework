@@ -11,7 +11,7 @@ from wica import Wica
 from wica.agent import build_chat_model
 from wica.config import AgentConfig, MissingEnvError, WicaConfig
 from wica.content import Content, TextPart
-from wica.testing import Requires, Scenario
+from wica.testing import CheckSpec, Requires, Scenario
 
 E2E_DIR = Path(__file__).parent
 
@@ -84,7 +84,7 @@ def greeting_probe() -> Scenario:
         name="greeting",
         requires=Requires(inputs=("speech_input",), output_command=True),
         timeout_s=60,
-        checks=("no_failed_reactions", "no_colliding_cancel"),
+        checks=(CheckSpec("no_failed_reactions"), CheckSpec("no_colliding_cancel")),
         script=[
             step("set_speech_input", value="Hello there!"),
             step("expect_output", within=20),

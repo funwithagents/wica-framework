@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from wica.benchmark import Completed, Skipped, run_matrix, run_once
-from wica.testing import Requires, Scenario
+from wica.testing import CheckSpec, Requires, Scenario
 
 from bench_support import NOOP, SAY_HI, FakeTarget
 
@@ -23,7 +23,10 @@ GREETING = Scenario(
     name="greeting",
     requires=Requires(inputs=("speech_input",), output_command=True),
     timeout_s=15,
-    checks=("answers_each_input", "no_noop_on_input", "no_failed_reactions"),
+    checks=tuple(
+        CheckSpec(n)
+        for n in ("answers_each_input", "no_noop_on_input", "no_failed_reactions")
+    ),
     script=[
         _step("set_speech_input", value="hello"),
         _step("expect_output", within=3),
@@ -41,18 +44,18 @@ def test_run_once_writes_both_files_and_returns_the_checked_report(
     assert isinstance(outcome, Completed)
     assert outcome.report.ok, [f for f in outcome.report.findings if not f.ok]
     assert [f.expectation for f in outcome.report.findings][-3:] == list(
-        GREETING.checks or ()
+        GREETING.check_names or ()
     )
     assert outcome.measures["output_calls"] == 1 and outcome.measures["noop_steps"] == 1
     assert outcome.samples["reaction_latency"]  # pooled by the summary
-    assert outcome.checks == GREETING.checks
+    assert outcome.checks == GREETING.check_names
     assert outcome.measures["turns"] == 1 and outcome.measures["turns_answered"] == 1
     json_path = tmp_path / "fake" / "greeting" / "1.json"
     assert json_path.exists() and (tmp_path / "fake" / "greeting" / "1.md").exists()
     document = json.loads(json_path.read_text())
     assert document["bench"]["repetition"] == 1
     assert document["bench"]["measures"]["output_calls"] == 1.0
-    assert document["bench"]["checks"] == list(GREETING.checks or ())
+    assert document["bench"]["checks"] == list(GREETING.check_names or ())
     assert target.opened == 1 and target.closed == 1  # closed after the run
 
 

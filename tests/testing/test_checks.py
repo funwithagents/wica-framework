@@ -3,6 +3,8 @@ hand-built timelines with real `ReactionTrace` / `TriggerTrace` records."""
 
 from __future__ import annotations
 
+import dataclasses
+
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -259,10 +261,85 @@ def _cancel_reaction(other: str | None) -> list[SutEvent]:
     return events
 
 
-def test_no_colliding_cancel_fails_only_when_cancel_shares_its_reaction():
-    collided = _check("no_colliding_cancel", _cancel_reaction("say"))
-    assert not collided.ok and "['say']" in collided.detail
+def test_no_colliding_cancel_fails_only_when_cancel_shares_its_reaction_with_an_action():
+    collided = _check("no_colliding_cancel", _cancel_reaction("dance"))
+    assert not collided.ok and "['dance']" in collided.detail
     assert _check("no_colliding_cancel", _cancel_reaction(None)).ok
+    # Saying "okay, stopping" while cancelling is what a person does: the output Command is allowed.
+    assert _check("no_colliding_cancel", _cancel_reaction("say")).ok
+
+
+# --- rules over the scenario's requests ---------------------------------------------------
+
+
+def _set(t: float, key: str, value: Any) -> SutEvent:
+    return _ev("action", t, name="set", args={"key": key, "value": value})
+
+
+def _issued(t: float, name: str, cid: str, /, **args: Any) -> SutEvent:
+    return _ev("command_issued", t, name=name, call_id=cid, args=args)
+
+
+def _with(name: str, **args: Any) -> CheckContext:
+    return dataclasses.replace(CONTEXT, args=args)
+
+
+def test_cancels_when_asked_needs_a_cancel_after_each_stop_request():
+    stop = {"requests": [{"key": "speech_input", "value": "Stop!"}]}
+    cancelled = [
+        _set(0.0, "speech_input", "Tell me a story"),
+        _issued(1.0, "say", "c1", text="Once upon a time"),
+        _set(2.0, "speech_input", "Stop!"),
+        _issued(2.5, "cancel_command", "k1", call_id="c1"),
+        _set(5.0, "speech_input", "Thanks"),
+    ]
+    assert CHECKS["cancels_when_asked"].fn(cancelled, _with("x", **stop)).ok
+    # The cancel came only after the next write: too late, it answers something else.
+    late = cancelled[:3] + [cancelled[4], _issued(5.5, "cancel_command", "k1")]
+    finding = CHECKS["cancels_when_asked"].fn(late, _with("x", **stop))
+    assert not finding.ok and "'Stop!'" in finding.detail and finding.event is late[2]
+    # No stop request in the run: nothing to hold to.
+    assert CHECKS["cancels_when_asked"].fn(cancelled[:2], _with("x", **stop)).ok
+
+
+def test_acts_when_asked_matches_the_command_and_its_args():
+    requests = {
+        "requests": [
+            {"key": "speech_input", "value": "Dance!", "command": "dance"},
+            {
+                "key": "closest_user",
+                "value": "u2",
+                "command": "switch_user_tracking",
+                "where": {"user_id": "u2"},
+            },
+        ]
+    }
+    acted = [
+        _set(0.0, "speech_input", "Dance!"),
+        _issued(1.0, "dance", "d1"),
+        _set(3.0, "closest_user", "u2"),
+        _issued(4.0, "switch_user_tracking", "s1", user_id="u2"),
+    ]
+    assert CHECKS["acts_when_asked"].fn(acted, _with("x", **requests)).ok
+    wrong_user = acted[:3] + [_issued(4.0, "switch_user_tracking", "s1", user_id="u9")]
+    finding = CHECKS["acts_when_asked"].fn(wrong_user, _with("x", **requests))
+    assert (
+        not finding.ok and "switch_user_tracking({'user_id': 'u2'})" in finding.detail
+    )
+
+
+def test_quiet_on_background_change_fails_when_the_robot_comments_on_it():
+    keys = {"keys": ["emotion"]}
+    quiet = [
+        _set(0.0, "speech_input", "Hi!"),
+        _issued(1.0, "say", "c1", text="Hello!"),
+        _set(1.5, "emotion", "happy"),
+        _issued(3.0, "noop", "n1"),
+    ]
+    assert CHECKS["quiet_on_background_change"].fn(quiet, _with("x", **keys)).ok
+    chatty = quiet[:3] + [_issued(3.0, "say", "c2", text="I feel happy now!")]
+    finding = CHECKS["quiet_on_background_change"].fn(chatty, _with("x", **keys))
+    assert not finding.ok and "emotion='happy'" in finding.detail
 
 
 # --- measures ---------------------------------------------------------------------------------
@@ -339,7 +416,7 @@ def test_build_registry_rejects_a_clash_with_a_built_in():
 
 def test_resolve_checks_by_name_or_by_what_the_target_satisfies():
     assert [
-        c.name for c in resolve_checks(["no_failed_reactions"], CHECKS, CONTEXT)
+        c.name for c, _ in resolve_checks(["no_failed_reactions"], CHECKS, CONTEXT)
     ] == ["no_failed_reactions"]
     with pytest.raises(ValueError, match="unknown check 'nope'"):
         resolve_checks(["nope"], CHECKS, CONTEXT)
@@ -347,9 +424,12 @@ def test_resolve_checks_by_name_or_by_what_the_target_satisfies():
     without_output = CheckContext(
         scenario=SCENARIO, output_command_name=None, inputs=("speech_input",)
     )
-    assert {c.name for c in resolve_checks(None, CHECKS, without_output)} == set(
-        CHECKS
-    ) - {"answers_each_input"}
+    # Rules that need the scenario's args are never applied by default.
+    assert {c.name for c, _ in resolve_checks(None, CHECKS, without_output)} == {
+        "no_noop_on_input",
+        "no_failed_reactions",
+        "no_colliding_cancel",
+    }
 
 
 def test_apply_checks_appends_one_finding_per_check():

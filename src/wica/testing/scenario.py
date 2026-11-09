@@ -85,6 +85,16 @@ class Requires:
 
 
 @dataclass(frozen=True)
+class CheckSpec:
+    """One rule a scenario applies: its name and the args it reads (which write is a stop
+    request, which Command a request asks for). Written in a scenario as a bare name or as
+    `{"name": ..., "args": {...}}`."""
+
+    name: str
+    args: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Scenario:
     """One loaded scenario file. `checks` is None when the file names none: the runner then applies
     every registered check whose own `requires` the target satisfies."""
@@ -93,10 +103,14 @@ class Scenario:
     description: str = ""
     requires: Requires = field(default_factory=Requires)
     timeout_s: float = _DEFAULT_TIMEOUT_S
-    checks: tuple[str, ...] | None = None
+    checks: tuple[CheckSpec, ...] | None = None
     params: dict[str, Any] = field(default_factory=dict)
     script: list[dict[str, Any]] = field(default_factory=list)
     path: Path | None = None
+
+    @property
+    def check_names(self) -> tuple[str, ...] | None:
+        return None if self.checks is None else tuple(s.name for s in self.checks)
 
 
 def load_scenario(
@@ -161,13 +175,34 @@ def load_scenario(
     ):
         raise fail("'timeout_s' must be a positive number")
 
-    checks: tuple[str, ...] | None = None
+    checks: tuple[CheckSpec, ...] | None = None
     if "checks" in data:
-        names = _str_list(data["checks"], "checks", fail)
+        raw_checks = data["checks"]
+        if not isinstance(raw_checks, list):
+            raise fail("'checks' must be a list")
+        specs: list[CheckSpec] = []
+        for item in raw_checks:
+            if isinstance(item, str):
+                specs.append(CheckSpec(item))
+            elif (
+                isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and not set(item) - {"name", "args"}
+                and isinstance(item.get("args", {}), dict)
+            ):
+                specs.append(CheckSpec(item["name"], dict(item.get("args", {}))))
+            else:
+                raise fail(
+                    "a check is a name or an object with 'name' and optional 'args'"
+                )
+        names = [s.name for s in specs]
         unknown_checks = [n for n in names if n not in registry]
         if unknown_checks:
             raise fail(f"unknown check(s) {unknown_checks}; known: {sorted(registry)}")
-        checks = tuple(names)
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise fail(f"check(s) {duplicates} listed twice")
+        checks = tuple(specs)
 
     params = data.get("params", {})
     if not isinstance(params, dict):

@@ -51,7 +51,7 @@ def test_the_conversation_session_passes_through_the_demo_target(tmp_path: Path)
     outcome = run_once(DemoTarget(FAKE), conversation, repetition=1, out_dir=tmp_path)
     assert isinstance(outcome, Completed)
     assert outcome.report.ok, [f for f in outcome.report.findings if not f.ok]
-    assert outcome.checks == conversation.checks
+    assert outcome.checks == conversation.check_names
     m = outcome.measures
     # Seven user utterances, every one answered through `say`; the confirmation after the
     # cancel is issued on the completion step, so it counts as the one unprompted output.

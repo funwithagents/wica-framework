@@ -30,6 +30,7 @@ from wica.testing.report import (
 )
 from wica.testing.scenario import (
     TESTER_COMMANDS,
+    CheckSpec,
     Requires,
     Scenario,
     ScenarioError,
@@ -43,6 +44,7 @@ __all__ = [
     "Check",
     "CheckContext",
     "CheckFn",
+    "CheckSpec",
     "Finding",
     "Issue",
     "MetricSummary",

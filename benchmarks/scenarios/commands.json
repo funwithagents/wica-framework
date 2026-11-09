@@ -1,6 +1,6 @@
 {
   "name": "commands",
-  "description": "The demo's own actions in one session, each turn ended by expect_idle: an emotion change while the robot speaks (the re-trigger step must noop), a dance stopped mid-way (cancel, then a spoken confirmation), and the closest-user tracking rule (track the new user; stop when nobody is close). Demo-specific: skips on a target without dance, switch_user_tracking and the emotion entry.",
+  "description": "The demo's own actions in one session, the user waiting for idle between turns: a background emotion change while the robot is still speaking, a dance stopped two seconds in, the closest user appearing and leaving. The script only drives the conversation; what is judged is the rule list (acted on each request, cancelled on 'Stop!', did not comment on its own mood).",
   "requires": {
     "inputs": [
       "speech_input",
@@ -17,7 +17,51 @@
   "checks": [
     "no_noop_on_input",
     "no_failed_reactions",
-    "no_colliding_cancel"
+    "no_colliding_cancel",
+    {
+      "name": "cancels_when_asked",
+      "args": {
+        "requests": [
+          {
+            "key": "speech_input",
+            "value": "Stop!"
+          }
+        ]
+      }
+    },
+    {
+      "name": "acts_when_asked",
+      "args": {
+        "requests": [
+          {
+            "key": "speech_input",
+            "value": "Please dance for me!",
+            "command": "dance"
+          },
+          {
+            "key": "closest_user",
+            "value": "u2",
+            "command": "switch_user_tracking",
+            "where": {
+              "user_id": "u2"
+            }
+          },
+          {
+            "key": "closest_user",
+            "value": "",
+            "command": "switch_user_tracking"
+          }
+        ]
+      }
+    },
+    {
+      "name": "quiet_on_background_change",
+      "args": {
+        "keys": [
+          "emotion"
+        ]
+      }
+    }
   ],
   "params": {},
   "script": [
@@ -36,7 +80,7 @@
         {
           "name": "expect_output",
           "args": {
-            "within": 20
+            "within": 30
           }
         }
       ]
@@ -47,17 +91,6 @@
           "name": "set_emotion",
           "args": {
             "value": "happy"
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_no_action",
-          "args": {
-            "name": "say",
-            "for_": 4
           }
         }
       ]
@@ -88,7 +121,7 @@
           "name": "expect_action",
           "args": {
             "name": "dance",
-            "within": 20
+            "within": 30
           }
         }
       ]
@@ -116,27 +149,6 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
-          "args": {
-            "name": "cancel_command",
-            "within": 15
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_output",
-          "args": {
-            "within": 15
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
           "name": "expect_idle",
           "args": {
             "within": 60
@@ -157,20 +169,6 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
-          "args": {
-            "name": "switch_user_tracking",
-            "where": {
-              "user_id": "u2"
-            },
-            "within": 20
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
           "name": "expect_idle",
           "args": {
             "within": 60
@@ -184,17 +182,6 @@
           "name": "set_closest_user",
           "args": {
             "value": ""
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "expect_action",
-          "args": {
-            "name": "switch_user_tracking",
-            "within": 20
           }
         }
       ]

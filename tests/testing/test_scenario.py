@@ -14,6 +14,7 @@ import pytest
 from wica import Wica
 from wica.testing import (
     TESTER_COMMANDS,
+    CheckSpec,
     Requires,
     ScenarioError,
     TestRun,
@@ -54,7 +55,11 @@ def test_a_valid_scenario_round_trips(tmp_path: Path):
     assert scenario.description == "says hi"
     assert scenario.requires == Requires(inputs=("speech_input",), output_command=True)
     assert scenario.timeout_s == 30.0
-    assert scenario.checks == ("answers_each_input", "no_failed_reactions")
+    assert scenario.checks == (
+        CheckSpec("answers_each_input"),
+        CheckSpec("no_failed_reactions"),
+    )
+    assert scenario.check_names == ("answers_each_input", "no_failed_reactions")
     assert scenario.params == {"motors": "enabled"}
     assert scenario.script == VALID["script"]  # verbatim: the fake model's script
     assert scenario.path == tmp_path / "greeting.json"
@@ -120,6 +125,28 @@ def test_shape_faults_name_the_file_and_the_step(
     assert fragment in message
     if step is not None:
         assert f"step {step}" in message
+
+
+def test_a_check_can_carry_args(tmp_path: Path):
+    stop = {
+        "name": "cancels_when_asked",
+        "args": {"requests": [{"key": "k", "value": "Stop!"}]},
+    }
+    scenario = load_scenario(
+        _write(tmp_path, "greeting", {**VALID, "checks": ["no_failed_reactions", stop]})
+    )
+    assert scenario.checks == (
+        CheckSpec("no_failed_reactions"),
+        CheckSpec("cancels_when_asked", {"requests": [{"key": "k", "value": "Stop!"}]}),
+    )
+    for bad, fragment in [
+        ({"name": "no_failed_reactions", "argz": {}}, "a check is a name or an object"),
+        (["no_failed_reactions", "no_failed_reactions"], "listed twice"),
+    ]:
+        checks = bad if isinstance(bad, list) else [bad]
+        path = _write(tmp_path, "greeting", {**VALID, "checks": checks})
+        with pytest.raises(ScenarioError, match=fragment):
+            load_scenario(path)
 
 
 def test_load_scenarios_orders_by_name(tmp_path: Path):

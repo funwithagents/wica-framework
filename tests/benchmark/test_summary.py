@@ -137,7 +137,10 @@ def test_aggregate_pools_runs_into_cells_with_pass_rate_pass_k_and_failures():
     a = summary.cell("greeting", "a")
     assert a is not None
     assert (a.runs, a.passed, a.pass_rate, a.pass_k) == (2, 1, 0.5, 0)
-    assert a.failed == {"check_1": 1, "verdict: fail": 1}
+    assert a.failed == {
+        "check_1": 1
+    }  # rules only; the verdict is the script's business
+    assert a.rules == {"check_1": (0, 1)}  # only run 2 applied a rule, and it broke
     assert a.metrics["reaction_latency"].count == 4  # two samples per run, pooled
     assert a.metrics["reaction_latency"].max == 3.2
     assert a.per_run["input_tokens"].median == 200  # summed per run, then pooled

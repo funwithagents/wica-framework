@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from wica.instrumentation import ReactionTrace, TriggerTrace
 from wica.testing.report import Finding, Report, SutEvent
-from wica.testing.scenario import Requires, Scenario
+from wica.testing.scenario import CheckSpec, Requires, Scenario
 
 NOOP = "noop"
 CANCEL = "cancel_command"
@@ -32,6 +33,9 @@ class CheckContext:
     inputs: tuple[str, ...] = ()
     triggering_inputs: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
+    args: Mapping[str, Any] = field(
+        default_factory=dict
+    )  # the scenario's args for this rule
 
     @property
     def turn_inputs(self) -> tuple[str, ...]:
@@ -46,9 +50,14 @@ CheckFn = Callable[[list[SutEvent], CheckContext], Finding]
 
 @dataclass(frozen=True)
 class Check:
+    """A rule: a pure function of the finished timeline. `takes_args` marks a rule that only
+    means something with the scenario's arguments (which input is a stop request, which
+    Command a request asks for) — it is never applied by default."""
+
     name: str
     fn: CheckFn
     requires: Requires = Requires()
+    takes_args: bool = False
 
     def missing(self, context: CheckContext) -> list[str]:
         return self.requires.missing(
@@ -228,11 +237,13 @@ def no_failed_reactions(timeline: list[SutEvent], context: CheckContext) -> Find
 
 def no_colliding_cancel(timeline: list[SutEvent], context: CheckContext) -> Finding:
     """Primer: "when one action must finish before another starts, do not issue both together" —
-    no reaction issues `cancel_command` together with another Command."""
+    no reaction issues `cancel_command` together with another *action*. Speaking while
+    cancelling ("okay, stopping") is what a person does, so the output Command may go with it."""
     name = "no_colliding_cancel"
     origin = _origin(timeline)
+    allowed = {NOOP, context.output_command_name}
     for reaction_id, issued in commands_by_reaction(timeline).items():
-        names = [e.name for e in issued if e.name != NOOP]
+        names = [e.name for e in issued if e.name not in allowed]
         if CANCEL in names and len(names) > 1:
             others = [n for n in names if n != CANCEL]
             first = next(e for e in issued if e.name == CANCEL)
@@ -245,7 +256,138 @@ def no_colliding_cancel(timeline: list[SutEvent], context: CheckContext) -> Find
                 first,
             )
     return _finding(
-        name, timeline, True, f"no {CANCEL} issued alongside another Command"
+        name, timeline, True, f"no {CANCEL} issued alongside another action"
+    )
+
+
+# --- rules over the scenario's requests (they take args) -----------------------------------------
+
+
+@dataclass(frozen=True)
+class Request:
+    """One tester write the scenario names, and the timeline window it opens: from the write's
+    `set` action to the next `set` action, or the end."""
+
+    key: str
+    value: Any
+    start: int
+    end: int
+    t: float
+
+
+def requests(timeline: list[SutEvent]) -> list[Request]:
+    sets = [i for i, e in enumerate(timeline) if e.kind == "action" and e.name == "set"]
+    result: list[Request] = []
+    for n, i in enumerate(sets):
+        args = timeline[i].args or {}
+        end = sets[n + 1] if n + 1 < len(sets) else len(timeline)
+        result.append(
+            Request(str(args.get("key")), args.get("value"), i, end, timeline[i].t)
+        )
+    return result
+
+
+def _matching(
+    timeline: list[SutEvent], key: str, value: Any = None, *, any_value: bool = False
+) -> list[Request]:
+    return [
+        r
+        for r in requests(timeline)
+        if r.key == key and (any_value or r.value == value)
+    ]
+
+
+def _issued_in(
+    timeline: list[SutEvent], request: Request, name: str, where: Mapping[str, Any]
+) -> SutEvent | None:
+    for e in timeline[request.start : request.end]:
+        if e.kind != "command_issued" or e.name != name:
+            continue
+        args = e.args or {}
+        if all(k in args and args[k] == v for k, v in where.items()):
+            return e
+    return None
+
+
+def _arg_list(context: CheckContext, key: str) -> list[dict[str, Any]]:
+    value = context.args.get(key, [])
+    return [dict(v) for v in value] if isinstance(value, list) else []
+
+
+def cancels_when_asked(timeline: list[SutEvent], context: CheckContext) -> Finding:
+    """Primer: running work is cancelled when the person asks it to stop — after each write the
+    scenario marks as a stop request (`args.requests: [{key, value}]`), `cancel_command` is
+    issued before the next write."""
+    name = "cancels_when_asked"
+    origin = _origin(timeline)
+    asked = [
+        r
+        for spec in _arg_list(context, "requests")
+        for r in _matching(timeline, spec["key"], spec.get("value"))
+    ]
+    for r in sorted(asked, key=lambda r: r.start):
+        if _issued_in(timeline, r, CANCEL, {}) is None:
+            return _finding(
+                name,
+                timeline,
+                False,
+                f"{r.key}={r.value!r} at t={r.t - origin:.3f} was not followed by {CANCEL}",
+                timeline[r.start],
+            )
+    return _finding(
+        name, timeline, True, f"{len(asked)} stop request(s), each cancelled"
+    )
+
+
+def acts_when_asked(timeline: list[SutEvent], context: CheckContext) -> Finding:
+    """Persona: an explicit request is acted on — after each write the scenario lists
+    (`args.requests: [{key, value, command, where?}]`; no `value` means any write to the key),
+    the named Command is issued, with the `where` args, before the next write."""
+    name = "acts_when_asked"
+    origin = _origin(timeline)
+    count = 0
+    for spec in _arg_list(context, "requests"):
+        matched = _matching(
+            timeline, spec["key"], spec.get("value"), any_value="value" not in spec
+        )
+        for r in matched:
+            count += 1
+            if _issued_in(timeline, r, spec["command"], spec.get("where", {})) is None:
+                return _finding(
+                    name,
+                    timeline,
+                    False,
+                    f"{r.key}={r.value!r} at t={r.t - origin:.3f} was not followed by "
+                    f"{spec['command']}({spec.get('where', {})})",
+                    timeline[r.start],
+                )
+    return _finding(name, timeline, True, f"{count} request(s), each acted on")
+
+
+def quiet_on_background_change(
+    timeline: list[SutEvent], context: CheckContext
+) -> Finding:
+    """Primer: "use `noop` when nothing new needs a response" — after a write to one of the
+    background entries the scenario lists (`args.keys`), the output Command is not issued again
+    before the next write: a change of the robot's own state is not something to talk about."""
+    name = "quiet_on_background_change"
+    origin = _origin(timeline)
+    output = context.output_command_name
+    keys = [str(k) for k in context.args.get("keys", [])]
+    changes = [r for k in keys for r in _matching(timeline, k, any_value=True)]
+    for r in changes:
+        spoken = _issued_in(timeline, r, output or "", {}) if output else None
+        if spoken is not None:
+            return _finding(
+                name,
+                timeline,
+                False,
+                f"{output} issued at t={spoken.t - origin:.3f} after the background change "
+                f"{r.key}={r.value!r}",
+                spoken,
+            )
+    return _finding(
+        name, timeline, True, f"{len(changes)} background change(s), none commented on"
     )
 
 
@@ -256,6 +398,14 @@ CHECKS: dict[str, Check] = {
         Check("no_noop_on_input", no_noop_on_input),
         Check("no_failed_reactions", no_failed_reactions),
         Check("no_colliding_cancel", no_colliding_cancel),
+        Check("cancels_when_asked", cancels_when_asked, takes_args=True),
+        Check("acts_when_asked", acts_when_asked, takes_args=True),
+        Check(
+            "quiet_on_background_change",
+            quiet_on_background_change,
+            Requires(output_command=True),
+            takes_args=True,
+        ),
     )
 }
 
@@ -272,33 +422,43 @@ def build_registry(extra_checks: Iterable[Check] | None = None) -> dict[str, Che
 
 
 def resolve_checks(
-    names: Iterable[str] | None,
+    specs: Iterable[CheckSpec | str] | None,
     registry: Mapping[str, Check],
     context: CheckContext,
-) -> list[Check]:
-    """The checks to run: the named ones (an unknown name raises), or — when *names* is None —
-    every registered check whose own `requires` the target satisfies."""
-    if names is None:
-        return [c for c in registry.values() if not c.missing(context)]
-    resolved: list[Check] = []
-    for name in names:
-        if name not in registry:
-            raise ValueError(f"unknown check {name!r}; known: {sorted(registry)}")
-        resolved.append(registry[name])
+) -> list[tuple[Check, CheckSpec]]:
+    """The rules to run with their args: the named ones (an unknown name raises), or — when
+    *specs* is None — every registered rule that takes no args and whose own `requires` the
+    target satisfies."""
+    if specs is None:
+        return [
+            (c, CheckSpec(c.name))
+            for c in registry.values()
+            if not c.takes_args and not c.missing(context)
+        ]
+    resolved: list[tuple[Check, CheckSpec]] = []
+    for spec in specs:
+        spec = CheckSpec(spec) if isinstance(spec, str) else spec
+        if spec.name not in registry:
+            raise ValueError(f"unknown check {spec.name!r}; known: {sorted(registry)}")
+        resolved.append((registry[spec.name], spec))
     return resolved
 
 
 def apply_checks(
     report: Report,
-    names: Iterable[str] | None,
+    specs: Iterable[CheckSpec | str] | None,
     context: CheckContext,
     registry: Mapping[str, Check] | None = None,
 ) -> Report:
-    """*report* with one finding per resolved check appended to its findings."""
-    checks = resolve_checks(
-        names, registry if registry is not None else CHECKS, context
+    """*report* with one finding per resolved rule appended to its findings; each rule sees the
+    context with its own args."""
+    resolved = resolve_checks(
+        specs, registry if registry is not None else CHECKS, context
     )
-    new = [check.fn(report.timeline, context) for check in checks]
+    new = [
+        check.fn(report.timeline, dataclasses.replace(context, args=dict(spec.args)))
+        for check, spec in resolved
+    ]
     return dataclasses.replace(report, findings=[*report.findings, *new])
 
 

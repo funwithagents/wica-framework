@@ -38,8 +38,12 @@ class Cell:
     scenario: str
     label: str
     runs: int
-    passed: int
-    failed: dict[str, int] = field(default_factory=dict)
+    passed: int  # runs in which every rule held
+    failed: dict[str, int] = field(default_factory=dict)  # rules broken, with counts
+    script_missed: dict[str, int] = field(default_factory=dict)  # script expectations
+    rules: dict[str, tuple[int, int]] = field(
+        default_factory=dict
+    )  # rule → (held, runs)
     metrics: dict[str, MetricSummary] = field(default_factory=dict)
     per_run: dict[str, MetricSummary] = field(default_factory=dict)
     cache_read_share: float | None = None
@@ -72,6 +76,14 @@ class Summary:
             if cell.scenario == scenario and cell.label == label:
                 return cell
         return None
+
+    def _rule_names(self) -> list[str]:
+        """Every rule any run applied, the built-ins in registry order first."""
+        from wica.testing.checks import CHECKS
+
+        seen = {rule for cell in self.totals for rule in cell.rules}
+        ordered = [name for name in CHECKS if name in seen]
+        return ordered + sorted(seen - set(ordered))
 
     def _skip_reason(self, label: str, scenario: str) -> str:
         skip = next(
@@ -124,15 +136,15 @@ class Summary:
             "",
             "| config | runs | pass^k | compliance | answered | reaction p50 / p95 | "
             "model p50 / p95 | tokens in / out per turn | words per turn | unprompted | "
-            "noops on input | dropped | failed |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "noops on input | dropped | rules broken | script missed |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for label in self._row_labels():
             total = self.cell("*", label)
             if total is None:
                 lines.append(
                     f"| {label} | skipped: {_short(self._skip_reason(label, '*'), 60)} |"
-                    + " |" * 11
+                    + " |" * 12
                 )
                 continue
             lines.append(
@@ -147,8 +159,28 @@ class Summary:
                 f"{_median(total.per_run.get('unprompted_output'))} | "
                 f"{_median(total.per_run.get('noops_on_input'))} | "
                 f"{_median(total.per_run.get('dropped_inputs'))} | "
-                f"{_failed(total.failed)} |"
+                f"{_failed(total.failed)} | {sum(total.script_missed.values())} |"
             )
+        rule_names = self._rule_names()
+        if rule_names:
+            lines += [
+                "",
+                "## Rules",
+                "",
+                "Runs in which each rule held, over the runs that applied it.",
+                "",
+                "| config | " + " | ".join(rule_names) + " |",
+                "|---|" + "---|" * len(rule_names),
+            ]
+            for label in self._row_labels():
+                total = self.cell("*", label)
+                if total is None:
+                    continue
+                cells = []
+                for rule in rule_names:
+                    held = total.rules.get(rule)
+                    cells.append("—" if held is None else f"{held[0]}/{held[1]}")
+                lines.append(f"| {label} | " + " | ".join(cells) + " |")
         lines += ["", "## Configurations", ""]
         for label, agent in self.configs.items():
             lines += [f"- **{label}**: `{json.dumps(agent, sort_keys=True)}`"]
@@ -159,7 +191,7 @@ class Summary:
                 "",
                 f"## {scenario}",
                 "",
-                "| config | runs | passed | pass rate | pass^k | failed | reaction p50 / p95 | "
+                "| config | runs | passed | pass rate | pass^k | rules broken | reaction p50 / p95 | "
                 "model p50 / p95 | reactions/input p50 | unprompted | dropped | "
                 "tokens in / out per run | cache read | words per run |",
                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
@@ -250,13 +282,20 @@ def _cell(scenario: str, label: str, runs: list[Completed]) -> Cell:
     per_run: dict[str, list[float]] = {}
     cache_read = 0
     cache_input = 0
+    script_missed: Counter[str] = Counter()
+    rules: dict[str, list[int]] = {}
     for run in runs:
         report = run.report
         for finding in report.findings:
-            if not finding.ok:
-                failed[finding.expectation] += 1
-        if report.verdict == "fail":
-            failed["verdict: fail"] += 1
+            if finding.expectation in run.checks:
+                held = rules.setdefault(finding.expectation, [0, 0])
+                held[1] += 1
+                if finding.ok:
+                    held[0] += 1
+                else:
+                    failed[finding.expectation] += 1
+            elif not finding.ok:
+                script_missed[finding.expectation] += 1
         for key, values in run.samples.items():
             if key in _PER_RUN_TOTALS:
                 per_run.setdefault(key, []).append(float(sum(values)))
@@ -276,12 +315,20 @@ def _cell(scenario: str, label: str, runs: list[Completed]) -> Cell:
         scenario=scenario,
         label=label,
         runs=len(runs),
-        passed=sum(1 for run in runs if run.report.ok),
+        passed=sum(1 for run in runs if _rules_held(run)),
         failed=dict(failed),
+        script_missed=dict(script_missed),
+        rules={name: (held, total) for name, (held, total) in rules.items()},
         metrics=_summaries(pooled),
         per_run=_summaries(per_run),
         cache_read_share=(cache_read / cache_input) if cache_input else None,
     )
+
+
+def _rules_held(run: Completed) -> bool:
+    """A run passes when every rule held. The script's own expectations only drive the
+    conversation; a missed one is reported apart (`script_missed`), never a failure."""
+    return all(f.ok for f in run.report.findings if f.expectation in run.checks)
 
 
 def _derived(run: Completed) -> dict[str, float]:
