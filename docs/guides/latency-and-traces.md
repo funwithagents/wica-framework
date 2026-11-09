@@ -27,7 +27,7 @@ wica.on_agent_reaction_ended.subscribe(on_reaction)
 |---|---|
 | `triggers` | The `TriggerTrace`s that joined the window: `key`, `version_id`, `written_at` (the `update()` call), `arrived_at` (the loop), `is_command_completion` |
 | `window_opened_at`, `window_closed_at`, `prompt_ready_at`, `model_started_at`, `model_ended_at`, `ended_at` | The phase stamps, wall clock |
-| `outcome` | `ok`, `empty` (no text and no Command), `model_error`, `cancelled`; `error` carries the text |
+| `outcome` | `ok`, `empty` (no text and no Command), `model_error`, `model_timeout` (the call passed `model_timeout`), `cancelled`; `error` carries the text |
 | `text_length`, `sink_duration`, `command_call_ids`, `noop` | What the step produced |
 | `usage` | `TokenUsage(input_tokens, output_tokens, cache_read_tokens)` as the provider reported it |
 | `reaction_latency(trace)` | Earliest external trigger's `written_at` → `ended_at`: how long the person waited for the agent to act. `None` when the reaction only followed a Command completion |

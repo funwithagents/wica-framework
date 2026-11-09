@@ -528,6 +528,31 @@ def test_context_window_rejects_non_positive_integers(value: Any):
         AgentConfig(provider="fake", model="x", system_prompt="p", context_window=value)
 
 
+# --- model_timeout field ------------------------------------------------------------------
+
+
+def test_model_timeout_defaults_to_ten_seconds():
+    assert AgentConfig.from_dict(_agent_dict()).model_timeout == 10.0
+    assert (
+        AgentConfig(provider="fake", model="x", system_prompt="p").model_timeout == 10.0
+    )
+
+
+def test_model_timeout_parsed_and_null_removes_it():
+    cfg = WicaConfig.from_json(json.dumps(_wica_dict(model_timeout=2.5))).agent
+    assert cfg.model_timeout == 2.5
+    assert AgentConfig.from_dict(_agent_dict(model_timeout=30)).model_timeout == 30.0
+    assert AgentConfig.from_dict(_agent_dict(model_timeout=None)).model_timeout is None
+
+
+@pytest.mark.parametrize("value", [0, -1, "10", True])
+def test_model_timeout_rejects_non_positive_numbers(value: Any):
+    with pytest.raises(ConfigError, match="model_timeout"):
+        AgentConfig.from_dict(_agent_dict(model_timeout=value))
+    with pytest.raises(ConfigError, match="model_timeout"):
+        AgentConfig(provider="fake", model="x", system_prompt="p", model_timeout=value)
+
+
 # --- build_chat_model: provider construction branch ---------------------------------------
 
 

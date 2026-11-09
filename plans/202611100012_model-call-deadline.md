@@ -1,6 +1,6 @@
 # Model-call deadline
 
-**Status:** In progress
+**Status:** Done
 
 Implements [specs/agent.md](../specs/agent.md) ("Model-call deadline"), the `model_timeout` field of [specs/config.md](../specs/config.md) and the `model_timeout` reaction outcome of [specs/instrumentation.md](../specs/instrumentation.md).
 
@@ -26,3 +26,7 @@ Implements [specs/agent.md](../specs/agent.md) ("Model-call deadline"), the `mod
 - `uv run pytest` — the fast tier.
 - `uv run pytest tests-e2e -k "fake or example or tester"` — the key-less e2e set.
 - CI on the pull request.
+
+## Result
+
+All of the above clean: ruff, pyright (0 errors), the fast tier (500 passed), the key-less e2e set (14 passed). The live e2e set also passed under the 10 s default on all five providers (25 passed). In the `20261109-2327_baseline` benchmark every model's p95 model latency is under 10 s except `gemini-4-argon` (p95 13 s), whose slowest calls will now end as `model_timeout`.

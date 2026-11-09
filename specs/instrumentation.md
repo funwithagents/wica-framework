@@ -16,7 +16,7 @@ tests:
 
 # Instrumentation
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 

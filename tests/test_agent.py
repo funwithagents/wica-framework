@@ -190,6 +190,7 @@ def make_agent(
     history_reactions: int | None = None,
     history_budget: float | None = None,
     context_window: int | None = None,
+    model_timeout: float | None = 10.0,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
@@ -204,6 +205,7 @@ def make_agent(
         history_reactions=history_reactions,
         history_budget=history_budget,
         context_window=context_window,
+        model_timeout=model_timeout,
     )
     agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
     if output_sink is not None:
@@ -2249,6 +2251,100 @@ def test_reaction_ended_reports_a_model_error(loop, world, sink):
     world.update("prompt", "y")  # the agent is free again — a second trace follows
     assert done.wait(timeout=WAIT_TIMEOUT)
     assert len(traces) == 2
+
+    agent.stop()
+
+
+def test_model_call_past_its_deadline_ends_the_step_as_model_timeout(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    hang = (
+        asyncio.Event()
+    )  # never set: the first call hangs until the deadline cancels it
+    calls = 0
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await hang.wait()
+        return AIMessage(content="back")
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, model_timeout=0.05
+    )
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("prompt", "first")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert traces[0].outcome == "model_timeout"
+    assert traces[0].error == "model call exceeded its 0.05 s deadline"
+    assert traces[0].model_ended_at is not None
+    assert sink.texts == []
+
+    # The Agent is free again; the timed-out observation merges into the next prompt.
+    done.clear()
+    world.update("prompt", "second")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert traces[1].outcome == "ok"
+    assert sink.texts == ["back"]
+    user_text = _rendered_user_text(model, 1)
+    assert "first" in user_text and "second" in user_text
+
+    agent.stop()
+
+
+def test_a_providers_own_timeout_error_is_a_model_error(loop, world, sink):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        raise TimeoutError("read timed out")
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("prompt", "x")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert traces[0].outcome == "model_error"
+    assert traces[0].error == "read timed out"
+
+    agent.stop()
+
+
+@pytest.mark.parametrize("model_timeout", [None, 5.0])
+def test_a_call_within_its_deadline_completes(loop, world, sink, model_timeout):
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        await asyncio.sleep(0.1)
+        return AIMessage(content="slow but fine")
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, model_timeout=model_timeout
+    )
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("prompt", "x")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    assert traces[0].outcome == "ok"
+    assert sink.texts == ["slow but fine"]
 
     agent.stop()
 

@@ -19,6 +19,11 @@ class MissingEnvError(ConfigError):
         self.env_var = env_var
 
 
+# The default deadline on one model call, in seconds: tight on purpose, a reactive agent's answer
+# later than a few seconds is already a failure. See specs/agent.md ("Model-call deadline").
+DEFAULT_MODEL_TIMEOUT = 10.0
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     """Plain data mirroring the dictionary/JSON ``agent`` block.
@@ -50,6 +55,10 @@ class AgentConfig:
     # The context window in tokens for `history_budget` (None = use the model profile's
     # max_input_tokens). Unused without `history_budget`.
     context_window: int | None = None
+    # Seconds one whole model call (provider retries included) may take before the step is
+    # abandoned with the `model_timeout` outcome; None = no deadline. See specs/agent.md
+    # ("Model-call deadline").
+    model_timeout: float | None = DEFAULT_MODEL_TIMEOUT
 
     def __post_init__(self) -> None:
         # The structural invariants the loaders enforce, applied to direct construction too, so
@@ -71,6 +80,7 @@ class AgentConfig:
         _validate_history_reactions(self.history_reactions, block="agent")
         _validate_history_budget(self.history_budget, block="agent")
         _validate_context_window(self.context_window, block="agent")
+        _validate_model_timeout(self.model_timeout, block="agent")
 
     @classmethod
     def from_dict(
@@ -132,6 +142,7 @@ _AGENT_OPTIONAL_COMMON = {
     "history_reactions",
     "history_budget",
     "context_window",
+    "model_timeout",
 }
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent"}
@@ -181,6 +192,17 @@ def _validate_context_window(value: Any, *, block: str) -> int | None:
             f"{block}: 'context_window' must be a positive integer or null, got {value!r}"
         )
     return value
+
+
+def _validate_model_timeout(value: Any, *, block: str) -> float | None:
+    """None (no deadline) or a positive number of seconds. See specs/config.md."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise ConfigError(
+            f"{block}: 'model_timeout' must be a positive number of seconds or null, got {value!r}"
+        )
+    return float(value)
 
 
 def _require_str(data: dict[str, Any], key: str, *, block: str) -> str:
@@ -275,6 +297,9 @@ def _parse_agent_block(
     )
     history_budget = _validate_history_budget(data.get("history_budget"), block=block)
     context_window = _validate_context_window(data.get("context_window"), block=block)
+    model_timeout = _validate_model_timeout(
+        data.get("model_timeout", DEFAULT_MODEL_TIMEOUT), block=block
+    )
 
     return {
         "provider": provider,
@@ -288,6 +313,7 @@ def _parse_agent_block(
         "history_reactions": history_reactions,
         "history_budget": history_budget,
         "context_window": context_window,
+        "model_timeout": model_timeout,
     }
 
 
