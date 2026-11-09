@@ -25,9 +25,11 @@ from wica.instrumentation import now
 from wica.testing.probe import Probe
 from wica.testing.report import (
     Finding,
+    FindingKind,
     Issue,
     MetricSummary,
     Report,
+    RunOutcome,
     SutEvent,
     compute_metrics,
 )
@@ -111,6 +113,18 @@ def _busy_reasons(
     return reasons
 
 
+WaitCondition = str | dict[str, Any]
+
+
+def _last_input_index(timeline: list[SutEvent]) -> int:
+    """The index of the last tester `set` action (0 when there is none)."""
+    for i in range(len(timeline) - 1, -1, -1):
+        e = timeline[i]
+        if e.kind == "action" and e.name == "set":
+            return i
+    return 0
+
+
 def _describe(method: str, /, **kwargs: Any) -> str:
     inner = ", ".join(f"{k}={v!r}" for k, v in kwargs.items() if v is not None)
     return f"{method}({inner})"
@@ -140,6 +154,8 @@ class TestRun:
         self._issues: list[Issue] = []
         self._notes: list[str] = []
         self._verdict: str | None = None
+        self._outcome: RunOutcome = "completed"
+        self._stopped_at: str | None = None
         self._summary: str | None = None
         self._started_at = now()
         self.finished = threading.Event()
@@ -163,10 +179,21 @@ class TestRun:
         self._record(SutEvent(kind="action", t=_t(), name=method, args=dict(kwargs)))
 
     def _finding(
-        self, expectation: str, ok: bool, detail: str, event: SutEvent | None = None
+        self,
+        expectation: str,
+        ok: bool,
+        detail: str,
+        event: SutEvent | None = None,
+        *,
+        kind: FindingKind = "expect",
     ) -> Finding:
         finding = Finding(
-            expectation=expectation, ok=ok, detail=detail, t=_t(), event=event
+            expectation=expectation,
+            ok=ok,
+            detail=detail,
+            t=_t(),
+            event=event,
+            kind=kind,
         )
         with self._cond:
             self._findings.append(finding)
@@ -194,7 +221,10 @@ class TestRun:
 
     def set(self, key: str, value: Any) -> None:
         """Write the SUT's Input *key* and move the watermark to the end of the timeline as it
-        stands *before* the write — the SUT may react before this returns."""
+        stands *before* the write — the SUT may react before this returns. Refused (a no-op)
+        once the run is finished, so a stopped scripted run cannot write behind its stop."""
+        if self.finished.is_set():
+            return
         self._action("set", key=key, value=value)
         with self._cond:
             self._watermark = len(self._timeline)
@@ -322,28 +352,57 @@ class TestRun:
                     return self._finding(label, True, f"no {name} for {for_}s")
                 self._cond.wait(remaining)
 
-    def expect_idle(self, *, within: float = 30.0) -> Finding:
-        """Blocks until the SUT has finished reacting — no timer, the timeline says so: every
-        observed trigger has been consumed by a reaction that ended, every issued Command has
-        reached a terminal state, and every completed Command whose completion re-triggers a
-        step has had that trigger arrive (so the step it wakes is counted, not missed in the gap).
-        *within* is a safety bound, not a pace. The watermark is not moved."""
-        label = _describe("expect_idle", within=within)
-        self._action("expect_idle", within=within)
+    def wait_for(self, condition: WaitCondition, *, within: float = 60.0) -> Finding:
+        """Pacing: blocks until *condition* holds, read from the timeline — no timer except
+        `{"seconds": n}`. A timeout is a **stall** (a `wait` finding), not a failed expectation.
+        The watermark is not moved.
+
+        - `"idle"` — the SUT has finished reacting: every write to a triggering Input seen (or
+          dropped) by the Agent, every observed trigger consumed by a reaction that ended, every
+          issued Command terminal, and every completed Command whose completion re-triggers a
+          step has had that trigger arrive (so the step it wakes is not missed in the gap).
+        - `"speaking"` — the output Command has started since the last input.
+        - `{"running": name}` — that Command has started since the last input.
+        - `{"seconds": n}` — *n* seconds pass."""
+        label = _describe("wait_for", condition=condition, within=within)
+        self._action("wait_for", condition=condition, within=within)
+        if isinstance(condition, dict) and "seconds" in condition:
+            time.sleep(float(condition["seconds"]))
+            return self._finding(label, True, f"{condition['seconds']}s", kind="wait")
         deadline = time.monotonic() + within
         with self._cond:
             while True:
-                busy = _busy_reasons(
-                    self._timeline, self._retriggers, self._triggers_input
-                )
-                if not busy:
-                    return self._finding(label, True, "idle")
+                unmet = self._unmet(condition)
+                if not unmet:
+                    return self._finding(label, True, "reached", kind="wait")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return self._finding(
-                        label, False, f"still busy after {within}s: " + "; ".join(busy)
+                        label,
+                        False,
+                        f"not reached after {within}s: " + "; ".join(unmet),
+                        kind="wait",
                     )
                 self._cond.wait(remaining)
+
+    def _unmet(self, condition: WaitCondition) -> list[str]:
+        """Why *condition* does not hold yet (empty when it does). Called under the lock."""
+        if condition == "idle":
+            return _busy_reasons(self._timeline, self._retriggers, self._triggers_input)
+        if condition == "speaking":
+            name = self.probe.output_command_name
+            if name is None:
+                return ["the SUT has no output Command"]
+        elif isinstance(condition, dict) and isinstance(condition.get("running"), str):
+            name = condition["running"]
+        else:
+            return [f"unknown condition {condition!r}"]
+        since = _last_input_index(self._timeline)
+        started = any(
+            e.kind == "command_issued" and e.name == name
+            for e in self._timeline[since:]
+        )
+        return [] if started else [f"{name} has not started since the last input"]
 
     def _retriggers(self, name: str) -> bool:
         """Whether *name*'s completion wakes a step (the Agent's rule for an unknown name is
@@ -404,6 +463,22 @@ class TestRun:
                 Issue(severity=severity, what=what, evidence=evidence, t=_t())
             )
 
+    def stop(self, outcome: RunOutcome, at: str) -> None:
+        """End the run early: an expect did not hold (`"failed"`) or a wait timed out
+        (`"stalled"`) at step *at*. `finished` is set; a later write is refused."""
+        self._action("stop", outcome=outcome, at=at)
+        with self._cond:
+            if self._outcome == "completed":
+                self._outcome = outcome
+                self._stopped_at = at
+            self._verdict = "fail"
+        self.finished.set()
+
+    @property
+    def outcome(self) -> RunOutcome:
+        with self._cond:
+            return self._outcome
+
     def finish(self, verdict: str, summary: str = "") -> None:
         """Record the verdict and mark the run finished (`finished` is set)."""
         self._action("finish", verdict=verdict, summary=summary)
@@ -446,6 +521,8 @@ class TestRun:
                 notes=list(self._notes),
                 verdict=self._verdict,
                 summary=self._summary,
+                outcome=self._outcome,
+                stopped_at=self._stopped_at,
             )
 
     def close(self) -> None:

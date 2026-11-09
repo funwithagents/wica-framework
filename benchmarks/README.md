@@ -13,7 +13,7 @@ it uses is `wica.benchmark`, the scenario format and checks are `wica.testing`'s
 |---|---|
 | `bench.py` | `DemoTarget` and the `wica-demo-bench` entry point |
 | `matrix.json` | the matrix: one entry per model under test (`id`, `agent` block, `tags`, `enabled`, `notes`), nineteen models over five providers, the demo's persona shared through `agent_defaults`; the `fake` fixture is its opt-in key-less row — see "Model catalog" |
-| `scenarios/*.json` | **the workload**: `conversation` (a generic session — greeting, question, a story interrupted by "Stop!", two quick utterances, goodbye) and `commands` (the demo's own actions); each a fixed user as a scripted-tester script + the checks to run over the whole session |
+| `scenarios/*.json` | **the workload**: `conversation` (a generic session — greeting, question, a story interrupted by "Stop!", two quick utterances, goodbye) and `commands` (the demo's own actions); each a list of `input` / `wait` / `expect` / `check` steps, one per line ([specs/wica-tester.md](../specs/wica-tester.md), "Scenarios") |
 | `runs/<stamp>/` | **batches** — per-run reports and summaries, git-ignored working data |
 | `results/<stamp>_<name>/` | **results** — kept batches: `summary.md`, `summary.json`, `runs.json`, hand-written `description.md` and `findings.md` |
 
@@ -39,9 +39,11 @@ uv run --group demo python -m benchmarks.bench --only fake --include-disabled --
 Entries are selected by id glob (`--only`, `--exclude`) and tag (`--tags`, `--exclude-tags`); a row
 marked `enabled: false` runs only with `--include-disabled`; a row whose key variable is unset skips
 with the reason. A batch prints its progress and its summary, and lands in `runs/<YYYYMMDD-HHMM>/`
-(`--out` to choose). The summary opens with **one row per model** pooled over every run — pass^k,
-rule compliance, turns answered, reaction and model latency, tokens and words per turn, chained
-replies — then one table per scenario. Runs are sequential; a `conversation` run is seven user turns
+(`--out` to choose). The summary opens with **one row per model** — runs, how many were scored,
+failed (an expect missed) or stalled (a wait timed out), pass^k, compliance, turns answered, reaction
+and model latency, tokens and words per turn, chained replies — then a **checks table** (each check
+kept / applied, per model), then one table per scenario. A stopped run counts against pass^k and in
+no other number. Runs are sequential; a `conversation` run is seven user turns
 and about a minute, so five models × two scenarios × five repetitions is on the order of an hour.
 
 ## Model catalog

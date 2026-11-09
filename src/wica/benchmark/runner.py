@@ -18,17 +18,10 @@ from typing import Any, Protocol
 from wica.benchmark.matrix import Entry
 from wica.benchmark.summary import Summary, aggregate, git_commit
 from wica.instrumentation import now
-from wica.testing.checks import (
-    Check,
-    CheckContext,
-    apply_checks,
-    build_registry,
-    measures,
-)
+from wica.testing.checks import Check, build_registry, measures
 from wica.testing.harness import TestRun
 from wica.testing.report import Report, metric_samples
-from wica.testing.scenario import Scenario
-from wica.testing.tester import run_script
+from wica.testing.scenario import Scenario, check_context, run_scenario
 from wica.wica import Wica
 
 
@@ -62,15 +55,19 @@ class Skipped:
 
 
 @dataclass(frozen=True)
-class Completed:
-    """One finished run: the report (checks appended to its findings), the per-run measures and
-    the raw metric samples the summary pools."""
+class RunResult:
+    """One run that ran (whatever its outcome): the report, and — for a completed run only — the
+    per-run measures and the raw metric samples the summary pools. A stopped run carries none:
+    it is counted, never scored."""
 
     report: Report
     measures: dict[str, float]
     samples: dict[str, list[float]]
     repetition: int
-    checks: tuple[str, ...] = ()  # the check findings' names, for the compliance rate
+
+    @property
+    def scored(self) -> bool:
+        return self.report.outcome == "completed"
 
     @property
     def label(self) -> str:
@@ -88,8 +85,9 @@ def run_once(
     repetition: int,
     out_dir: Path,
     extra_checks: Iterable[Check] | None = None,
-) -> Completed | Skipped:
-    """`target.open(scenario)` → requirements check → `run_script` → checks + measures → write
+) -> RunResult | Skipped:
+    """`target.open(scenario)` → requirements check → `run_scenario` (steps, then checks if it
+    completed) → measures if it completed → write
     `<out_dir>/<label>/<scenario>/<repetition>.json` and `.md` → `run.close()`, `target.close()`."""
     registry = build_registry(extra_checks)
     run: TestRun | None = None
@@ -112,35 +110,26 @@ def run_once(
             return Skipped(
                 target.label, scenario.name, "the target lacks " + ", ".join(missing)
             )
-        report = run_script(run, scenario.script, timeout=scenario.timeout_s)
-        context = CheckContext(
-            scenario=scenario,
-            output_command_name=output,
-            inputs=tuple(inputs),
-            triggering_inputs=tuple(
-                key for key, config in inputs.items() if config.triggers_llm_call
-            ),
-            commands=tuple(commands),
-        )
-        report = apply_checks(report, scenario.checks, context, registry)
-        check_names = tuple(
-            f.expectation for f in report.findings if f.expectation in registry
-        )
-        run_measures = measures(report.timeline, context)
-        samples = metric_samples(report.timeline, output_command_name=output)
+        report = run_scenario(run, scenario, registry=registry)
+        run_measures: dict[str, float] = {}
+        samples: dict[str, list[float]] = {}
+        if report.outcome == "completed":
+            run_measures = measures(report.timeline, check_context(run, scenario))
+            samples = metric_samples(report.timeline, output_command_name=output)
         base = Path(out_dir) / target.label / scenario.name
         report.write(
             base / f"{repetition}.json",
             extra={
                 "bench": {
                     "repetition": repetition,
-                    "checks": list(check_names),
+                    "outcome": report.outcome,
+                    "stopped_at": report.stopped_at,
                     "measures": run_measures,
                 }
             },
         )
         report.write(base / f"{repetition}.md")
-        return Completed(report, run_measures, samples, repetition, check_names)
+        return RunResult(report, run_measures, samples, repetition)
     finally:
         if run is not None:
             run.close()
@@ -156,7 +145,7 @@ def run_matrix(
     only_configs: Iterable[str] = (),
     only_scenarios: Iterable[str] = (),
     extra_checks: Iterable[Check] | None = None,
-    on_outcome: Callable[[Completed | Skipped], None] | None = None,
+    on_outcome: Callable[[RunResult | Skipped], None] | None = None,
     skipped: Iterable[Skipped] = (),
 ) -> Summary:
     """Every (configuration, scenario) pair *k* times, sequentially; a pair skipped once is not
@@ -169,7 +158,7 @@ def run_matrix(
     chosen_targets = [t for t in targets if not labels or t.label in labels]
     chosen_scenarios = [s for s in scenarios if not names or s.name in names]
     started_at = now()
-    completed: list[Completed] = []
+    completed: list[RunResult] = []
     all_skipped: list[Skipped] = list(skipped)
     for target in chosen_targets:
         for scenario in chosen_scenarios:

@@ -22,7 +22,7 @@ from typing import TextIO
 
 from wica.benchmark.matrix import load_matrix, select_entries
 from wica.benchmark.runner import (
-    Completed,
+    RunResult,
     Skipped,
     Target,
     TargetFactory,
@@ -157,15 +157,19 @@ def cli(
             continue
         targets.append(target_factory(entry))
 
-    def progress(outcome: Completed | Skipped) -> None:
+    def progress(outcome: RunResult | Skipped) -> None:
         if isinstance(outcome, Skipped):
             print(
                 f"{outcome.label} / {outcome.scenario}: skipped ({outcome.reason})",
                 file=out,
             )
             return
-        failed = [f.expectation for f in outcome.report.findings if not f.ok]
-        verdict = "ok" if outcome.report.ok else f"FAIL {failed}"
+        report = outcome.report
+        if report.outcome != "completed":
+            verdict = f"{report.outcome.upper()} at {report.stopped_at}"
+        else:
+            broken = [f.expectation for f in report.checks() if not f.ok]
+            verdict = "ok" if not broken else f"checks broken {broken}"
         print(
             f"{outcome.label} / {outcome.scenario} #{outcome.repetition}: {verdict}",
             file=out,

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from wica.benchmark import (
-    Completed,
+    RunResult,
     Skipped,
     aggregate,
     git_commit,
@@ -17,7 +17,7 @@ from wica.benchmark import (
     write_summary,
 )
 from wica.instrumentation import ReactionTrace, TokenUsage, TriggerTrace
-from wica.testing import Finding, Report, SutEvent
+from wica.testing import Finding, Report, RunOutcome, SutEvent
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -56,17 +56,20 @@ def _run(
     dropped: int = 0,
     cache_read: int | None = None,
     repetition: int = 1,
-) -> Completed:
-    # finding 0 is the script's expectation; the rest are checks (named check_<i>)
+    outcome: RunOutcome = "completed",
+) -> RunResult:
+    # finding 0 is an expect; the rest are checks (named check_<i>)
     findings = [
         Finding(
             expectation="expect_output()" if i == 0 else f"check_{i}",
             ok=ok,
             detail="",
             t=0.0,
+            kind="expect" if i == 0 else "check",
         )
         for i, ok in enumerate(ok_findings)
     ]
+    stopped = outcome != "completed"
     report = Report(
         scenario=scenario,
         sut_label=label,
@@ -81,29 +84,32 @@ def _run(
         findings=findings,
         issues=[],
         notes=[],
-        verdict=verdict,
+        verdict="fail" if stopped else verdict,
         summary=None,
+        outcome=outcome,
+        stopped_at="step 3: wait_for(condition='idle')" if stopped else None,
     )
-    return Completed(
+    measures = {
+        "output_calls": 1.0,
+        "unprompted_output": 0.0,
+        "output_words": 4.0,
+        "turns": 2.0,
+        "turns_answered": 1.0,
+    }
+    samples = {
+        "reaction_latency": [latency, latency + 0.2],
+        "input_tokens": [100.0, 100.0],
+        "output_tokens": [10.0, 10.0],
+    }
+    return RunResult(
         report=report,
-        measures={
-            "output_calls": 1.0,
-            "unprompted_output": 0.0,
-            "output_words": 4.0,
-            "turns": 2.0,
-            "turns_answered": 1.0,
-        },
-        checks=tuple(f.expectation for f in findings[1:]),
-        samples={
-            "reaction_latency": [latency, latency + 0.2],
-            "input_tokens": [100.0, 100.0],
-            "output_tokens": [10.0, 10.0],
-        },
+        measures={} if stopped else measures,
+        samples={} if stopped else samples,
         repetition=repetition,
     )
 
 
-def _aggregate(runs: list[Completed], skips: list[Skipped] = [], *, k: int = 2):
+def _aggregate(runs: list[RunResult], skips: list[Skipped] = [], *, k: int = 2):
     return aggregate(
         runs,
         skips,
@@ -137,7 +143,9 @@ def test_aggregate_pools_runs_into_cells_with_pass_rate_pass_k_and_failures():
     a = summary.cell("greeting", "a")
     assert a is not None
     assert (a.runs, a.passed, a.pass_rate, a.pass_k) == (2, 1, 0.5, 0)
-    assert a.failed == {"check_1": 1, "verdict: fail": 1}
+    assert a.broken == {"check_1": 1}
+    assert a.checks == {"check_1": (0, 1)}  # only run 2 applied a check, and it broke
+    assert (a.scored, a.failed_runs, a.stalled_runs) == (2, 0, 0)
     assert a.metrics["reaction_latency"].count == 4  # two samples per run, pooled
     assert a.metrics["reaction_latency"].max == 3.2
     assert a.per_run["input_tokens"].median == 200  # summed per run, then pooled
@@ -173,7 +181,36 @@ def test_compliance_is_checks_passed_over_checks_run():
     assert total is not None
     assert total.per_run["compliance"].min == 0.5
     assert total.per_run["compliance"].max == 1.0
-    assert total.failed == {"check_2": 1}
+    assert total.broken == {"check_2": 1}
+
+
+def test_a_stopped_run_counts_against_pass_k_and_in_no_other_number():
+    summary = _aggregate(
+        [
+            _run(ok_findings=(True, True), latency=1.0, repetition=1),
+            _run(ok_findings=(True,), latency=9.0, repetition=2, outcome="stalled"),
+            _run(ok_findings=(True,), latency=9.0, repetition=3, outcome="failed"),
+        ],
+        k=3,
+    )
+    total = summary.cell("*", "a")
+    assert total is not None
+    assert (total.runs, total.scored, total.failed_runs, total.stalled_runs) == (
+        3,
+        1,
+        1,
+        1,
+    )
+    assert total.passed == 1 and total.pass_k == 0
+    assert (
+        total.metrics["reaction_latency"].max == 1.2
+    )  # the stopped runs' 9 s are not pooled
+    assert total.per_run["compliance"].count == 1
+    assert total.checks == {"check_1": (1, 1)}
+    assert total.stopped_at == {
+        "stalled greeting step 3: wait_for": 1,
+        "failed greeting step 3: wait_for": 1,
+    }
 
 
 def test_markdown_opens_with_the_per_configuration_table():
@@ -183,7 +220,7 @@ def test_markdown_opens_with_the_per_configuration_table():
     head, _, rest = text.partition("## Configurations")
     assert "## Per configuration" in head and "## greeting" in rest
     row = next(line for line in head.splitlines() if line.startswith("| a |"))
-    assert row.startswith("| a | 1 | 1 | 100% | 50% | 1.10 / 1.20 |")
+    assert row.startswith("| a | 1 | 1 | 0 | 0 | 1 | 100% | 50% | 1.10 / 1.20 |")
     assert "| 100 / 10 | 2 |" in row  # tokens in / out per turn, words per turn
     assert "| b | skipped: disabled |" in head
 
@@ -195,7 +232,7 @@ def test_markdown_has_one_table_per_scenario_with_skips_in_place():
     assert "## greeting" in text and "## question" in text
     assert '- **a**: `{"model": "gpt-4o", "provider": "openai"}`' in text
     row = next(line for line in text.splitlines() if line.startswith("| a |"))
-    assert row.startswith("| a | 1 | 1 | 100% | 1 | — | 1.10 / 1.20 |")
+    assert row.startswith("| a | 1 | 1 | 0 | 0 | 100% | 1 | — | 1.10 / 1.20 |")
     assert "| b | skipped: key unset |" in text
     assert "- b / greeting: key unset" in text
 

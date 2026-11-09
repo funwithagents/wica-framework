@@ -9,7 +9,7 @@ from sut_support import ADD_THEN_TEXT, describe_timeline, identity_serialize, wa
 
 from wica import Wica
 from wica.fake_model import FakeChatModel
-from wica.testing import TestRun, build_tester, run_script
+from wica.testing import TESTER_COMMANDS, TestRun, build_tester, run_script
 
 
 def _calls(command: str, /, **args: Any) -> dict[str, Any]:
@@ -66,9 +66,10 @@ def test_only_settable_types_get_set_commands(sut_factory: Callable[..., Wica]):
         run.close()
 
 
-def test_a_failed_expectation_lands_in_the_report_and_the_script_continues(
+def test_a_failed_expectation_stops_the_scripted_run(
     sut_factory: Callable[..., Wica],
 ):
+    """A failed expect ends the chain: the run is `failed`, the step after it never writes."""
     sut = sut_factory(ADD_THEN_TEXT)
     sut.start()
     run = TestRun(sut)
@@ -77,16 +78,58 @@ def test_a_failed_expectation_lands_in_the_report_and_the_script_continues(
             run,
             [
                 _calls("expect_action", name="ghost", within=0.2),
-                _calls("finish", verdict="fail"),
+                _calls("set_prompt", value="never written"),
+                _calls("finish", verdict="pass"),
             ],
             timeout=10,
         )
     finally:
         run.close()
-    assert report.verdict == "fail" and report.tester_label == "fake"
-    assert len(report.findings) == 1
-    assert report.findings[0].expectation.startswith("expect_action(name='ghost'")
-    assert not report.findings[0].ok and not report.ok
+    assert report.outcome == "failed" and report.verdict == "fail" and not report.ok
+    assert report.stopped_at is not None and report.stopped_at.startswith(
+        "expect_action(name='ghost'"
+    )
+    assert not any(e.kind == "input_written" for e in report.timeline)
+
+
+def test_a_wait_that_times_out_stalls_the_scripted_run(
+    sut_factory: Callable[..., Wica],
+):
+    sut = sut_factory([{"text": ""}])
+    sut.start()
+    run = TestRun(sut)
+    try:
+        report = run_script(
+            run,
+            [
+                _calls("set_prompt", value="hi"),
+                _calls("wait_for", condition={"running": "add"}, within=0.3),
+                _calls("finish", verdict="pass"),
+            ],
+            timeout=10,
+        )
+    finally:
+        run.close()
+    assert report.outcome == "stalled" and not report.ok
+
+
+def test_tester_commands_match_what_the_scripted_tester_registers(
+    sut_factory: Callable[..., Wica],
+):
+    sut = sut_factory([{"text": ""}])
+    run = TestRun(sut)
+    tester = build_tester(run, [])
+    try:
+        registered = {
+            name
+            for name in tester.agent.commands
+            if name not in ("noop", "cancel_command") and not name.startswith("set_")
+        }
+        assert registered == TESTER_COMMANDS
+        assert "set_prompt" in tester.agent.commands  # the one open-ended family
+    finally:
+        tester.close()
+        run.close()
 
 
 def test_missing_finish_times_out_with_a_failed_finding(

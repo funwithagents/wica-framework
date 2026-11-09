@@ -15,7 +15,7 @@ from wica.benchmark.matrix import (
     select_entries,
 )
 from wica.benchmark.runner import (
-    Completed,
+    RunResult,
     Skip,
     Skipped,
     Target,
@@ -34,7 +34,7 @@ from wica.benchmark.summary import (
 
 __all__ = [
     "Cell",
-    "Completed",
+    "RunResult",
     "Entry",
     "Matrix",
     "MatrixError",

@@ -11,7 +11,7 @@ from wica import Wica
 from wica.agent import build_chat_model
 from wica.config import AgentConfig, MissingEnvError, WicaConfig
 from wica.content import Content, TextPart
-from wica.testing import Requires, Scenario
+from wica.testing import CheckSpec, ExpectStep, InputStep, Scenario, WaitStep
 
 E2E_DIR = Path(__file__).parent
 
@@ -73,23 +73,22 @@ def real_wica(
 
 
 def greeting_probe() -> Scenario:
-    """The cheapest probe that a provider drives the demo at all (specs/benchmark.md, "Testing"):
-    one utterance, one `say`. A test fixture, not benchmark data — the benchmark's workload is
+    """The cheapest probe that the demo runs end to end: one greeting, an expected reply, idle,
+    and the session-wide checks. A test fixture, not benchmark data — the benchmark's workload is
     the session scenarios under benchmarks/scenarios/."""
-
-    def step(command: str, **args: Any) -> dict[str, Any]:
-        return {"tool_calls": [{"name": command, "args": args}]}
-
     return Scenario(
         name="greeting",
-        requires=Requires(inputs=("speech_input",), output_command=True),
         timeout_s=60,
-        checks=("no_failed_reactions", "no_colliding_cancel"),
-        script=[
-            step("set_speech_input", value="Hello there!"),
-            step("expect_output", within=20),
-            step("finish", verdict="pass"),
-        ],
+        checks=(
+            CheckSpec("answers_each_input"),
+            CheckSpec("no_failed_reactions"),
+            CheckSpec("no_colliding_cancel"),
+        ),
+        steps=(
+            InputStep("speech_input", "Hello there!"),
+            ExpectStep("output", {}, within=20),
+            WaitStep("idle"),
+        ),
     )
 
 

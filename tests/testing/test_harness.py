@@ -204,10 +204,10 @@ def test_notes_issues_and_finish_land_in_the_report(sut_factory: Callable[..., W
         run.close()
 
 
-# --- expect_idle --------------------------------------------------------------------------
+# --- wait_for --------------------------------------------------------------------------
 
 
-def test_expect_idle_waits_for_the_step_a_completion_wakes(
+def test_wait_for_idle_waits_for_the_step_a_completion_wakes(
     sut_factory: Callable[..., Wica],
 ):
     """`add` completes, its completion wakes a step, that step ends: only then idle — no timer."""
@@ -216,7 +216,7 @@ def test_expect_idle_waits_for_the_step_a_completion_wakes(
     run = TestRun(sut)
     try:
         run.set("prompt", "add 2 and 2")
-        finding = run.expect_idle(within=5)
+        finding = run.wait_for("idle", within=5)
         assert finding.ok, finding.detail
         timeline = run.timeline()
         reactions = [e for e in timeline if e.kind == "reaction_ended"]
@@ -231,7 +231,7 @@ def test_expect_idle_waits_for_the_step_a_completion_wakes(
         sut.close()
 
 
-def test_expect_idle_reports_what_is_still_running(sut_factory: Callable[..., Wica]):
+def test_wait_for_idle_reports_what_is_still_running(sut_factory: Callable[..., Wica]):
     async def slow() -> str:
         """Take a while."""
         await asyncio.sleep(1.0)
@@ -245,26 +245,55 @@ def test_expect_idle_reports_what_is_still_running(sut_factory: Callable[..., Wi
     try:
         run.set("prompt", "go")
         run.expect_action("slow", within=2)
-        finding = run.expect_idle(within=0.2)
+        finding = run.wait_for("idle", within=0.2)
         assert (
             not finding.ok
             and "slow (" in finding.detail
             and "running" in finding.detail
         )
-        assert run.expect_idle(within=5).ok  # and then it is
+        assert run.wait_for("idle", within=5).ok  # and then it is
     finally:
         run.close()
         sut.close()
 
 
-def test_expect_idle_is_immediate_on_a_quiet_sut(sut_factory: Callable[..., Wica]):
+def test_wait_for_idle_is_immediate_on_a_quiet_sut(sut_factory: Callable[..., Wica]):
     sut = sut_factory([{"text": ""}])
     sut.start()
     run = TestRun(sut)
     try:
         started = time.monotonic()
-        assert run.expect_idle(within=5).ok
+        assert run.wait_for("idle", within=5).ok
         assert time.monotonic() - started < 0.5
+    finally:
+        run.close()
+        sut.close()
+
+
+def test_wait_for_running_and_speaking_hold_once_started_since_the_last_input(
+    sut_factory: Callable[..., Wica],
+):
+    async def slow() -> str:
+        """Take a while."""
+        await asyncio.sleep(0.5)
+        return "done"
+
+    sut = sut_factory(
+        [{"tool_calls": [{"name": "slow", "args": {}}]}, {"text": ""}], commands=(slow,)
+    )
+    sut.start()
+    run = TestRun(sut)
+    try:
+        run.set("prompt", "go")
+        assert run.wait_for({"running": "slow"}, within=5).ok
+        stalled = run.wait_for({"running": "ghost"}, within=0.2)
+        assert not stalled.ok and stalled.kind == "wait"
+        assert "ghost has not started since the last input" in stalled.detail
+        # "speaking" needs an output Command, which this SUT has none of.
+        assert "no output Command" in run.wait_for("speaking", within=0.1).detail
+        started = time.monotonic()
+        assert run.wait_for({"seconds": 0.2}).ok
+        assert time.monotonic() - started >= 0.2
     finally:
         run.close()
         sut.close()

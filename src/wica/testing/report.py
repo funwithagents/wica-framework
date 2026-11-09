@@ -66,15 +66,22 @@ class SutEvent:
     command: CommandTrace | None = None  # command_ended: likewise
 
 
+FindingKind = Literal["expect", "wait", "check", "other"]
+RunOutcome = Literal["completed", "failed", "stalled"]
+
+
 @dataclass(frozen=True)
 class Finding:
     """The outcome of one expectation: a hard pass/fail with what matched or why it did not."""
 
-    expectation: str  # e.g. "expect_text(contains='hi')"
+    expectation: str  # e.g. "expect_text(contains='hi')", or a check's name
     ok: bool
     detail: str
     t: float
     event: SutEvent | None = None  # the matching event, when there is one
+    kind: FindingKind = (
+        "expect"  # expect, wait (pacing), check (judged after the run), other
+    )
 
 
 @dataclass(frozen=True)
@@ -207,11 +214,24 @@ class Report:
     notes: list[str]
     verdict: str | None  # "pass" | "fail" | None when finish() was never called
     summary: str | None
+    outcome: RunOutcome = (
+        "completed"  # failed: an expect did not hold; stalled: a wait timed out
+    )
+    stopped_at: str | None = None  # the step that stopped the run, when it stopped
 
     @property
     def ok(self) -> bool:
-        """Every finding passed and the verdict is not "fail"."""
-        return all(f.ok for f in self.findings) and self.verdict != "fail"
+        """The run completed, every finding passed (expects and checks) and the verdict is not
+        "fail"."""
+        return (
+            self.outcome == "completed"
+            and all(f.ok for f in self.findings)
+            and self.verdict != "fail"
+        )
+
+    def checks(self) -> list[Finding]:
+        """The findings of the checks judged after the run."""
+        return [f for f in self.findings if f.kind == "check"]
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -224,6 +244,8 @@ class Report:
             f"# {self.scenario or 'scenario'} — SUT `{self.sut_label or '?'}`"
             + (f", tester `{self.tester_label}`" if self.tester_label else ""),
             "",
+            f"Outcome: **{self.outcome}**"
+            + (f" at {self.stopped_at}" if self.stopped_at else ""),
             f"Verdict: **{self.verdict or 'none'}**"
             + (f" — {self.summary}" if self.summary else ""),
             f"Run: {self.started_at} → {self.finished_at}",
