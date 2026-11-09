@@ -1,8 +1,19 @@
 # WICA
 
-**WICA is an agentic framework for agents that take multimodal inputs and produce multimodal outputs**: a social robot that hears, sees and speaks, an assistant that watches sensors and acts on them. Its state is one **World**, a registry of typed entries that renders into the model's prompt at every reasoning step; perceptions flow in as **Inputs**, the agent acts out through **Commands**, and an **Agent** loop sits in the middle, waking when the World changes and deciding what to do. The prompt is a view of state, not a transcript you append to; actions are asynchronous, cancellable tasks the model can see running and stop.
+**WICA is an agentic framework for agents that take multimodal inputs and produce multimodal outputs**, such as a social robot that hears, sees and speaks, or an assistant that watches sensors and acts on them.
 
-**Start here:** [docs/getting-started.md](docs/getting-started.md), your first agent on the scripted `fake` provider, then on a real model; [docs/index.md](docs/index.md), the documentation by task. Below, [what WICA gives you](#what-wica-gives-you) is the feature list, the [quick start](#quick-start) the shortest program, and the [conversation demo](#the-conversation-demo) what you can run from a checkout.
+What sets it apart:
+
+- **The prompt is a view of state, not a transcript.** You keep a World of typed entries up to date, and every reasoning step renders it into the model's prompt.
+- **Actions run as tasks the model can see and stop.** Commands are asynchronous and cancellable, and their state is part of the World the model reads.
+
+**Start here:**
+
+- [docs/getting-started.md](docs/getting-started.md): your first agent on the scripted `fake` provider, then on a real model.
+- [docs/index.md](docs/index.md): the documentation, by task.
+- On this page: [what WICA gives you](#what-wica-gives-you), the [quick start](#quick-start), the [conversation demo](#the-conversation-demo).
+
+The name is the model:
 
 | Letter | Pillar | What it is |
 |---|---|---|
