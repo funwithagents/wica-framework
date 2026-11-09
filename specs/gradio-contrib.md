@@ -223,7 +223,7 @@ def reaction_panel(
   `model_latency`); `reaction_latency(trace)` ([instrumentation.md](instrumentation.md), "Metrics")
   when it applies (not for a reaction whose only trigger was a Command completion); token usage
   when reported; the dispatched `command_call_ids` and whether the reaction ended in `noop`; the
-  `error` on a `model_error` outcome; and the OpenTelemetry `trace_id` when an SDK is installed —
+  `error` on a `model_error` or `model_timeout` outcome; and the OpenTelemetry `trace_id` when an SDK is installed —
   the exact identifier a person pastes into their tracing backend to see the same reaction as a
   span tree. `ReactionTrace` is the type `wica.on_agent_reaction_ended` already carries; rendering
   it here, like `render_messages`, introduces no new dependency.
@@ -332,7 +332,7 @@ the package layout — [testing.md](testing.md)). They import the contrib (hence
   than raising.
 - **`render_reaction_trace`** over a hand-built `ReactionTrace`: every derived measure shown only
   when its stamp is present (a cancelled reaction with no `model_latency`), token usage, dispatched
-  command ids, `noop`, `error` on a `model_error` outcome, and the `trace_id` line.
+  command ids, `noop`, `error` on a `model_error` or `model_timeout` outcome, and the `trace_id` line.
 - **`render_messages`** over AI/Human/Tool messages: role headers, block flattening without extra
   newlines, image markers, explicit tool calls and tool results.
 - **`world_rows`/`world_html`** over a real `World`: register ordinary entries and one whose
