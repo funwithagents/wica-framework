@@ -59,10 +59,14 @@ def test_the_conversation_session_passes_through_the_demo_target(tmp_path: Path)
     assert stop.expectation == "cancels_when_asked"
     assert stop.detail.startswith("on input 4 (speech_input='Stop!')")
     m = outcome.measures
-    # Seven user utterances, every one answered through `say`; the confirmation after the
-    # cancel is issued on the completion step, so it counts as the one unprompted output.
+    # Seven user utterances, every one answered through `say` once: the confirmation issued on
+    # the step the cancel's completion wakes is "Stop!"'s answer, not an extra reply.
     assert (m["turns"], m["turns_answered"], m["output_calls"]) == (7, 7, 7)
-    assert m["unprompted_output"] == 1 and m["noops_on_input"] == 0
+    assert m["extra_output"] == 0 and m["noops_on_input"] == 0
+    assert (
+        len(outcome.samples["answer_latency"]) == 7
+    )  # each turn timed to its first word
+    assert outcome.report.dropped_inputs == 0  # the ready waits keep every input
     assert (tmp_path / "fake" / "conversation" / "1.json").exists()
     assert (tmp_path / "fake" / "conversation" / "1.md").exists()
 

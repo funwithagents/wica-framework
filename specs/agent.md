@@ -101,6 +101,14 @@ Payoffs:
 
 Consequence: `render_full_prompt()` is **not** the Agent's path. The Agent has its own snapshot-history renderer (`snapshots -> list[BaseMessage]`) that is position-aware and multimodal. World rendering primitives (`render_entry`, the `Content` model) are the building blocks it composes; `render_full_prompt` remains a text/debug/full-current-state convenience.
 
+### Prompt caching
+
+A stable prefix is necessary, not sufficient: providers differ in what they do with it. OpenAI and Gemini cache a repeated prefix on their own. **Anthropic caches only at an explicit `cache_control` breakpoint**, and a read lands only where an earlier request wrote one, walking back at most 20 blocks. So with `provider: "anthropic"` the Agent marks **one breakpoint on the last block before the newest observation** — the deepest block the next request renders byte-identically, since the newest observation is re-rendered archival on the next step (a breakpoint after it would be written every step and never read). On the first step that block is the system prompt, which caches the tools ahead of it too; afterwards it is the previous step's last `tool_result` (or its text, for a text-only step), and the next step's breakpoint finds it one observation and one assistant turn later, well inside the lookback for an observation of a few entries.
+
+- **A transport detail, applied after `on_prompt`.** `mark_cache_breakpoint(messages)` returns a copy with that block marked; `on_prompt` subscribers keep receiving the plain rendering, and history is never touched.
+- **No knob.** Writing the cache costs a little more than plain input and every later step reads it at a fraction of the price, so a conversation always wins; an application that needs it off is an open question, not a v1 field.
+- **Below a model's minimum cacheable prefix nothing is cached**, silently (the minimum varies by model — up to 4096 tokens on Haiku 4.5); the reported `cache_read_tokens` say whether it worked.
+
 ### History window
 
 History is unbounded by default. `AgentConfig.history_reactions` (see [config.md](config.md)) bounds it to a number of **reactions**, so a long-running agent's prompt (and its process memory — every Observation retains full snapshots, images included) stops growing. Compaction and summarization remain future work (see Open questions); the window is the simple, lossy first strategy.

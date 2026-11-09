@@ -97,13 +97,6 @@ def commands_by_reaction(timeline: list[SutEvent]) -> dict[int, list[SutEvent]]:
     }
 
 
-def reaction_of_call(timeline: list[SutEvent], call_id: str) -> ReactionTrace | None:
-    for r in reactions(timeline):
-        if call_id in r.command_call_ids:
-            return r
-    return None
-
-
 @dataclass(frozen=True)
 class Turn:
     """From the write that opened it (index `start` in the timeline) to the next opening write
@@ -368,12 +361,12 @@ def run_check(
 
 
 def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float]:
-    """The per-run numbers next to the framework's metrics: `output_calls`, `unprompted_output`
-    (output issued by a reaction with no external trigger — the chained reply), `noop_steps`,
-    `failed_reactions`, `output_words` (words in the output Command's string args), and the turn
-    numbers a session is read by — `turns` (opened by the scenario's triggering Inputs, see
-    `turns`), `turns_answered` (the output Command issued within the turn), `noops_on_input`
-    (reactions that answered a write to a scenario Input with `noop` alone)."""
+    """The per-run numbers next to the framework's metrics: `output_calls`, `extra_output` (output
+    issued beyond a turn's first one — a second utterance in the same turn, however many steps the
+    first took), `noop_steps`, `failed_reactions`, `output_words` (words in the output Command's
+    string args), and the turn numbers a session is read by — `turns` (opened by the scenario's
+    triggering Inputs, see `turns`), `turns_answered` (the output Command issued within the turn),
+    `noops_on_input` (reactions that answered a write to a scenario Input with `noop` alone)."""
     outputs = output_issued(timeline, context.output_command_name)
     output = context.output_command_name
     all_turns = turns(timeline, context.turn_inputs)
@@ -393,11 +386,6 @@ def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float
         and not r.command_call_ids
         and any(t.key in wanted for t in external_triggers(r))
     )
-    unprompted = 0
-    for event in outputs:
-        reaction = reaction_of_call(timeline, event.call_id or "")
-        if reaction is not None and not external_triggers(reaction):
-            unprompted += 1
     words = sum(
         len(value.split())
         for e in outputs
@@ -407,7 +395,7 @@ def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float
     all_reactions = reactions(timeline)
     return {
         "output_calls": float(len(outputs)),
-        "unprompted_output": float(unprompted),
+        "extra_output": float(len(outputs) - answered),
         "noop_steps": float(sum(1 for r in all_reactions if r.noop)),
         "failed_reactions": float(sum(1 for r in all_reactions if r.outcome != "ok")),
         "output_words": float(words),
@@ -415,6 +403,26 @@ def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float
         "turns_answered": float(answered),
         "noops_on_input": float(noops_on_input),
     }
+
+
+def answer_latencies(timeline: list[SutEvent], context: CheckContext) -> list[float]:
+    """One sample per answered turn: from the write that opened it to its first output Command —
+    the time to the first word, whether the model spoke on its first step or after a side Command
+    (an emotion change) whose completion woke the step that spoke. Unanswered turns give none."""
+    output = context.output_command_name
+    samples: list[float] = []
+    for turn in turns(timeline, context.turn_inputs):
+        first = next(
+            (
+                e
+                for e in timeline[turn.start : turn.end]
+                if e.kind == "command_issued" and e.name == output
+            ),
+            None,
+        )
+        if first is not None:
+            samples.append(first.t - turn.t)
+    return samples
 
 
 def registry_or_default(registry: Mapping[str, Check] | None) -> Mapping[str, Check]:

@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from wica.benchmark.matrix import Entry
 from wica.benchmark.summary import Summary, aggregate, git_commit
 from wica.instrumentation import now
-from wica.testing.checks import Check, build_registry, measures
+from wica.testing.checks import Check, answer_latencies, build_registry, measures
 from wica.testing.harness import TestRun
 from wica.testing.report import Report, metric_samples
 from wica.testing.scenario import Scenario, check_context, run_scenario
@@ -58,7 +58,7 @@ class Skipped:
 class RunResult:
     """One run that ran (whatever its outcome): the report, and — for a completed run only — the
     per-run measures and the raw metric samples the summary pools. A stopped run carries none:
-    it is counted, never scored."""
+    it counts against pass^k and in no other number."""
 
     report: Report
     measures: dict[str, float]
@@ -66,7 +66,7 @@ class RunResult:
     repetition: int
 
     @property
-    def scored(self) -> bool:
+    def completed(self) -> bool:
         return self.report.outcome == "completed"
 
     @property
@@ -114,8 +114,10 @@ def run_once(
         run_measures: dict[str, float] = {}
         samples: dict[str, list[float]] = {}
         if report.outcome == "completed":
-            run_measures = measures(report.timeline, check_context(run, scenario))
+            context = check_context(run, scenario)
+            run_measures = measures(report.timeline, context)
             samples = metric_samples(report.timeline, output_command_name=output)
+            samples["answer_latency"] = answer_latencies(report.timeline, context)
         base = Path(out_dir) / target.label / scenario.name
         report.write(
             base / f"{repetition}.json",

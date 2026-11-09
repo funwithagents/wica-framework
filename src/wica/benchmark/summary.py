@@ -3,9 +3,10 @@ table of checks kept per configuration, then per (scenario, configuration) pass 
 the pooled distributions — and how a batch becomes a kept result. Implements specs/benchmark.md,
 "The summary".
 
-A run that **stopped** (failed on an expect, stalled on a wait) counts as a failure for pass^k and
-is listed with the step it stopped at, but contributes to no other number: only **scored**
-(completed) runs feed compliance, the check table, latencies, tokens and measures.
+A run that **failed** (an expect did not hold, a wait timed out) counts against pass^k, lowers the
+**completed** rate and is listed with the step it stopped at, but contributes to no other number:
+only completed runs feed compliance, the checks table, latencies, tokens and measures. The
+completed rate sits before compliance so a reader never reads compliance alone.
 
 No thresholds anywhere: the summary is a comparison, the reader draws the line. A **batch** (one
 runner invocation, `write_summary` into its folder) is working data; a **result** (`write_result`)
@@ -37,7 +38,7 @@ _PER_RUN_TOTALS = ("input_tokens", "output_tokens")
 class Cell:
     """One (scenario, configuration) — or, with scenario `"*"`, one configuration over every
     scenario: its runs and their outcomes, how many passed, the checks kept, and the pooled
-    numbers of the **scored** runs — `metrics` over every reaction, `per_run` over one number per
+    numbers of the **completed** runs — `metrics` over every reaction, `per_run` over one number per
     run (the measures, the token totals, and the derived `compliance`, `answer_rate`,
     `*_per_turn`)."""
 
@@ -45,15 +46,15 @@ class Cell:
     label: str
     runs: int
     passed: int  # runs that completed and kept every check
-    scored: int = 0  # runs that completed
-    failed_runs: int = 0  # stopped on an expect
-    stalled_runs: int = 0  # stopped on a wait
+    completed: int = (
+        0  # runs that completed; the others failed and feed no other number
+    )
     stopped_at: dict[str, int] = field(
         default_factory=dict
     )  # where runs stopped, with counts
     broken: dict[str, int] = field(
         default_factory=dict
-    )  # checks broken, over scored runs
+    )  # checks broken, over completed runs
     checks: dict[str, tuple[int, int]] = field(
         default_factory=dict
     )  # check → (kept, applied)
@@ -91,7 +92,7 @@ class Summary:
         return None
 
     def _check_names(self) -> list[str]:
-        """Every check any scored run applied, the built-ins in registry order first."""
+        """Every check any completed run applied, the built-ins in registry order first."""
         from wica.testing.checks import CHECKS
 
         seen = {name for cell in self.totals for name in cell.checks}
@@ -147,32 +148,34 @@ class Summary:
             "",
             "Every run of every scenario pooled: the row a reader compares models by.",
             "",
-            "Stopped runs count against pass^k and in no other column.",
+            "A failed run counts against completed and pass^k, and in no other column.",
             "",
-            "| config | runs | scored | failed | stalled | pass^k | compliance | answered | "
-            "reaction p50 / p95 | model p50 / p95 | tokens in / out per turn | words per turn | "
-            "unprompted | noops on input | dropped | checks broken | stopped at |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "| config | runs | completed | pass^k | compliance | answered | "
+            "answer p50 / p95 | reaction p50 / p95 | model p50 / p95 | tokens in / out per turn | "
+            "words per turn | extra replies | noops on input | dropped | checks broken | "
+            "stopped at |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for label in self._row_labels():
             total = self.cell("*", label)
             if total is None:
                 lines.append(
                     f"| {label} | skipped: {_short(self._skip_reason(label, '*'), 60)} |"
-                    + " |" * 15
+                    + " |" * 14
                 )
                 continue
             lines.append(
-                f"| {label} | {total.runs} | {total.scored} | {total.failed_runs} | "
-                f"{total.stalled_runs} | {total.pass_k} | "
+                f"| {label} | {total.runs} | {_ratio(total.completed, total.runs)} | "
+                f"{total.pass_k} | "
                 f"{_percent(total.per_run.get('compliance'))} | "
                 f"{_percent(total.per_run.get('answer_rate'))} | "
+                f"{_p50_p95(total.metrics.get('answer_latency'))} | "
                 f"{_p50_p95(total.metrics.get('reaction_latency'))} | "
                 f"{_p50_p95(total.metrics.get('model_latency'))} | "
                 f"{_median(total.per_run.get('input_tokens_per_turn'))} / "
                 f"{_median(total.per_run.get('output_tokens_per_turn'))} | "
                 f"{_median(total.per_run.get('words_per_turn'))} | "
-                f"{_median(total.per_run.get('unprompted_output'))} | "
+                f"{_median(total.per_run.get('extra_output'))} | "
                 f"{_median(total.per_run.get('noops_on_input'))} | "
                 f"{_median(total.per_run.get('dropped_inputs'))} | "
                 f"{_failed(total.broken)} | {_failed(total.stopped_at)} |"
@@ -183,7 +186,7 @@ class Summary:
                 "",
                 "## Checks",
                 "",
-                "Times each check was kept, over the times it was applied, in scored runs.",
+                "Times each check was kept, over the times it was applied, in completed runs.",
                 "",
                 "| config | " + " | ".join(check_names) + " |",
                 "|---|" + "---|" * len(check_names),
@@ -207,9 +210,9 @@ class Summary:
                 "",
                 f"## {scenario}",
                 "",
-                "| config | runs | passed | failed | stalled | pass rate | pass^k | checks broken | "
-                "reaction p50 / p95 | model p50 / p95 | reactions/input p50 | unprompted | dropped | "
-                "tokens in / out per run | cache read | words per run |",
+                "| config | runs | completed | passed | pass rate | pass^k | checks broken | "
+                "answer p50 / p95 | reaction p50 / p95 | model p50 / p95 | reactions/input p50 | "
+                "extra replies | dropped | tokens in / out per run | cache read | words per run |",
                 "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
             ]
             for label in self._row_labels():
@@ -221,13 +224,14 @@ class Summary:
                     )
                     continue
                 lines.append(
-                    f"| {label} | {cell.runs} | {cell.passed} | {cell.failed_runs} | "
-                    f"{cell.stalled_runs} | {cell.pass_rate:.0%} | "
+                    f"| {label} | {cell.runs} | {_ratio(cell.completed, cell.runs)} | "
+                    f"{cell.passed} | {cell.pass_rate:.0%} | "
                     f"{cell.pass_k} | {_failed(cell.broken)} | "
+                    f"{_p50_p95(cell.metrics.get('answer_latency'))} | "
                     f"{_p50_p95(cell.metrics.get('reaction_latency'))} | "
                     f"{_p50_p95(cell.metrics.get('model_latency'))} | "
                     f"{_median(cell.metrics.get('reactions_per_input'))} | "
-                    f"{_median(cell.per_run.get('unprompted_output'))} | "
+                    f"{_median(cell.per_run.get('extra_output'))} | "
                     f"{_median(cell.per_run.get('dropped_inputs'))} | "
                     f"{_median(cell.per_run.get('input_tokens'))} / "
                     f"{_median(cell.per_run.get('output_tokens'))} | "
@@ -301,11 +305,11 @@ def _cell(scenario: str, label: str, runs: list[RunResult]) -> Cell:
     cache_read = 0
     cache_input = 0
     checks: dict[str, list[int]] = {}
-    scored = [run for run in runs if run.scored]
+    done = [run for run in runs if run.completed]
     for run in runs:
-        if not run.scored:
+        if not run.completed:
             stopped_at[_stop_label(run)] += 1
-    for run in scored:
+    for run in done:
         report = run.report
         for finding in report.checks():
             kept = checks.setdefault(finding.expectation, [0, 0])
@@ -333,10 +337,8 @@ def _cell(scenario: str, label: str, runs: list[RunResult]) -> Cell:
         scenario=scenario,
         label=label,
         runs=len(runs),
-        passed=sum(1 for run in scored if run.report.ok),
-        scored=len(scored),
-        failed_runs=sum(1 for run in runs if run.report.outcome == "failed"),
-        stalled_runs=sum(1 for run in runs if run.report.outcome == "stalled"),
+        passed=sum(1 for run in done if run.report.ok),
+        completed=len(done),
         stopped_at=dict(stopped_at),
         broken=dict(broken),
         checks={name: (kept, applied) for name, (kept, applied) in checks.items()},
@@ -347,9 +349,13 @@ def _cell(scenario: str, label: str, runs: list[RunResult]) -> Cell:
 
 
 def _stop_label(run: RunResult) -> str:
-    """`"<outcome> <scenario> <step>"`, the step without its arguments — short enough to count."""
+    """`"<scenario> <step>"`, the step without its arguments — short enough to count."""
     at = (run.report.stopped_at or "?").split("(")[0]
-    return f"{run.report.outcome} {run.scenario} {at}"
+    return f"{run.scenario} {at}"
+
+
+def _ratio(part: int, whole: int) -> str:
+    return f"{part}/{whole}" if whole else "—"
 
 
 def _derived(run: RunResult) -> dict[str, float]:

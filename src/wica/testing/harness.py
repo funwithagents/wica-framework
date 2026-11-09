@@ -58,8 +58,11 @@ def _busy_reasons(
     timeline: list[SutEvent],
     retriggers: Callable[[str], bool],
     triggers: Callable[[str], bool],
+    *,
+    running: bool = True,
 ) -> list[str]:
-    """Why the SUT is not idle yet, as short reasons; empty when it is. See `expect_idle`."""
+    """Why the SUT is not idle yet, as short reasons; empty when it is. See `wait_for`. With
+    *running* false a Command still running is not a reason: the `"ready"` condition."""
     arrived = {
         (e.key, e.version_id)
         for e in timeline
@@ -97,7 +100,10 @@ def _busy_reasons(
         for e in timeline
         if e.kind == "command_state" and e.state in _TERMINAL and e.call_id
     }
-    reasons += [f"{issued[c]} ({c}) running" for c in issued if c not in terminal_at]
+    if running:
+        reasons += [
+            f"{issued[c]} ({c}) running" for c in issued if c not in terminal_at
+        ]
     for call_id, t in terminal_at.items():
         name = issued.get(call_id)
         if name is None or not retriggers(name):
@@ -354,13 +360,15 @@ class TestRun:
 
     def wait_for(self, condition: WaitCondition, *, within: float = 60.0) -> Finding:
         """Pacing: blocks until *condition* holds, read from the timeline — no timer except
-        `{"seconds": n}`. A timeout is a **stall** (a `wait` finding), not a failed expectation.
+        `{"seconds": n}`. A timeout is a failed `wait` finding; a scenario stops the run on it, as on a failed expect.
         The watermark is not moved.
 
         - `"idle"` — the SUT has finished reacting: every write to a triggering Input seen (or
           dropped) by the Agent, every observed trigger consumed by a reaction that ended, every
           issued Command terminal, and every completed Command whose completion re-triggers a
           step has had that trigger arrive (so the step it wakes is not missed in the gap).
+        - `"ready"` — the Agent can take an input now: `"idle"` without waiting for running
+          Commands. An input written then is not dropped as busy, even over a dance or a speech.
         - `"speaking"` — the output Command has started since the last input.
         - `{"running": name}` — that Command has started since the last input.
         - `{"seconds": n}` — *n* seconds pass."""
@@ -387,8 +395,13 @@ class TestRun:
 
     def _unmet(self, condition: WaitCondition) -> list[str]:
         """Why *condition* does not hold yet (empty when it does). Called under the lock."""
-        if condition == "idle":
-            return _busy_reasons(self._timeline, self._retriggers, self._triggers_input)
+        if condition in ("idle", "ready"):
+            return _busy_reasons(
+                self._timeline,
+                self._retriggers,
+                self._triggers_input,
+                running=condition == "idle",
+            )
         if condition == "speaking":
             name = self.probe.output_command_name
             if name is None:
@@ -463,13 +476,13 @@ class TestRun:
                 Issue(severity=severity, what=what, evidence=evidence, t=_t())
             )
 
-    def stop(self, outcome: RunOutcome, at: str) -> None:
-        """End the run early: an expect did not hold (`"failed"`) or a wait timed out
-        (`"stalled"`) at step *at*. `finished` is set; a later write is refused."""
-        self._action("stop", outcome=outcome, at=at)
+    def stop(self, at: str) -> None:
+        """End the run early as **failed** at step *at*: an expect did not hold or a wait timed
+        out. `finished` is set; a later write is refused."""
+        self._action("stop", at=at)
         with self._cond:
             if self._outcome == "completed":
-                self._outcome = outcome
+                self._outcome = "failed"
                 self._stopped_at = at
             self._verdict = "fail"
         self.finished.set()

@@ -39,9 +39,10 @@ uv run --group demo python -m benchmarks.bench --only fake --include-disabled --
 Entries are selected by id glob (`--only`, `--exclude`) and tag (`--tags`, `--exclude-tags`); a row
 marked `enabled: false` runs only with `--include-disabled`; a row whose key variable is unset skips
 with the reason. A batch prints its progress and its summary, and lands in `runs/<YYYYMMDD-HHMM>/`
-(`--out` to choose). The summary opens with **one row per model** — runs, how many were scored,
-failed (an expect missed) or stalled (a wait timed out), pass^k, compliance, turns answered, reaction
-and model latency, tokens and words per turn, chained replies — then a **checks table** (each check
+(`--out` to choose). The summary opens with **one row per model** — runs, how many completed
+(the others failed: an expect missed or a wait timed out), pass^k, compliance over completed runs, turns answered, answer
+latency (input to first word, however many steps the answer took), reaction and model latency, tokens
+and words per turn, extra replies (a second utterance in the same turn) — then a **checks table** (each check
 kept / applied, per model), then one table per scenario. A stopped run counts against pass^k and in
 no other number. Runs are sequential; a `conversation` run is seven user turns
 and about a minute, so five models × two scenarios × five repetitions is on the order of an hour.

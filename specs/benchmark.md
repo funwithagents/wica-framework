@@ -39,7 +39,7 @@ This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"):
 - **Target** — an application stood up as a running `Wica` for one benchmark configuration, plus how to shut it down. The runner never builds a `Wica` itself; the application does, exactly as its entry point would (the demo's `build_system` + `wire` + `start`, the interaction app's `build_system` + `wire` + `_start`), so what is benchmarked is the real system with its real persona, Commands and seeding. Only the peripherals the application chooses to bypass are doubled, by the application.
 - **Configuration** — one model under test: an **entry** of the matrix file, whose `agent` block (provider, model, `hf_provider`, `api_key_env`, history settings) is what differs between entries; the persona is shared through the file's `agent_defaults`. Its **label** in every report is the entry's `id`. The file is the **matrix**.
 - **Scenario** — a fixed user as `input` / `wait` / `expect` / `check` steps, one JSON file named by its stem ([wica-tester.md](wica-tester.md), "Scenarios"). A benchmark's scenarios are **sessions** — several user turns, paced as a person would pace them — so one run yields a whole conversation's worth of turns to measure; a scenario that pins one rule in a few steps is a regression probe, not a workload.
-- **Run** — one (configuration, scenario, repetition): one `TestRun`, one `Report`. Its outcome is `completed`, `failed` (an expect did not hold) or `stalled` (a wait timed out); only a completed run is **scored**.
+- **Run** — one (configuration, scenario, repetition): one `TestRun`, one `Report`. Its outcome is `completed` or `failed` (an expect did not hold, or a wait timed out); only a completed run is **scored**.
 - **Batch** — one invocation of the runner: a matrix × a scenario set × *k*, written to one dated folder of per-run reports plus a summary. Working data, git-ignored.
 - **Result** — a batch worth keeping: its summary and manifest copied under `benchmarks/results/<YYYYMMDD-HHMM>_<name>/` with a hand-written description and findings. Committed, and the only thing a spec or plan cites.
 - **Check** — a rule judged after the run (the tester's). What a benchmark measures is a model's **compliance**: the share of checks it kept over its scored runs, overall and per check.
@@ -50,14 +50,15 @@ This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"):
 The format, the four step kinds, the built-in checks and their windows are the tester's ([wica-tester.md](wica-tester.md), "Scenarios"); a benchmark adds three rules of use:
 
 - **Expects are few.** An expect stops the run, and a stopped run is not scored, so a benchmark scenario keeps them for what the session cannot continue without. What is compared between models is written as checks.
-- **Pacing is explicit and generous.** `wait` steps carry `within` budgets that include the slowest model's think time; a stall is reported, not scored.
+- **Pacing is explicit and generous.** `wait` steps carry `within` budgets that include the slowest model's think time; a timeout fails the run like a missed expect.
+- **Never write over a reaction.** An input written while a reaction is in flight is dropped as busy ([agent.md](agent.md), "Concurrency and long-running Commands in v1"), and a benchmark that drops inputs measures the framework's drop rule, not the model. Every input that talks over the robot follows a `{"wait": "ready"}`: the Agent can take an input, while its Commands (a speech, a dance) may still run.
 - **Checks sit on the input they judge**, and the session-wide ones (`no_failed_reactions`, `no_colliding_cancel`, …) at the top level.
 
-**A chained reply is a measure, not a failure.** The output Command's completion re-triggers a step so the model *may* chain a second utterance ([commands.md](commands.md), "The output Command"); a rule breaking on it would penalize designed behavior. The runner counts it (`output_calls`, `unprompted_output` below), next to the checks.
+**An answer may take several steps.** A model may issue a side Command first (an emotion change) and speak on the step its completion wakes; the checks judge a whole turn, so that is one answer, and the measures time it to its first word. **A second utterance in the same turn is a measure, not a failure.** The output Command's completion re-triggers a step so the model *may* chain one ([commands.md](commands.md), "The output Command"); a rule breaking on it would penalize designed behavior. The runner counts it (`extra_output` below), next to the checks.
 
 **Application checks.** The runner and the CLI take `extra_checks`, the tester's `build_registry` adds them beside the built-ins (the interaction app's `no_collision`, `spoken_style`, …), and its scenarios select them like any other.
 
-**Measures.** `measures(timeline, context) -> dict[str, float]` adds per run, next to the framework's metrics: `output_calls` (how many times the output Command was issued), `unprompted_output` (issued by a reaction with no external trigger — the chained reply after the output Command's completion counts here, and so does a spoken confirmation issued on the step a cancel's completion wakes), `noop_steps`, `failed_reactions`, `output_words` (summed words of the output Command's string args — a cost of the person's time), and the **turn numbers** a session is read by: `turns` (opened by writes to triggering Inputs, as `answers_each_input` defines them), `turns_answered` (the output Command issued within the turn), `noops_on_input` (reactions that answered a write to a scenario input with `noop` alone). Written into the run's JSON under `"bench"`; pooled into the summary.
+**Measures.** `measures(timeline, context) -> dict[str, float]` adds per run, next to the framework's metrics: `output_calls` (how many times the output Command was issued), `extra_output` (issued in a turn after the turn's first one — `output_calls − turns_answered`; a turn's first utterance is its answer whichever step issued it, so a confirmation spoken on the step a cancel's completion wakes is "Stop!"'s answer, not an extra), `noop_steps`, `failed_reactions`, `output_words` (summed words of the output Command's string args — a cost of the person's time), and the **turn numbers** a session is read by: `turns` (opened by writes to triggering Inputs, as `answers_each_input` defines them), `turns_answered` (the output Command issued within the turn), `noops_on_input` (reactions that answered a write to a scenario input with `noop` alone). Written into the run's JSON under `"bench"`; pooled into the summary. Beside them, `answer_latencies(timeline, context)` gives one sample per answered turn — the write that opened it → its first output Command — pooled with the framework's latency samples as `answer_latency`: the time to the first word, the latency a person hears, however many steps the answer took.
 
 ### The matrix
 
@@ -117,37 +118,40 @@ The selection flags are `select_entries`' (`tts-engine`'s vocabulary); an entry 
 
 ### The summary
 
-**Stopped runs are counted, never scored.** A run that stopped — `failed` on an expect or `stalled` on a wait — is a failure for pass^k and is listed with the step that stopped it, but contributes to **no other metric**: no compliance, no latency, no tokens, no measure. Its numbers describe a session that did not happen as written, and mixing them in would compare models on different conversations.
+**Failed runs are counted, never scored.** A run that failed — an expect did not hold or a wait timed out — lowers the **completed** rate, counts against pass^k and is listed with the step that stopped it, but contributes to **no other metric**: no compliance, no latency, no tokens, no measure. Its numbers describe a session that did not happen as written, and mixing them in would compare models on different conversations.
+
+**Read completed before compliance.** Compliance is computed over completed runs only, so a model that fails hardest — never answers, returns empty responses, malformed tool calls — completes few runs and keeps a flattering compliance on the rest. The completed rate sits right before compliance in every table so the two are never read apart (the first batch's gpt-oss rows: 100% compliance, half the runs completed).
 
 **One row per configuration first** — every run of every scenario pooled, the row a reader compares models by (`Summary.totals`, scenario `"*"`):
 
 | Column | Meaning |
 |---|---|
-| runs, scored, failed, stalled | runs over every scenario; how many completed and were scored; how many stopped, by kind |
+| runs, completed | runs over every scenario; completed ÷ runs (the rest failed) |
 | pass^k | 1 when every run completed and kept every check, else 0 |
-| compliance | median over scored runs of *checks kept ÷ checks applied* |
+| compliance | median over completed runs of *checks kept ÷ checks applied* |
 | answered | median over runs of *turns answered ÷ turns* |
-| `reaction_latency`, `model_latency` p50 / p95 | pooled over every reaction of the scored runs |
+| `answer_latency` p50 / p95 | pooled over every answered turn of the completed runs: input → first word |
+| `reaction_latency`, `model_latency` p50 / p95 | pooled over every reaction of the completed runs |
 | tokens in / out per turn, words per turn | per-run totals divided by the run's turns, median over runs |
-| unprompted, noops on input, dropped | per-run counts, median over runs |
+| extra replies, noops on input, dropped | per-run counts, median over runs |
 | checks broken | which checks broke, with counts |
 | stopped at | the steps runs stopped at, with counts — read it before the rest, since a model that stops often is scored on few runs |
 
-Then **one table of checks**, one row per configuration and one column per check any scored run applied (the built-ins first): *kept / applied* over the configuration's scored runs. It answers "which rule does this model break" at a glance.
+Then **one table of checks**, one row per configuration and one column per check any completed run applied (the built-ins first): *kept / applied* over the configuration's scored runs. It answers "which rule does this model break" at a glance.
 
-The per-run rates (`compliance`, `answer_rate`, `input_tokens_per_turn`, `output_tokens_per_turn`, `words_per_turn`) are derived when pooling, over scored runs only, from the run's check findings, its measures and its token samples; they appear in `per_run` beside the measures.
+The per-run rates (`compliance`, `answer_rate`, `input_tokens_per_turn`, `output_tokens_per_turn`, `words_per_turn`) are derived when pooling, over completed runs only, from the run's check findings, its measures and its token samples; they appear in `per_run` beside the measures.
 
 Then **one table per scenario**, one row per configuration:
 
 | Column | Meaning |
 |---|---|
-| runs / passed | *k*, and how many runs completed and kept every check |
-| failed, stalled | the stopped runs, by kind |
+| runs, completed | *k*, and completed ÷ runs |
+| passed | runs that completed and kept every check |
 | pass rate | passed ÷ runs |
 | pass^k | 1 when every run passed, else 0 — the "reliably follows the rules" bit |
-| checks broken | the checks that broke over the scored runs, with counts |
-| `reaction_latency`, `model_latency` | p50 / p95 pooled over the runs' samples |
-| `reactions_per_input` p50, `unprompted_output`, `dropped_inputs` | the re-trigger chain's cost |
+| checks broken | the checks that broke over the completed runs, with counts |
+| `answer_latency`, `reaction_latency`, `model_latency` | p50 / p95 pooled over the runs' samples |
+| `reactions_per_input` p50, `extra_output`, `dropped_inputs` | the re-trigger chain's cost |
 | `input_tokens`, `output_tokens` per run (summed per run, median over runs); cache-read share over the reactions that report one | money |
 | `output_words` per run | the person's time |
 
@@ -165,12 +169,12 @@ A header lists each configuration's full `agent` block: the configuration under 
 - `benchmarks/matrix.json` — the matrix: `agent_defaults` carries the demo's persona (`../examples/conversation_demo/prompts/wica.md`, so the persona under test is the demo's own), and one `default`-tagged entry per provider carries the agent block of the demo's `agent.<provider>.config.json` (a copy of five short blocks, accepted so the matrix is one file and the demo's configs stay the demo's; the live smoke verifies the ids). More models are rows added here, `<provider>/<model>`, tagged to select on — the README's "Model catalog" says how. The `fake` entry is the key-less path: a scripted fake that plays the `conversation` session, `enabled: false` and tagged `fixture` so it never joins a default batch: `--only fake --include-disabled --scenario conversation`.
 - `benchmarks/scenarios/` — the scenario set below; `benchmarks/runs/` (ignored), `benchmarks/results/` and `benchmarks/README.md` — the batches and results, as above.
 
-**The workload**, `benchmarks/scenarios/`: two session scenarios, run *k* times per matrix entry, each a conversation paced like a person's — after an utterance a `{"wait": "idle"}` holds the next one until the reply is spoken and the step its completion wakes has ended, so nothing is dropped as busy; only the barge-in inputs talk over the robot, after a `{"wait": "speaking"}` or `{"wait": {"running": "dance"}}`. Neither scenario has an expect: everything compared is a check.
+**The workload**, `benchmarks/scenarios/`: two session scenarios, run *k* times per matrix entry, each a conversation paced like a person's — after an utterance a `{"wait": "idle"}` holds the next one until the reply is spoken and the step its completion wakes has ended, so nothing is dropped as busy; only the barge-in inputs talk over the robot, after a `{"wait": "speaking"}` or `{"wait": {"running": "dance"}}` and then a `{"wait": "ready"}`, so they too land while the Agent can take them. Neither scenario has an expect: everything compared is a check.
 
 | Scenario | Session (inputs, with the checks on each) | Top-level checks |
 |---|---|---|
-| `conversation` | "Hello there!" · "What can you do?" · a request for a long story · "Stop!" as soon as it is spoken (`cancels_when_asked`) · "Hi, I'm Alex." and "Can you hear me?" 0.5 s apart · "Thanks, that's all for now. Goodbye!" — generic: it needs only `speech_input` and an output Command | `answers_each_input` (so "Stop!" gets a spoken acknowledgement too), `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel` |
-| `commands` | "Hi!" · `emotion = "happy"` while it speaks (`quiet_on_background_change`) · "Please dance for me!" (`acts_when_asked: dance`) · "Stop!" two seconds into the dance (`cancels_when_asked`, `answers_each_input`) · `closest_user = "u2"` (`acts_when_asked: switch_user_tracking(user_id=u2)`) · `closest_user = ""` (`acts_when_asked: switch_user_tracking`) — the demo's own | `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel` |
+| `conversation` | "Hello there!" · "What can you do?" · a request for a long story · "Stop!" as soon as it is spoken (`cancels_when_asked`) · "Hi, I'm Alex." and "Can you hear me?" as soon as the Agent is ready, while the first answer may still be spoken · "Thanks, that's all for now. Goodbye!" — generic: it needs only `speech_input` and an output Command | `answers_each_input` (so "Stop!" gets a spoken acknowledgement too), `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel` |
+| `commands` | "Hi!" · `emotion = "happy"` while it speaks (`quiet_on_background_change`) · "Please dance for me!" (`acts_when_asked: dance`) · "Stop!" two seconds into the dance, once the Agent is ready (`cancels_when_asked`, `answers_each_input`) · `closest_user = "u2"` (`acts_when_asked: switch_user_tracking(user_id=u2)`) · `closest_user = ""` (`acts_when_asked: switch_user_tracking`) — the demo's own | `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel` |
 
 **No rule-by-rule micro scenarios ship.** A one-rule scenario run *k* times is a repeated e2e test, not a benchmark, and the session reports already name the clause a model broke — the failed check, the failed expectation, the timeline beside them. When a clean-context check of one rule is wanted (does a model that breaks a rule mid-session also break it cold?), a fifteen-line scenario file written for that model and run with `--scenarios <file>` does it; nothing needs committing.
 
@@ -180,11 +184,11 @@ Fast tier, `tests/testing/`:
 
 - The scenario format and the checks are tested with the tester ([wica-tester.md](wica-tester.md)): `tests/testing/test_scenario.py`, `test_checks.py`.
 - `tests/benchmark/test_matrix.py` — defaults merge under each entry, extra keys are kept, selection by id glob and tag, `skip_reason` against the environment, faults name the entry.
-- `tests/benchmark/test_runner.py`, `test_summary.py`, `test_cli.py` — the chain over the fake provider, key-less (`test_summary.py` also pins the totals, `compliance`, `answer_rate` and the per-turn numbers, and that the markdown opens with the per-configuration table): a target built in-test over a fake SUT (`speech_input` + `say`) with a script that satisfies a greeting scenario, `run_once` twice → both reports `ok`, the files exist, `aggregate` gives pass rate 1.0 and pass^k 1; a scripted model that `noop`s the greeting breaks `no_noop_on_input` and pass^k is 0, while one that replies twice stays `ok` and moves `output_calls` to 2; a run stopped by an expect or a wait counts in pass^k and in the failed / stalled columns and in no other number; a target raising `Skip` is a summary skip, not an error; a scenario whose `requires` the target lacks is skipped with the reason; `cli` selects entries by glob and tag, lists a disabled row as skipped unless opted in, and writes the summary.
+- `tests/benchmark/test_runner.py`, `test_summary.py`, `test_cli.py` — the chain over the fake provider, key-less (`test_summary.py` also pins the totals, `compliance`, `answer_rate` and the per-turn numbers, and that the markdown opens with the per-configuration table): a target built in-test over a fake SUT (`speech_input` + `say`) with a script that satisfies a greeting scenario, `run_once` twice → both reports `ok`, the files exist, `aggregate` gives pass rate 1.0 and pass^k 1; a scripted model that `noop`s the greeting breaks `no_noop_on_input` and pass^k is 0, while one that replies twice stays `ok` and moves `output_calls` to 2; a run stopped by an expect or a wait counts in pass^k and the completed rate and in no other number; a target raising `Skip` is a summary skip, not an error; a scenario whose `requires` the target lacks is skipped with the reason; `cli` selects entries by glob and tag, lists a disabled row as skipped unless opted in, and writes the summary.
 
 Full-loop tier, one key-less file plus a rule, selected **by file** as [ci.md](ci.md) requires:
 
-- `tests-e2e/test_demo_bench_fake.py` — always-run, key-less: the whole `conversation` session through `DemoTarget` over the matrix's `fake` entry (its script plays every turn, the long story cancelled by a scripted tool-call id), asserting the run completed with every check kept, seven turns all answered, one unprompted output (the confirmation on the cancel's completion step) and both files written; a one-utterance greeting probe (`tests-e2e/support.greeting_probe`, a fixture, not benchmark data) likewise; the committed matrix loads with one enabled `default` per provider and the disabled fixture; the workload loads; a one-run `run_matrix` batch kept with `write_result` produces the five files, a `compliance` of 1 in the total, and leaves an existing `description.md` untouched. Joins the e2e-fake job.
+- `tests-e2e/test_demo_bench_fake.py` — always-run, key-less: the whole `conversation` session through `DemoTarget` over the matrix's `fake` entry (its script plays every turn, the long story cancelled by a scripted tool-call id), asserting the run completed with every check kept, seven turns all answered with no extra reply (the confirmation on the cancel's completion step is "Stop!"'s answer), seven answer-latency samples, no dropped input and both files written; a one-utterance greeting probe (`tests-e2e/support.greeting_probe`, a fixture, not benchmark data) likewise; the committed matrix loads with one enabled `default` per provider and the disabled fixture; the workload loads; a one-run `run_matrix` batch kept with `write_result` produces the five files, a `compliance` of 1 in the total, and leaves an existing `description.md` untouched. Joins the e2e-fake job.
 - **No live test over the matrix.** The matrix is the benchmark's own list — models are added, disabled and retired as the benchmark's questions change, and each one carries its provider's quotas and latencies — so no test is parametrized over it: a matrix edit must never change what the test suite runs, and a model the key's plan cannot call must never turn `main` red. The live e2e set stays the fixed, scoped `PROVIDER_CONFIGS` list of [testing.md](testing.md); the matrix's models are exercised when the benchmark is run.
 
 Both import `benchmarks.bench` as the demo tests import `examples.conversation_demo.app` (the repo root on `sys.path`). One pytest run is a smoke test; the benchmark is the entry point with `--k`.

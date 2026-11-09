@@ -257,6 +257,51 @@ def test_wait_for_idle_reports_what_is_still_running(sut_factory: Callable[..., 
         sut.close()
 
 
+def test_wait_for_ready_returns_over_a_running_command_so_the_next_input_lands(
+    sut_factory: Callable[..., Wica],
+):
+    """ "ready" waits for the reaction (a slow model here), not for the Command it started: an
+    input written then is reacted to, never dropped as busy."""
+
+    async def slow() -> str:
+        """Take a while."""
+        await asyncio.sleep(1.5)
+        return "done"
+
+    sut = sut_factory(
+        [{"tool_calls": [{"name": "slow", "args": {}}]}, {"text": "stopping"}],
+        commands=(slow,),
+        delay_s=0.3,
+    )
+    sut.start()
+    run = TestRun(sut)
+    try:
+        run.set("prompt", "go")
+        assert run.wait_for("ready", within=5).ok
+        timeline = run.timeline()
+        assert any(e.kind == "reaction_ended" for e in timeline)  # the step ended…
+        assert not any(  # …while slow still runs
+            e.kind == "command_state" and e.name == "slow" and e.state == "complete"
+            for e in timeline
+        )
+        assert not run.wait_for("idle", within=0.1).ok  # idle would wait for slow
+        run.set("prompt", "stop")
+        assert run.wait_for("idle", within=5).ok
+        timeline = run.timeline()
+        assert not any(e.kind == "trigger_dropped" for e in timeline)
+        reacted = {
+            t.version_id
+            for e in timeline
+            if e.reaction is not None
+            for t in e.reaction.triggers
+            if t.key == "prompt"
+        }
+        assert len(reacted) == 2  # both writes reached a reaction
+    finally:
+        run.close()
+        sut.close()
+
+
 def test_wait_for_idle_is_immediate_on_a_quiet_sut(sut_factory: Callable[..., Wica]):
     sut = sut_factory([{"text": ""}])
     sut.start()
@@ -286,9 +331,9 @@ def test_wait_for_running_and_speaking_hold_once_started_since_the_last_input(
     try:
         run.set("prompt", "go")
         assert run.wait_for({"running": "slow"}, within=5).ok
-        stalled = run.wait_for({"running": "ghost"}, within=0.2)
-        assert not stalled.ok and stalled.kind == "wait"
-        assert "ghost has not started since the last input" in stalled.detail
+        timed_out = run.wait_for({"running": "ghost"}, within=0.2)
+        assert not timed_out.ok and timed_out.kind == "wait"
+        assert "ghost has not started since the last input" in timed_out.detail
         # "speaking" needs an output Command, which this SUT has none of.
         assert "no output Command" in run.wait_for("speaking", within=0.1).detail
         started = time.monotonic()

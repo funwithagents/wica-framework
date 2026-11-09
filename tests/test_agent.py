@@ -10,7 +10,13 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from opentelemetry.trace import format_trace_id
@@ -27,6 +33,7 @@ from wica.agent import (
     _EMPTY_OBSERVATION_BLOCK,
     _NOOP_ACK,
     _NOOP_COMMAND_NAME,
+    mark_cache_breakpoint,
 )
 from wica.command import Command
 from wica.config import AgentConfig, ConfigError
@@ -3089,3 +3096,83 @@ def test_history_budget_alone_turns_on_the_window_clause(loop, world, sink):
         model, world=world, loop=loop, history_budget=0.5, context_window=1000
     )
     assert "most recent reactions" in agent.system_prompt
+
+
+# --- prompt caching (specs/agent.md, "Prompt caching") -------------------------------------------
+
+
+def _breakpoints(messages: list[BaseMessage]) -> list[int]:
+    """Indexes of the messages carrying an Anthropic cache_control block."""
+    return [
+        i
+        for i, m in enumerate(messages)
+        if isinstance(m.content, list)
+        and any(isinstance(b, dict) and "cache_control" in b for b in m.content)
+    ]
+
+
+def test_breakpoint_sits_before_the_newest_observation_and_copies():
+    first = [
+        SystemMessage(content="sys"),
+        HumanMessage(content=[{"type": "text", "text": "o1"}]),
+    ]
+    marked = mark_cache_breakpoint(first)
+    assert _breakpoints(marked) == [
+        0
+    ]  # first step: the system prompt (tools ahead of it)
+    assert first[0].content == "sys"  # the caller's messages are untouched
+
+    later = [
+        *first,
+        AIMessage(content="", tool_calls=[{"name": "say", "args": {}, "id": "c1"}]),
+        ToolMessage(content="ack", tool_call_id="c1"),
+        HumanMessage(content=[{"type": "text", "text": "o2"}]),
+    ]
+    marked = mark_cache_breakpoint(later)
+    assert _breakpoints(marked) == [
+        3
+    ]  # the last tool_result, not the fresh observation
+    assert marked[3].content == [
+        {"type": "text", "text": "ack", "cache_control": {"type": "ephemeral"}}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider", "marked"), [("anthropic", True), ("openai", False)]
+)
+def test_only_anthropic_requests_carry_the_breakpoint(
+    loop, world, sink, provider, marked
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("add", {"a": 1, "b": 2}, "call1")]),
+            text_response("The sum is 3"),
+        )
+    )
+    config = AgentConfig(
+        provider=provider, model="test", system_prompt="You are terse.", api_key="k"
+    )
+    agent = Agent(config, world=world, loop=loop, model=model)
+    agent.set_output_sink(sink)
+    prompts: list[list[BaseMessage]] = []
+    agent.on_prompt.subscribe(prompts.append)
+
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    agent.register_command(add)
+    agent.start()
+    world.update("input", "add 1 and 2")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    sent = model.calls[1]  # the step the add completion woke
+    tool_index = next(i for i, m in enumerate(sent) if isinstance(m, ToolMessage))
+    assert _breakpoints(sent) == ([tool_index] if marked else [])
+    assert all(
+        _breakpoints(p) == [] for p in prompts
+    )  # observers see the plain rendering
