@@ -57,6 +57,7 @@ What this buys, compared with a sink that calls the voice itself: speech becomes
 
 - Set it **before `start()`**: it recomposes the system prompt (the primer's reply clause names the Command), and setting it after the first step rebuilds the system message and drops the cached prefix.
 - Its name follows the uniqueness rule; its signature is yours (`say(text)` here), the model fills it from the description.
+- While it is bound, **every model call must call a tool** (`force_tool_call`, default `true`): the output Command to speak, another Command to act, or `noop` to do nothing. Without it a weak model can answer in plain text, which in this mode is private reasoning nobody hears. Forced, models rarely write free text at all, so expect little private reasoning in the sink. Anthropic extended thinking cannot be forced: the choice is dropped with a warning, and `force_tool_call: false` silences it ([../reference/configuration.md](../reference/configuration.md#the-agent-block)).
 - By default its completion wakes the Agent (one more model call per utterance, so the model can chain or `noop`); pass `Command(say, triggers_on_completion=False)` to make speaking go straight to idle.
 
 ## `noop`

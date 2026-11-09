@@ -7,7 +7,7 @@ tests:
 
 # Config
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 
@@ -44,7 +44,7 @@ The config is a **top-level framework object** with an `agent` field, not a bare
 | `history_budget` | `agent` | no (default `null` = off) | Number in `(0, 1]`: the fraction of the model's context window the prompt should stay under. When a model call reports more input tokens than that, the Agent cuts the oldest reactions down to about half the budget — see [agent.md](agent.md), "History budget". Needs a known context window (below) |
 | `context_window` | `agent` | no (default `null`) | Positive integer: the model's context window in tokens, for `history_budget`. When absent, the model's LangChain profile (`max_input_tokens`) supplies it; with `history_budget` set and neither known, Agent build fails with a `ConfigError`. Unused without `history_budget` |
 | `model_timeout` | `agent` | no (default `10`) | Positive number of seconds: the deadline on **one whole model call**, the provider's own retries included. A call that exceeds it is abandoned and the reaction ends with the `model_timeout` outcome — see [agent.md](agent.md), "Model-call deadline". `null` removes the deadline (the call waits as long as the provider's client does). Independent of any transport timeout a provider takes through `model_kwargs` |
-| `force_tool_call` | `agent` | no (default `true`) | Boolean, **read only while an output Command is bound**: the model must call a tool on every step (the output Command to speak, `noop` to do nothing), so it cannot reply in plain text the user never hears — see [agent.md](agent.md), "Forcing a tool call". `false` restores the unforced binding (for Anthropic extended thinking, which rejects a forced tool choice, or a backend without `tool_choice` support). Without an output Command it has no effect: free text is the reply |
+| `force_tool_call` | `agent` | no (default `true`) | Boolean, **read only while an output Command is bound**: the model must call a tool on every step (the output Command to speak, `noop` to do nothing), so it cannot reply in plain text the user never hears — see [agent.md](agent.md), "Forcing a tool call". `false` restores the unforced binding (for a backend without `tool_choice` support; with Anthropic extended thinking the forced choice is already dropped by `langchain-anthropic`, with a warning). Without an output Command it has no effect: free text is the reply |
 | `hf_provider` | `agent` | no (default `"auto"`) | **Only** for `provider: "huggingface-hub"`: the Hub Inference **backend** provider (`auto`/`fireworks-ai`/`together`/…), forwarded to `HuggingFaceEndpoint(provider=…)`. Ignored by other providers (see "Providers") |
 
 ### Providers

@@ -553,6 +553,32 @@ def test_model_timeout_rejects_non_positive_numbers(value: Any):
         AgentConfig(provider="fake", model="x", system_prompt="p", model_timeout=value)
 
 
+# --- force_tool_call field ---------------------------------------------------------------
+
+
+def test_force_tool_call_defaults_to_true():
+    assert AgentConfig.from_dict(_agent_dict()).force_tool_call is True
+    assert (
+        AgentConfig(provider="fake", model="x", system_prompt="p").force_tool_call
+        is True
+    )
+
+
+def test_force_tool_call_false_is_parsed():
+    cfg = WicaConfig.from_json(json.dumps(_wica_dict(force_tool_call=False))).agent
+    assert cfg.force_tool_call is False
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", None])
+def test_force_tool_call_rejects_non_booleans(value: Any):
+    with pytest.raises(ConfigError, match="force_tool_call"):
+        AgentConfig.from_dict(_agent_dict(force_tool_call=value))
+    with pytest.raises(ConfigError, match="force_tool_call"):
+        AgentConfig(
+            provider="fake", model="x", system_prompt="p", force_tool_call=value
+        )
+
+
 # --- build_chat_model: provider construction branch ---------------------------------------
 
 

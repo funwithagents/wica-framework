@@ -7,7 +7,7 @@ tests:
 
 # Agent
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 
@@ -168,7 +168,7 @@ The Agent has **two** output modes, chosen by whether an output Command is set (
 - **Only with an output Command.** Without one, free text *is* the reply (and the streaming-friendly channel); forcing a tool call there would forbid a text-only answer, so the flag is not read. The binding is forced exactly while the output Command is **bound** — from its attach (at `start()`, or at `set_output_command` while running) until it is detached (cleared, replaced, before the next attach) — decided in the one place every attach/detach rebinds the model.
 - **Per provider.** LangChain's portable value is `bind_tools(tools, tool_choice="any")`, which each integration maps to its API (`any` for Anthropic, Mistral and Gemini, `required` for OpenAI). `huggingface-hub` is the exception: `ChatHuggingFace.bind_tools` refuses any `tool_choice` with more than one tool — a LangChain-side check, not an API limit — so for it the Agent binds directly, `bind(tools=<OpenAI-format tools>, tool_choice="required")`, which the Hub client passes through to the Inference Providers router (verified on Cerebras and Novita). An inference backend that rejects it fails the call loudly (a `model_error` reaction), never silently.
 - **The free-text channel mostly empties.** Forced, models rarely write text beside the call (Anthropic's API emits none under a forced choice); the sink and `on_text` still receive whatever text a model does write — the call site is unchanged — but an application showing private reasoning should expect little.
-- **The opt-out is for what cannot be forced.** `force_tool_call: false` restores the unforced binding: for Anthropic extended thinking (its API rejects a forced tool choice while thinking is enabled), or an inference backend without `tool_choice` support.
+- **The opt-out is for what cannot be forced.** `force_tool_call: false` restores the unforced binding: for an inference backend without `tool_choice` support, or to make explicit what Anthropic extended thinking already does — its API rejects a forced tool choice while thinking is enabled, so `langchain-anthropic` drops the choice with a warning and the call runs unforced.
 
 ### Output wiring: `set_output_sink` and `set_output_command`
 

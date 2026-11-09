@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from wica.content import TextPart
 from wica.testing import Report, TestRun
 
 from support import PROVIDER_CONFIGS, identity_serialize, real_wica
@@ -80,30 +81,69 @@ def test_real_tool_calling_round_trip(
         wica.close()
 
 
+# A voice assistant's persona, the shape that exposed the plain-text failure: with it and the
+# output Command unforced, ministral-3b answered a greeting in plain text on every run.
+VOICE_PERSONA = """\
+You are a friendly voice assistant. A person talks to you out loud and you talk back — a spoken \
+conversation, not a text chat.
+
+## How you speak
+
+Everything the person hears from you goes through your `say` command — that is your voice. Free \
+text you produce is only private thinking; it is never heard. So whenever you want to reply, \
+**call `say` with what you want said.** If you have nothing to add, do not force a reply.
+
+Keep replies short and natural to hear aloud: a sentence or two, plain spoken language, no lists \
+or emoji.
+
+## Turns
+
+Each thing the person says arrives as one complete utterance; reply to it, then wait for the next.
+
+## Dictation
+
+If the person wants to dictate something longer — a message, a note — call `start_dictation`: \
+their next speech then arrives as one longer passage. Use it only when they clearly want to \
+dictate.
+"""
+
+
 @pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
 def test_output_command_live(config_path: Path, write_report: Callable[[Report], None]):
     """A live provider honoring the output Command contract: with an output Command set, the model
-    must address the user by *calling* it — its free text is private reasoning. This verifies
-    models actually follow the runtime primer's output-command clause (the only thing steering
-    them: tools are bound without a forced tool_choice). A model that answers in plain text
-    instead leaves the Command uncalled and its reply in the free-text stream — the failure this
-    test exists to catch, and the timeline's `output_text` events are the evidence."""
+    must address the person by *calling* it — its free text is private reasoning, never heard —
+    and end the follow-up step with `noop`. The binding forces a tool call (`force_tool_call`,
+    default true — specs/agent.md, "Forcing a tool call"); this is the case that motivated it: a
+    voice persona under which a weak model replies in plain text when not forced. A model that
+    answers in plain text leaves `say` uncalled and its reply in the free-text stream — the
+    timeline's `output_text` events are the evidence. One application action (`start_dictation`)
+    sits beside `say`, as in a real voice app."""
 
-    async def speak(text: str) -> str:
-        """Say something out loud to the user."""
+    async def say(text: str) -> str:
+        """Say something out loud to the person."""
         return "spoken"
 
-    wica = real_wica(config_path)
-    wica.set_output_command(speak)
+    async def start_dictation() -> str:
+        """Switch speech input to one long dictated passage."""
+        return "dictation started; it ends on a pause"
+
+    wica = real_wica(config_path, system_prompt=VOICE_PERSONA)
+    wica.set_output_command(say)
+    wica.register_command(start_dictation)
     wica.world.register(
-        "user_speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+        "user_speech",
+        str,
+        serialize_fn=lambda value, previous: [
+            TextPart(f'The person said to you: "{value}"')
+        ],
+        triggers_llm_call=True,
     )
     wica.start()
     run = TestRun(wica, scenario="output command", sut_label=config_path.stem)
     try:
-        run.set("user_speech", "Hi there! Please greet me back.")
+        run.set("user_speech", "Hello there. How are you?")
         # A text-only reply ends the reaction with nothing re-triggering, so a model that ignores
-        # the contract never calls speak and this wait times out.
+        # the contract never calls say and this wait times out.
         finding = run.expect_output(within=WAIT_TIMEOUT)
         free_text = [e.text for e in run.timeline() if e.kind == "output_text"]
         assert finding.ok, (
@@ -112,9 +152,9 @@ def test_output_command_live(config_path: Path, write_report: Callable[[Report],
         )
         assert finding.event is not None
         assert str((finding.event.args or {}).get("text", "")).strip()
-        # The Command ran to completion — and, since its terminal write follows the reaction's end
-        # on the one loop, the report below carries the whole reaction's measures.
-        assert run.expect_action("speak", state="complete", within=WAIT_TIMEOUT).ok
+        # say's completion re-triggers a step; with nothing more to say the model ends it with
+        # noop — under the forced binding, its only way to do nothing.
+        assert run.expect_action("noop", within=WAIT_TIMEOUT).ok
         write_report(run.report())
     finally:
         run.close()

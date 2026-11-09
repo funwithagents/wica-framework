@@ -1,6 +1,6 @@
 # Force a tool call with an output Command
 
-**Status:** Todo
+**Status:** Done
 
 Implements [specs/agent.md](../specs/agent.md) ("Forcing a tool call") and the `force_tool_call` field of [specs/config.md](../specs/config.md).
 
@@ -26,3 +26,11 @@ Implements [specs/agent.md](../specs/agent.md) ("Forcing a tool call") and the `
 - `uv run pytest tests-e2e -k "fake or example or tester"` — the key-less e2e set.
 - The live e2e set on the five providers.
 - CI on the pull request.
+
+## Result
+
+All of the above clean: ruff, pyright (0 errors), the fast tier (511 passed), the key-less e2e set (14 passed), and the whole e2e set with every provider's key set (39 passed: 25 live, `test_output_command_live` on each of the five providers, and the 14 key-less).
+
+Found while building the live test: forced, `ministral-3b` sometimes picks `noop` over the output Command on a greeting. With only the output Command and WICA's own two bound it did so on most runs; with one application Command beside them (`start_dictation`, as a real voice app has) it spoke on 17 of 18 runs. The live test therefore registers one, and the troubleshooting guide names the case. Unforced, the same setup answered in plain text on every run (0/6), so the test discriminates.
+
+Also found: with Anthropic extended thinking, `langchain-anthropic` drops a forced `tool_choice` with a warning (the API rejects the combination), so the call runs unforced rather than failing; the spec and the docs say so.

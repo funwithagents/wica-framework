@@ -24,6 +24,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 
@@ -513,6 +515,29 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
     return init_chat_model(config.model, model_provider=config.provider, **model_kwargs)
 
 
+def _bind_tools_forced(
+    model: BaseChatModel, tools: list[BaseTool]
+) -> Runnable[Any, AIMessage]:
+    """Bind `tools` so the model must call one of them. LangChain's portable value is
+    `tool_choice="any"`, which each integration maps to its API. `ChatHuggingFace.bind_tools`
+    refuses any tool_choice with more than one tool — a LangChain-side check, not an API limit — so
+    it is bound directly with the `required` the Hub client passes through to the router. See
+    specs/agent.md ("Forcing a tool call")."""
+    try:
+        from langchain_huggingface import ChatHuggingFace
+    except (
+        ImportError
+    ):  # the huggingface-hub extra is not installed: no such model to special-case
+        pass
+    else:
+        if isinstance(model, ChatHuggingFace):
+            return model.bind(
+                tools=[convert_to_openai_tool(tool) for tool in tools],
+                tool_choice="required",
+            )
+    return model.bind_tools(tools, tool_choice="any")
+
+
 class Agent:
     def __init__(
         self,
@@ -584,6 +609,9 @@ class Agent:
         # Deadline on one whole model call (None = none); see specs/agent.md ("Model-call
         # deadline").
         self._model_timeout = config.model_timeout
+        # Whether a bound output Command forces a tool call on every model call; see specs/agent.md
+        # ("Forcing a tool call").
+        self._force_tool_call = config.force_tool_call
         self._world = world
         # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
         # here. The Agent runs its tasks/timers/cancellation on it but never starts or stops it. See
@@ -757,11 +785,23 @@ class Agent:
         _logger.debug("detached command %r", name)
 
     def _rebind_model(self) -> None:
-        self._bound_model = (
-            self.model.bind_tools([c.tool for c in self._commands.values()])
-            if self._commands
-            else self.model
-        )
+        """Bind the model to the current tool set. Every attach/detach comes through here, so this is
+        the one place that decides whether the binding forces a tool call: only while the output
+        Command is bound (and `force_tool_call` is set). See specs/agent.md ("Forcing a tool
+        call")."""
+        if not self._commands:
+            self._bound_model = self.model
+            return
+        tools = [c.tool for c in self._commands.values()]
+        output = self._output_command
+        if (
+            self._force_tool_call
+            and output is not None
+            and self._commands.get(output.name) is output
+        ):
+            self._bound_model = _bind_tools_forced(self.model, tools)
+        else:
+            self._bound_model = self.model.bind_tools(tools)
 
     def _register_builtin(self, command: Command) -> None:
         """Idempotent attach for WICA-native Commands and the output Command (used by start(), which
