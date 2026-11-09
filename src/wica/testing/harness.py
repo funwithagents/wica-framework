@@ -48,6 +48,69 @@ def _args_match(args: dict[str, Any] | None, where: dict[str, Any] | None) -> bo
     return all(key in args and args[key] == value for key, value in where.items())
 
 
+_TERMINAL = ("complete", "failed", "cancelled")
+_COMMAND_KEY_PREFIX = "agent:command:"
+
+
+def _busy_reasons(
+    timeline: list[SutEvent],
+    retriggers: Callable[[str], bool],
+    triggers: Callable[[str], bool],
+) -> list[str]:
+    """Why the SUT is not idle yet, as short reasons; empty when it is. See `expect_idle`."""
+    arrived = {
+        (e.key, e.version_id)
+        for e in timeline
+        if e.kind in ("trigger_observed", "trigger_dropped")
+    }
+    # A write to a triggering input is busy until the Agent has seen (or dropped) its trigger:
+    # `set()` returns before the trigger crosses to the loop, and that gap must not read as idle.
+    reasons = [
+        f"write to {e.key} v{e.version_id} not yet seen by the Agent"
+        for e in timeline
+        if e.kind == "input_written"
+        and e.key is not None
+        and triggers(e.key)
+        and (e.key, e.version_id) not in arrived
+    ]
+    observed = {(e.key, e.version_id) for e in timeline if e.kind == "trigger_observed"}
+    consumed = {
+        (t.key, t.version_id)
+        for e in timeline
+        if e.reaction is not None
+        for t in e.reaction.triggers
+    }
+    reasons += [
+        f"trigger {k} v{v} not reacted to"
+        for k, v in sorted(observed - consumed, key=str)
+    ]
+
+    issued = {
+        e.call_id: e.name
+        for e in timeline
+        if e.kind == "command_issued" and e.name != "noop" and e.call_id
+    }
+    terminal_at = {
+        e.call_id: e.t
+        for e in timeline
+        if e.kind == "command_state" and e.state in _TERMINAL and e.call_id
+    }
+    reasons += [f"{issued[c]} ({c}) running" for c in issued if c not in terminal_at]
+    for call_id, t in terminal_at.items():
+        name = issued.get(call_id)
+        if name is None or not retriggers(name):
+            continue
+        key = f"{_COMMAND_KEY_PREFIX}{call_id}"
+        if not any(
+            e.kind in ("trigger_observed", "trigger_dropped")
+            and e.key == key
+            and e.t >= t
+            for e in timeline
+        ):
+            reasons.append(f"{name} ({call_id}) completed, its step not yet woken")
+    return reasons
+
+
 def _describe(method: str, /, **kwargs: Any) -> str:
     inner = ", ".join(f"{k}={v!r}" for k, v in kwargs.items() if v is not None)
     return f"{method}({inner})"
@@ -258,6 +321,45 @@ class TestRun:
                 if remaining <= 0:
                     return self._finding(label, True, f"no {name} for {for_}s")
                 self._cond.wait(remaining)
+
+    def expect_idle(self, *, within: float = 30.0) -> Finding:
+        """Blocks until the SUT has finished reacting — no timer, the timeline says so: every
+        observed trigger has been consumed by a reaction that ended, every issued Command has
+        reached a terminal state, and every completed Command whose completion re-triggers a
+        step has had that trigger arrive (so the step it wakes is counted, not missed in the gap).
+        *within* is a safety bound, not a pace. The watermark is not moved."""
+        label = _describe("expect_idle", within=within)
+        self._action("expect_idle", within=within)
+        deadline = time.monotonic() + within
+        with self._cond:
+            while True:
+                busy = _busy_reasons(
+                    self._timeline, self._retriggers, self._triggers_input
+                )
+                if not busy:
+                    return self._finding(label, True, "idle")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self._finding(
+                        label, False, f"still busy after {within}s: " + "; ".join(busy)
+                    )
+                self._cond.wait(remaining)
+
+    def _retriggers(self, name: str) -> bool:
+        """Whether *name*'s completion wakes a step (the Agent's rule for an unknown name is
+        True; `noop` never dispatches, so it never reaches here)."""
+        command = self._sut.agent.commands.get(name)
+        return command.triggers_on_completion if command is not None else True
+
+    def _triggers_input(self, key: str) -> bool:
+        """Whether a write to *key* always produces a trigger: registered triggering, with no
+        condition function that could swallow it."""
+        config = self.probe.inputs.get(key)
+        return (
+            config is not None
+            and config.triggers_llm_call
+            and config.trigger_condition_fn is None
+        )
 
     def expect_world(self, key: str, *, equals: Any, within: float = 5.0) -> Finding:
         """Polls the SUT's World until `get(key) == equals`. No timeline event is matched and the

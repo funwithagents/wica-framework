@@ -1,13 +1,13 @@
 {
   "name": "conversation",
-  "description": "One representative session with the robot, paced like a person who waits for it to finish speaking: a greeting, a question, a long story interrupted by 'Stop!' (barge-in, cancel then a spoken confirmation), two utterances half a second apart (busy handling), a goodbye and silence after it. The benchmark's workload; the per-turn measures and the primer checks read the whole session.",
+  "description": "One representative session with the robot, paced like a person who waits for it to finish before speaking again (expect_idle: no step, no Command, no completion left to wake a step \u2014 no timers): a greeting, a question, a long story interrupted by 'Stop!' (barge-in, cancel then a spoken confirmation), two utterances half a second apart (busy handling), a goodbye and silence after it. The benchmark's workload; the per-turn measures and the primer checks read the whole session.",
   "requires": {
     "inputs": [
       "speech_input"
     ],
     "output_command": true
   },
-  "timeout_s": 240,
+  "timeout_s": 300,
   "checks": [
     "answers_each_input",
     "no_noop_on_input",
@@ -39,21 +39,9 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
+          "name": "expect_idle",
           "args": {
-            "name": "say",
-            "state": "complete",
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 1
+            "within": 90
           }
         }
       ]
@@ -81,21 +69,9 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
+          "name": "expect_idle",
           "args": {
-            "name": "say",
-            "state": "complete",
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 1
+            "within": 90
           }
         }
       ]
@@ -154,21 +130,9 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
+          "name": "expect_idle",
           "args": {
-            "name": "say",
-            "state": "complete",
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 1
+            "within": 90
           }
         }
       ]
@@ -216,21 +180,9 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
+          "name": "expect_idle",
           "args": {
-            "name": "say",
-            "state": "complete",
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 2
+            "within": 90
           }
         }
       ]
@@ -258,21 +210,9 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
+          "name": "expect_idle",
           "args": {
-            "name": "say",
-            "state": "complete",
-            "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 1
+            "within": 90
           }
         }
       ]

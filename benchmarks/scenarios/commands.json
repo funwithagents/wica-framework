@@ -1,6 +1,6 @@
 {
   "name": "commands",
-  "description": "The demo's own actions in one session: an emotion change while the robot speaks (the re-trigger step must noop), a dance stopped mid-way (cancel, then a spoken confirmation), and the closest-user tracking rule (track the new user; stop when nobody is close). Demo-specific: skips on a target without dance, switch_user_tracking and the emotion entry.",
+  "description": "The demo's own actions in one session, each turn ended by expect_idle: an emotion change while the robot speaks (the re-trigger step must noop), a dance stopped mid-way (cancel, then a spoken confirmation), and the closest-user tracking rule (track the new user; stop when nobody is close). Demo-specific: skips on a target without dance, switch_user_tracking and the emotion entry.",
   "requires": {
     "inputs": [
       "speech_input",
@@ -13,7 +13,7 @@
     ],
     "output_command": true
   },
-  "timeout_s": 180,
+  "timeout_s": 240,
   "checks": [
     "no_noop_on_input",
     "no_failed_reactions",
@@ -65,9 +65,9 @@
     {
       "tool_calls": [
         {
-          "name": "wait",
+          "name": "expect_idle",
           "args": {
-            "seconds": 1
+            "within": 60
           }
         }
       ]
@@ -137,21 +137,9 @@
     {
       "tool_calls": [
         {
-          "name": "expect_action",
+          "name": "expect_idle",
           "args": {
-            "name": "say",
-            "state": "complete",
             "within": 60
-          }
-        }
-      ]
-    },
-    {
-      "tool_calls": [
-        {
-          "name": "wait",
-          "args": {
-            "seconds": 1
           }
         }
       ]
@@ -183,9 +171,9 @@
     {
       "tool_calls": [
         {
-          "name": "wait",
+          "name": "expect_idle",
           "args": {
-            "seconds": 1
+            "within": 60
           }
         }
       ]
@@ -207,6 +195,16 @@
           "args": {
             "name": "switch_user_tracking",
             "within": 20
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "name": "expect_idle",
+          "args": {
+            "within": 60
           }
         }
       ]
