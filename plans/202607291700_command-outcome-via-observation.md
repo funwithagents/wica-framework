@@ -10,7 +10,7 @@ observation**, at the causally-correct point in history.
 
 ## Motivation
 
-Bug (see [specs/_todo.md](../specs/_todo.md), first line): *"if dance then say hello during dance,
+Bug (see `analysis/_todo.md`, first line): *"if dance then say hello during dance,
 does not seem to know dance is not finished."* Trace:
 
 - A long-running Command (`dance`) is dispatched as a background task and the step returns, so

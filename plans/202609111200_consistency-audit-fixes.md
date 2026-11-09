@@ -3,7 +3,7 @@
 **Status:** Done
 
 Implements the remaining items of the repository consistency audit recorded in
-[specs/_fixes.md](../specs/_fixes.md) — the ones that need code, tests, or a design decision (the
+`specs/_fixes.md` (since deleted) — the ones that need code, tests, or a design decision (the
 wording-only findings were fixed on 2026-09-11, commit `21788f5`).
 
 This plan is written to be executed step by step, in order, by an agent that has not read the
@@ -926,7 +926,7 @@ object), narrow `_DOC_CALL` rather than weakening the assertion.
    tests-e2e -k anthropic'` to confirm real tool-call ids pass the key grammar (they are
    alphanumeric with `_`; if a provider ever emits something else, the fallback covers it).
 3. `specs/_fixes.md`: delete the six implemented sections and the "Low priority" section. If only
-   "Tracking" remains, delete the file and remove the first bullet of `specs/_todo.md` that points
+   "Tracking" remains, delete the file and remove the first bullet of `analysis/_todo.md` that points
    at it.
 4. Flip `commands.md`, `wica.md`, `agent.md`, `world.md`, `config.md` from `Updated` back to
    `Implemented` (status line + `specs/_index.md` row).
@@ -943,4 +943,4 @@ object), narrow `_DOC_CALL` rather than weakening the assertion.
 - Escaping keys instead of validating them — rejected (D4).
 - Enforcing the `agent:` prefix in the World — rejected (D4, convention only).
 - Deep-freezing `model_kwargs` — not needed; it is data, not an invariant.
-- Anything in `specs/_todo.md` (history compaction, reaction entries, streaming).
+- Anything in `analysis/_todo.md` (history compaction, reaction entries, streaming).

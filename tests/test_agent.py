@@ -372,7 +372,7 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
 
 
 def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, sink):
-    # Regression (specs/_todo.md, "dance then say hello during dance"): while a command is still
+    # Regression (analysis/_todo.md, "dance then say hello during dance"): while a command is still
     # running, a new input starts a fresh step; that step must be told the command is NOT finished.
     # The running command renders as an in-progress observation entry, and its tool_result is a
     # fixed ack — not a completed result that would read as "the call returned".

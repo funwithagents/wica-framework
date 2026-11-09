@@ -2,7 +2,7 @@
 
 **Status:** Done
 
-The three small framework gaps the WicaTester study ([specs/_wica-tester-study.md](../specs/_wica-tester-study.md),
+The three small framework gaps the WicaTester study (`analysis/_wica-tester-study.md`,
 §2 G1–G3, decision §8.7) needs closed before a test harness can wire itself to a `Wica` under test
 from the public surface alone. Each is an additive public read or payload field; no behavior of the
 loop changes except the *moment* `on_command` fires for a dispatched Command.
