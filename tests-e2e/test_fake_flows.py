@@ -7,6 +7,12 @@ test fully controls, asserting the exact sequence of Commands and utterances a r
 deterministic provider could never pin. See specs/fake-provider.md.
 
 The file is named so `pytest tests-e2e -k fake` selects the whole suite.
+
+One case (`test_scripted_flow_through_wica_init`) runs on the `wica.testing` toolkit, as a demonstration
+that the Harness carries its weight; the others **deliberately stay hand-rolled** (their own
+`wait_until` / per-key listeners / `RecordingSink`): they pin the very seams the Probe stands on,
+so a toolkit bug must not be able to mask a framework bug (specs/wica-tester.md, "Relation to
+existing tests").
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from wica.agent import Agent
 from wica.config import AgentConfig, WicaConfig
 from wica.content import Content, TextPart
 from wica.fake_model import FakeChatModel
+from wica.testing import TestRun
 from wica.world import World, WorldEntry
 
 WAIT_TIMEOUT = 5.0
@@ -86,7 +93,7 @@ def loop() -> Iterator[asyncio.AbstractEventLoop]:
 def test_scripted_flow_through_wica_init():
     """The whole loop, driven through the real entrypoint: WicaConfig -> Wica.init. An input
     triggers a step that issues a scripted Command; its completion re-triggers a step that speaks a
-    scripted line."""
+    scripted line. Observed through `wica.testing.TestRun` — the one fake-flow case on the toolkit."""
     config = WicaConfig.from_dict(
         {
             "agent": {
@@ -105,48 +112,32 @@ def test_scripted_flow_through_wica_init():
         }
     )
 
-    sink = RecordingSink()
     wica = Wica.init(config, coalesce_window=0.0)
-    wica.set_output_sink(sink)
-    world = wica.world
-    world.register(
+    wica.world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
 
     async def add(a: int, b: int) -> int:
         """Add two integers and return their sum."""
-        await asyncio.sleep(0.05)  # gives the poll below a chance to observe "running"
+        await asyncio.sleep(0.05)  # long enough for the running state to be observed
         return a + b
 
     wica.register_command(add)
     wica.start()
+    run = TestRun(wica, scenario="scripted flow", sut_label="fake")
     try:
-        world.update("prompt", "Add 2 and 2.")
+        run.set("prompt", "Add 2 and 2.")
 
-        # Step 1: the scripted tool call is dispatched and tracked as a running World entry.
-        wait_until(lambda: find_command_entry(world) is not None)
-        running = find_command_entry(world)
-        assert running is not None
-        assert running.current.value.state == "running"
-
-        # Capture the terminal command outcome via the key's listener (avoids racing the Agent's
-        # own cleanup, which unregisters the key after folding it into history).
-        terminal: list[WorldEntry] = []
-        done = threading.Event()
-
-        def on_update(entry: WorldEntry) -> None:
-            if entry.current.value.is_terminal():
-                terminal.append(entry)
-                done.set()
-
-        world.add_listener(running.key, on_update)
-        assert done.wait(timeout=WAIT_TIMEOUT)
-        assert terminal[0].current.value.state == "complete"
-        assert "4" in (terminal[0].current.value.result or "")
+        # Step 1: the scripted tool call is dispatched and tracked as a running World entry, then
+        # completes with the sum.
+        assert run.expect_action("add", where={"a": 2, "b": 2}, state="running").ok
+        assert run.expect_action("add", state="complete", result_contains="4").ok
 
         # Step 2: the command completion re-triggered a step that spoke the scripted line.
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
-        assert sink.texts == ["The sum is 4."]
+        assert run.expect_text(contains="The sum is 4.").ok
+        assert [e.text for e in run.timeline() if e.kind == "output_text"] == [
+            "The sum is 4."
+        ]
 
         # Introspection: the step-2 prompt observed the completed command (its "4" result rendered
         # into the observation), proving the loop fed the outcome back to the model.
@@ -154,7 +145,12 @@ def test_scripted_flow_through_wica_init():
         assert isinstance(model, FakeChatModel)
         assert len(model.calls) >= 2
         assert any("4" in message_text(m) for m in model.calls[-1])
+        # And the Harness measured the turn: one Command, two reactions for one input.
+        metrics, dropped = run.metrics()
+        assert metrics["command_duration"].count == 1 and dropped == 0
+        assert metrics["reactions_per_input"].min == 2
     finally:
+        run.close()
         wica.close()
 
 

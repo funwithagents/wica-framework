@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from wica import Wica
 from wica.agent import build_chat_model
 from wica.config import AgentConfig, MissingEnvError, WicaConfig
+from wica.content import Content, TextPart
 
 E2E_DIR = Path(__file__).parent
 
@@ -68,3 +69,8 @@ def real_wica(
         return Wica.init(config, **kwargs)
     except MissingEnvError as exc:
         pytest.skip(f"{exc.env_var} not set — skipping e2e test")
+
+
+def identity_serialize(value: Any, previous: Any) -> Content:
+    """The one-line serializer every e2e Input uses: the value, as text."""
+    return [TextPart(str(value))]

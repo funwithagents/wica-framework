@@ -80,7 +80,7 @@ jobs:
       - name: Sync (dev group, against the lock)
         run: uv sync --locked
       - name: Scripted-fake flows (no network, no key, never skip)
-        run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py -rs
+        run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py tests-e2e/test_tester_flows.py -rs
 
   live:
     name: e2e tier, live providers

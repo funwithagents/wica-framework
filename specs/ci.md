@@ -39,7 +39,7 @@ WICA supports **macOS (arm64), Linux (x86_64 and arm64) and Windows (x86_64)** (
 
 [testing.md](testing.md) gives `tests-e2e/` two kinds of test with opposite costs, and CI treats them as two jobs, selected **by file** (not `-k`, which matches on test names and would drift as tests are added):
 
-- **Scripted-fake flows — every event, Linux.** `tests-e2e/test_fake_flows.py` and `tests-e2e/test_example_flow.py`: no network, no key, deterministic, never skip. They run on every pull request like the fast tier. One platform: their platform-sensitive paths are the fast tier's, already covered on all three.
+- **Scripted-fake flows — every event, Linux.** `tests-e2e/test_fake_flows.py`, `tests-e2e/test_example_flow.py` and `tests-e2e/test_tester_flows.py`: no network, no key, deterministic, never skip. They run on every pull request like the fast tier. One platform: their platform-sensitive paths are the fast tier's, already covered on all three.
 - **Live provider set — push to `main` and manual runs, Linux.** `tests-e2e/test_smoke.py` and `tests-e2e/test_wica.py`, parametrized over `PROVIDER_CONFIGS`. Never on a pull request: every case is a paid call, the outcome is non-deterministic, and a fork's pull request receives no secret anyway. On `main` it gives each merged change a live verdict against every provider whose key the repository holds. **One platform:** the live set is HTTP to a provider — the operating system changes nothing it measures.
 
 ### The workflow
