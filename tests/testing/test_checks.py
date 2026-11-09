@@ -12,6 +12,7 @@ import pytest
 
 from wica.instrumentation import ReactionTrace, TokenUsage, TriggerTrace
 from wica.testing import (
+    answer_latencies,
     CHECKS,
     Check,
     CheckContext,
@@ -323,7 +324,7 @@ def test_run_check_prefixes_the_window_label_to_the_detail():
 # --- measures ---------------------------------------------------------------------------------
 
 
-def test_measures_count_outputs_chained_replies_noops_failures_words_and_turns():
+def test_measures_count_outputs_extra_replies_noops_failures_words_and_turns():
     timeline = _answered_turn(1, 0.0, 1) + [
         # the chained reply: a reaction woken only by say's completion says again
         _issued(1.5, "say", "c2", text="and one more thing"),
@@ -345,7 +346,7 @@ def test_measures_count_outputs_chained_replies_noops_failures_words_and_turns()
     ]
     assert measures(timeline, CONTEXT) == {
         "output_calls": 2.0,
-        "unprompted_output": 1.0,
+        "extra_output": 1.0,  # a second utterance in the same turn
         "noop_steps": 1.0,
         "failed_reactions": 1.0,
         "output_words": 5.0,  # "hi" + "and one more thing"
@@ -353,6 +354,57 @@ def test_measures_count_outputs_chained_replies_noops_failures_words_and_turns()
         "turns_answered": 1.0,
         "noops_on_input": 0.0,
     }
+
+
+def _split_answer(version: int, t: float) -> list[SutEvent]:
+    """A turn answered in two steps: an emotion change first, `say` on the step its completion
+    wakes."""
+    return [
+        _set(t, "speech_input", f"utterance {version}"),
+        _ev("input_written", t, key="speech_input", version_id=version),
+        _ev("trigger_observed", t + 0.01, key="speech_input", version_id=version),
+        _issued(t + 0.5, "set_emotion", f"e{version}", emotion="happy"),
+        _ev(
+            "reaction_ended",
+            t + 0.5,
+            reaction=_reaction(
+                version, [_trigger("speech_input", version)], call_ids=(f"e{version}",)
+            ),
+        ),
+        _issued(t + 1.2, "say", f"s{version}", text="hello there"),
+        _ev(
+            "reaction_ended",
+            t + 1.2,
+            reaction=_reaction(
+                version + 100,
+                [_trigger(f"agent:command:e{version}", 1, completion=True)],
+                call_ids=(f"s{version}",),
+            ),
+        ),
+    ]
+
+
+def test_an_answer_over_two_steps_is_one_answer_timed_to_its_first_word():
+    timeline = _split_answer(1, 0.0) + _answered_turn(2, 5.0, 2)
+    m = measures(timeline, CONTEXT)
+    assert m["turns_answered"] == 2.0 and m["extra_output"] == 0.0
+    assert _check("answers_each_input", timeline).ok
+    assert _check("no_noop_on_input", timeline).ok
+    # the split turn's first word is 1.2 s after the input, the plain turn's 0.5 s
+    assert answer_latencies(timeline, CONTEXT) == pytest.approx([1.2, 0.5])
+
+
+def test_an_unanswered_turn_gives_no_answer_latency():
+    timeline = [
+        _set(0.0, "speech_input", "hi"),
+        _ev("input_written", 0.0, key="speech_input", version_id=1),
+        _ev(
+            "reaction_ended",
+            0.4,
+            reaction=_reaction(1, [_trigger("speech_input", 1)], noop=True),
+        ),
+    ]
+    assert answer_latencies(timeline, CONTEXT) == []
 
 
 # --- registry ---------------------------------------------------------------------------------

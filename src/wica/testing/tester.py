@@ -180,8 +180,8 @@ def build_tester(
         return ok_or_failed(finding)
 
     async def wait_for(condition: str | dict[str, Any], within: float = 60.0) -> str:
-        """Pace the conversation: wait until *condition* holds — "idle", "speaking",
-        {"running": name} or {"seconds": n}."""
+        """Pace the conversation: wait until *condition* holds — "idle", "ready",
+        "speaking", {"running": name} or {"seconds": n}."""
         finding = await asyncio.to_thread(run.wait_for, condition, within=within)
         return ok_or_failed(finding)
 

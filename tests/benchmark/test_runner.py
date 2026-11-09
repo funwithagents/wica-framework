@@ -88,7 +88,7 @@ def test_a_failed_run_is_counted_and_not_scored(
     assert document["bench"]["outcome"] == "failed"
 
 
-def test_a_chained_reply_is_a_measure_not_a_failure(
+def test_a_second_utterance_is_an_extra_reply_not_a_failure(
     tmp_path: Path, fake_target: Callable[..., FakeTarget]
 ):
     twice = SAY_HI + [_step("say", text="and one more thing")]
@@ -96,7 +96,10 @@ def test_a_chained_reply_is_a_measure_not_a_failure(
     assert isinstance(result, RunResult)
     assert result.report.ok
     assert result.measures["output_calls"] == 2
-    assert result.measures["unprompted_output"] == 1
+    assert result.measures["extra_output"] == 1
+    assert (
+        len(result.samples["answer_latency"]) == 1
+    )  # one turn, timed to its first word
     assert result.measures["output_words"] == 6
 
 

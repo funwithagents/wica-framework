@@ -58,8 +58,11 @@ def _busy_reasons(
     timeline: list[SutEvent],
     retriggers: Callable[[str], bool],
     triggers: Callable[[str], bool],
+    *,
+    running: bool = True,
 ) -> list[str]:
-    """Why the SUT is not idle yet, as short reasons; empty when it is. See `expect_idle`."""
+    """Why the SUT is not idle yet, as short reasons; empty when it is. See `wait_for`. With
+    *running* false a Command still running is not a reason: the `"ready"` condition."""
     arrived = {
         (e.key, e.version_id)
         for e in timeline
@@ -97,7 +100,10 @@ def _busy_reasons(
         for e in timeline
         if e.kind == "command_state" and e.state in _TERMINAL and e.call_id
     }
-    reasons += [f"{issued[c]} ({c}) running" for c in issued if c not in terminal_at]
+    if running:
+        reasons += [
+            f"{issued[c]} ({c}) running" for c in issued if c not in terminal_at
+        ]
     for call_id, t in terminal_at.items():
         name = issued.get(call_id)
         if name is None or not retriggers(name):
@@ -361,6 +367,8 @@ class TestRun:
           dropped) by the Agent, every observed trigger consumed by a reaction that ended, every
           issued Command terminal, and every completed Command whose completion re-triggers a
           step has had that trigger arrive (so the step it wakes is not missed in the gap).
+        - `"ready"` — the Agent can take an input now: `"idle"` without waiting for running
+          Commands. An input written then is not dropped as busy, even over a dance or a speech.
         - `"speaking"` — the output Command has started since the last input.
         - `{"running": name}` — that Command has started since the last input.
         - `{"seconds": n}` — *n* seconds pass."""
@@ -387,8 +395,13 @@ class TestRun:
 
     def _unmet(self, condition: WaitCondition) -> list[str]:
         """Why *condition* does not hold yet (empty when it does). Called under the lock."""
-        if condition == "idle":
-            return _busy_reasons(self._timeline, self._retriggers, self._triggers_input)
+        if condition in ("idle", "ready"):
+            return _busy_reasons(
+                self._timeline,
+                self._retriggers,
+                self._triggers_input,
+                running=condition == "idle",
+            )
         if condition == "speaking":
             name = self.probe.output_command_name
             if name is None:

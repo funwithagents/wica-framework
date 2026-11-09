@@ -151,16 +151,17 @@ class Summary:
             "A failed run counts against completed and pass^k, and in no other column.",
             "",
             "| config | runs | completed | pass^k | compliance | answered | "
-            "reaction p50 / p95 | model p50 / p95 | tokens in / out per turn | words per turn | "
-            "unprompted | noops on input | dropped | checks broken | stopped at |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "answer p50 / p95 | reaction p50 / p95 | model p50 / p95 | tokens in / out per turn | "
+            "words per turn | extra replies | noops on input | dropped | checks broken | "
+            "stopped at |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for label in self._row_labels():
             total = self.cell("*", label)
             if total is None:
                 lines.append(
                     f"| {label} | skipped: {_short(self._skip_reason(label, '*'), 60)} |"
-                    + " |" * 13
+                    + " |" * 14
                 )
                 continue
             lines.append(
@@ -168,12 +169,13 @@ class Summary:
                 f"{total.pass_k} | "
                 f"{_percent(total.per_run.get('compliance'))} | "
                 f"{_percent(total.per_run.get('answer_rate'))} | "
+                f"{_p50_p95(total.metrics.get('answer_latency'))} | "
                 f"{_p50_p95(total.metrics.get('reaction_latency'))} | "
                 f"{_p50_p95(total.metrics.get('model_latency'))} | "
                 f"{_median(total.per_run.get('input_tokens_per_turn'))} / "
                 f"{_median(total.per_run.get('output_tokens_per_turn'))} | "
                 f"{_median(total.per_run.get('words_per_turn'))} | "
-                f"{_median(total.per_run.get('unprompted_output'))} | "
+                f"{_median(total.per_run.get('extra_output'))} | "
                 f"{_median(total.per_run.get('noops_on_input'))} | "
                 f"{_median(total.per_run.get('dropped_inputs'))} | "
                 f"{_failed(total.broken)} | {_failed(total.stopped_at)} |"
@@ -209,26 +211,27 @@ class Summary:
                 f"## {scenario}",
                 "",
                 "| config | runs | completed | passed | pass rate | pass^k | checks broken | "
-                "reaction p50 / p95 | model p50 / p95 | reactions/input p50 | unprompted | dropped | "
-                "tokens in / out per run | cache read | words per run |",
-                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+                "answer p50 / p95 | reaction p50 / p95 | model p50 / p95 | reactions/input p50 | "
+                "extra replies | dropped | tokens in / out per run | cache read | words per run |",
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
             ]
             for label in self._row_labels():
                 cell = self.cell(scenario, label)
                 if cell is None:
                     reason = self._skip_reason(label, scenario)
                     lines.append(
-                        f"| {label} | skipped: {_short(reason, 60)} |" + " |" * 13
+                        f"| {label} | skipped: {_short(reason, 60)} |" + " |" * 14
                     )
                     continue
                 lines.append(
                     f"| {label} | {cell.runs} | {_ratio(cell.completed, cell.runs)} | "
                     f"{cell.passed} | {cell.pass_rate:.0%} | "
                     f"{cell.pass_k} | {_failed(cell.broken)} | "
+                    f"{_p50_p95(cell.metrics.get('answer_latency'))} | "
                     f"{_p50_p95(cell.metrics.get('reaction_latency'))} | "
                     f"{_p50_p95(cell.metrics.get('model_latency'))} | "
                     f"{_median(cell.metrics.get('reactions_per_input'))} | "
-                    f"{_median(cell.per_run.get('unprompted_output'))} | "
+                    f"{_median(cell.per_run.get('extra_output'))} | "
                     f"{_median(cell.per_run.get('dropped_inputs'))} | "
                     f"{_median(cell.per_run.get('input_tokens'))} / "
                     f"{_median(cell.per_run.get('output_tokens'))} | "

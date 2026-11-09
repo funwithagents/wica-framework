@@ -75,25 +75,30 @@ One JSON file lists every configuration, so adding a model is adding a row:
 
 ## The scenarios
 
-A scenario is a fixed user as a scripted-tester script ([testing.md](testing.md#a-scripted-tester)) plus the checks to run over the whole session, one JSON file each, `name` equal to the file stem:
+A scenario is a fixed user written as data: one JSON file, `name` equal to the file stem, holding a flat list of steps. Each step is one of four kinds ([specs/wica-tester.md](../../specs/wica-tester.md), "Scenarios"):
 
 ```json
 {
   "name": "greeting",
-  "description": "A greeting is answered out loud.",
-  "requires": {"inputs": ["speech_input"], "output_command": true},
-  "timeout_s": 60,
+  "description": "A greeting is answered out loud, then interrupted.",
   "checks": ["answers_each_input", "no_failed_reactions"],
-  "script": [
-    {"tool_calls": [{"name": "set_speech_input", "args": {"value": "Hello there!"}}]},
-    {"tool_calls": [{"name": "expect_output", "args": {"within": 20}}]},
-    {"tool_calls": [{"name": "finish", "args": {"verdict": "pass"}}]}
+  "steps": [
+    {"input": {"speech_input": "Tell me about your day."}},
+    {"wait": "speaking"},
+    {"wait": "ready"},
+    {"input": {"speech_input": "Stop!"}},
+    {"check": "cancels_when_asked"},
+    {"wait": "idle"}
   ]
 }
 ```
 
-- **`requires`** says what the target must expose (input keys, Command names, an output Command); a pair whose target lacks one is skipped and said so, so one directory can mix generic and application-specific scenarios.
-- **`checks`** are primer-level checks over the finished timeline, resolved against a registry: `answers_each_input` (every input got an output), `no_noop_on_input` (no input was answered with `noop`), `no_failed_reactions`, `no_colliding_cancel` (no reaction issues `cancel_command` together with another Command). Absent, every check whose own requirements the target satisfies runs. Add your own through the CLI's `extra_checks` (`wica.testing.Check`).
+- **`input`** writes one Input of your agent, as the user would.
+- **`wait`** paces the session, and nothing is implicit. `"idle"` waits until the agent has finished, its Commands included. `"ready"` waits until the agent can take an input, while a speech or an action may still run. `"speaking"` and `{"running": "<Command>"}` wait until that Command has started since the last input. `{"seconds": n}` is the only timer. A wait that times out fails the run.
+- **`expect`** asserts something must happen (an output, a Command, a World value); a miss fails the run. A benchmark uses few of them, because a failed run is not scored.
+- **`check`** is a rule judged after a completed run: on a step, over the window from the input it follows to the next input; in the top-level `checks`, over the whole run. The built-ins are `answers_each_input`, `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel`, `cancels_when_asked`, `acts_when_asked` and `quiet_on_background_change`. Add your own through the CLI's `extra_checks` (`wica.testing.Check`).
+- **Write `{"wait": "ready"}` before any input that talks over the agent.** The agent runs one reaction at a time and drops an input that arrives during one; a scenario that writes into that window measures the drop, not the model.
+- **What the target must expose is derived from the steps** (the Inputs written, the Commands named, whether an output Command is needed); a pair whose target lacks one is skipped and said so, so one directory can mix generic and application-specific scenarios.
 - **Matchers stay loose**: one script runs against every model, so a step asserts that the right kind of thing happened (an output, a Command by name, a silence), not its wording.
 
 ## Running
@@ -105,6 +110,6 @@ uv run python -m my_bench --tags default --exclude-tags reasoning
 uv run python -m my_bench --only fake --include-disabled           # the key-less path
 ```
 
-Runs are sequential (parallel runs would confound the latencies); a row whose key is unset skips. Each run writes its report (`<out>/<id>/<scenario>/<i>.json` and `.md`) into a **batch** folder, by default `<runs>/<YYYYMMDD-HHMM>/`, with `summary.json` and `summary.md`: one row per configuration, with the pass rate and pass^k per scenario, and the pooled distributions of the measures (reaction latency, model latency, tokens) with no thresholds. The exit code is 0 whatever the results: a benchmark compares, it does not gate.
+Runs are sequential (parallel runs would confound the latencies); a row whose key is unset skips. Each run writes its report (`<out>/<id>/<scenario>/<i>.json` and `.md`) into a **batch** folder, by default `<runs>/<YYYYMMDD-HHMM>/`, with `summary.json` and `summary.md`: one row per configuration, with the pass rate and pass^k per scenario, and the pooled distributions of the measures (answer latency, the time from an input to the first word whatever the number of steps; reaction latency; model latency; tokens) with no thresholds. The exit code is 0 whatever the results: a benchmark compares, it does not gate.
 
 **`--result <name>`** keeps the batch under `<results>/<stamp>_<name>/` with a `description.md` (the machine, the network, what was run) and a `findings.md` (what you concluded) to finish by hand before committing. Batches are working data, git-ignored; results are what the repo keeps. The repo's own [benchmarks/README.md](../../benchmarks/README.md) shows the shape, and the two smoke tests in `tests-e2e/` the way to keep a benchmark honest with a `fake` row.

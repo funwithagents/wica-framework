@@ -1,6 +1,6 @@
 {
   "name": "commands",
-  "description": "The demo's own actions: a mood change while the robot speaks, a dance stopped two seconds in, a user walking up and walking away. The user waits for the robot to be idle between turns.",
+  "description": "The demo's own actions: a mood change while the robot speaks, a dance stopped two seconds in, a user walking up and walking away. The user waits for the robot to be idle between turns, and talks over it only once the Agent is ready for an input, so nothing is dropped as busy.",
   "checks": [
     "no_noop_on_input",
     "no_failed_reactions",
@@ -9,6 +9,7 @@
   "steps": [
     {"input": {"speech_input": "Hi!"}},
     {"wait": "speaking"},
+    {"wait": "ready"},
     {"input": {"emotion": "happy"}},
     {"check": "quiet_on_background_change"},
     {"wait": "idle"},
@@ -16,6 +17,7 @@
     {"check": {"acts_when_asked": "dance"}},
     {"wait": {"running": "dance"}},
     {"wait": {"seconds": 2}},
+    {"wait": "ready"},
     {"input": {"speech_input": "Stop!"}},
     {"check": "cancels_when_asked"},
     {"check": "answers_each_input"},

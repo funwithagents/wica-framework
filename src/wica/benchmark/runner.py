@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from wica.benchmark.matrix import Entry
 from wica.benchmark.summary import Summary, aggregate, git_commit
 from wica.instrumentation import now
-from wica.testing.checks import Check, build_registry, measures
+from wica.testing.checks import Check, answer_latencies, build_registry, measures
 from wica.testing.harness import TestRun
 from wica.testing.report import Report, metric_samples
 from wica.testing.scenario import Scenario, check_context, run_scenario
@@ -114,8 +114,10 @@ def run_once(
         run_measures: dict[str, float] = {}
         samples: dict[str, list[float]] = {}
         if report.outcome == "completed":
-            run_measures = measures(report.timeline, check_context(run, scenario))
+            context = check_context(run, scenario)
+            run_measures = measures(report.timeline, context)
             samples = metric_samples(report.timeline, output_command_name=output)
+            samples["answer_latency"] = answer_latencies(report.timeline, context)
         base = Path(out_dir) / target.label / scenario.name
         report.write(
             base / f"{repetition}.json",

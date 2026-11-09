@@ -121,7 +121,7 @@ The metric keys of the report are core's measure names (`reaction_latency`, `mod
 
 **Latency is a measure, not a threshold.** The Harness records distributions (min, median, p95 per metric) for analytics and model-to-model comparison; a scenario *may* add a threshold as an expectation (`expect_latency`), and no threshold is ever a built-in default.
 
-**Expectations wait, with a timeout**, over the timeline and the mirror World. They scan forward from a **watermark**: `set()` moves it to the end of the timeline as it stands *before* the write (the SUT may react before `set()` returns), and a matched expectation moves it past the match, so a sequence of expectations never re-matches an earlier event and repeating one means "the next one". On `TestRun` they are plain blocking calls (a pytest calls them from its own thread, never from the SUT's loop thread); as tester Commands they are async wrappers that run the same blocking call off the tester's loop (`asyncio.to_thread`), so a waiting expectation never blocks the tester's own World. The family: `expect_action(name, where=…, state=…, within=…)`, `expect_output(contains=…, within=…)`, `expect_text(contains=…, within=…)`, `expect_no_action(name, for_=…)`, `expect_world(key, equals=…)`, `expect_latency(metric, p95_below=…)`. Each completes with a pass/fail **finding**. Beside them, **`wait_for(condition, within=…)`** is the pacing call — `"idle"`, `"speaking"`, `{"running": name}`, `{"seconds": n}`, as "Scenarios" defines them — whose timeout fails like an expectation (a `wait` finding, so a reader knows it was pacing); it does not move the watermark. `expect_output` matches the output Command whatever its name and cannot assume a `text` argument (the output Command's signature is application-defined), so it matches against the call's string-valued args unless the scenario names the arg. The same functions serve every driver: a pytest calls them directly on `TestRun`, a fake script or a live model calls them as tester Commands.
+**Expectations wait, with a timeout**, over the timeline and the mirror World. They scan forward from a **watermark**: `set()` moves it to the end of the timeline as it stands *before* the write (the SUT may react before `set()` returns), and a matched expectation moves it past the match, so a sequence of expectations never re-matches an earlier event and repeating one means "the next one". On `TestRun` they are plain blocking calls (a pytest calls them from its own thread, never from the SUT's loop thread); as tester Commands they are async wrappers that run the same blocking call off the tester's loop (`asyncio.to_thread`), so a waiting expectation never blocks the tester's own World. The family: `expect_action(name, where=…, state=…, within=…)`, `expect_output(contains=…, within=…)`, `expect_text(contains=…, within=…)`, `expect_no_action(name, for_=…)`, `expect_world(key, equals=…)`, `expect_latency(metric, p95_below=…)`. Each completes with a pass/fail **finding**. Beside them, **`wait_for(condition, within=…)`** is the pacing call — `"idle"`, `"ready"`, `"speaking"`, `{"running": name}`, `{"seconds": n}`, as "Scenarios" defines them — whose timeout fails like an expectation (a `wait` finding, so a reader knows it was pacing); it does not move the watermark. `expect_output` matches the output Command whatever its name and cannot assume a `text` argument (the output Command's signature is application-defined), so it matches against the call's string-valued args unless the scenario names the arg. The same functions serve every driver: a pytest calls them directly on `TestRun`, a fake script or a live model calls them as tester Commands.
 
 The **report** is a dataclass serializable to JSON and Markdown: scenario, both sides' configs, the timeline, the metrics summary, the outcome (`completed` or `failed`, with the step that stopped it), findings (from expectations, then from checks), issues (soft, model-reported), and a verdict. `report.ok` — completed and every check held — is what a pytest asserts.
 
@@ -132,7 +132,7 @@ A **scenario** is a fixed user written as data: one JSON file, named by its stem
 | Kind | Example | Runs | When it does not hold |
 |---|---|---|---|
 | `input` | `{"input": {"speech_input": "Stop!"}}` | at once: the user writes one Input | — the user acting |
-| `wait` | `{"wait": "idle"}`, `{"wait": "speaking"}`, `{"wait": {"running": "dance"}}`, `{"wait": {"seconds": 2}}` | blocks until the condition holds (`"within"`, default 60 s) | the run **stops as failed**: the SUT never reached the state the script needs |
+| `wait` | `{"wait": "idle"}`, `{"wait": "ready"}`, `{"wait": "speaking"}`, `{"wait": {"running": "dance"}}`, `{"wait": {"seconds": 2}}` | blocks until the condition holds (`"within"`, default 60 s) | the run **stops as failed**: the SUT never reached the state the script needs |
 | `expect` | `{"expect": {"action": "dance"}, "within": 20}` | blocks until it holds (`"within"`, default 30 s) | the run **stops as failed** |
 | `check` | `{"check": "cancels_when_asked"}`, `{"check": {"acts_when_asked": "dance"}}` | after the run, over the finished timeline | nothing during the run: a **result** — held or broken |
 
@@ -144,6 +144,7 @@ A **scenario** is a fixed user written as data: one JSON file, named by its stem
   "steps": [
     {"input": {"speech_input": "Hi!"}},
     {"wait": "speaking"},
+    {"wait": "ready"},
     {"input": {"emotion": "happy"}},
     {"check": "quiet_on_background_change"},
     {"wait": "idle"},
@@ -151,6 +152,7 @@ A **scenario** is a fixed user written as data: one JSON file, named by its stem
     {"check": {"acts_when_asked": "dance"}},
     {"wait": {"running": "dance"}},
     {"wait": {"seconds": 2}},
+    {"wait": "ready"},
     {"input": {"speech_input": "Stop!"}},
     {"check": "cancels_when_asked"},
     {"check": "answers_each_input"},
@@ -170,10 +172,11 @@ A **scenario** is a fixed user written as data: one JSON file, named by its stem
 **Wait — pacing, always explicit.** Nothing is implicit: a scenario that wants the SUT to have finished before the next input writes `{"wait": "idle"}`. The conditions:
 
 - `"idle"` — the SUT has finished reacting, read from the timeline with no timer: every write to a triggering Input seen (or dropped) by the Agent, every observed trigger consumed by a reaction that ended, every issued Command in a terminal state, and every completed Command whose completion re-triggers a step has had that trigger arrive (the Probe knows which Commands do), so the step a completion wakes is not missed in the gap between the two events.
+- `"ready"` — the Agent can take an input now: `"idle"` without waiting for running Commands. An input written then lands while the Agent is free, so it is not dropped as busy (the Agent runs one reaction at a time and drops a trigger that arrives during one — `agent.md`, "Concurrency and long-running Commands in v1"); only a Command completing in the instant between the wait and the write could still win the race. Write it before any input that talks over the SUT — after a `"speaking"` or `{"running": …}` wait — unless the drop is what the scenario tests.
 - `"speaking"` — the output Command, whatever its name, has started since the last input: the moment to talk over the SUT.
 - `{"running": <Command>}` — that Command has started since the last input.
 
-"Started since the last input" rather than "running now": a condition the timeline can always decide, even when the Command is short enough to have ended before the wait looks.
+For `"speaking"` and `{"running": …}`, "started since the last input" rather than "running now": a condition the timeline can always decide, even when the Command is short enough to have ended before the wait looks.
 - `{"seconds": n}` — a deliberate delay, the only timer, for "two seconds into the dance".
 
 A wait that times out stops the run as **failed**, exactly like an expect, and names what was still running or never started. A wait is an expectation with a default timeout: one outcome, and the stopping step (`wait_for(…)` or `expect_…(…)`) says which kind of miss it was.

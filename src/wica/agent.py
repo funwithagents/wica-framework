@@ -256,6 +256,43 @@ def _span_ids(span: otel_trace.Span) -> tuple[str | None, str | None]:
     )
 
 
+_CACHE_BREAKPOINT: dict[str, str] = {"type": "ephemeral"}
+
+
+def mark_cache_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """*messages* with an Anthropic `cache_control` breakpoint on the last block before the newest
+    observation (the last user message) — the deepest block the next step renders byte-identically:
+    the newest observation is re-rendered archival on the next step, so a breakpoint after it would
+    be written and never read. On the first step that block is the system prompt (and the tools
+    ahead of it). Returns a new list; the marked message is a copy, the others are shared."""
+    newest = next(
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[i], HumanMessage)
+        ),
+        None,
+    )
+    if newest is None or newest == 0:
+        return messages
+    target = messages[newest - 1]
+    content = target.content
+    blocks: list[str | dict[str, Any]] = (
+        [{"type": "text", "text": content}]
+        if isinstance(content, str)
+        else [
+            dict(b) if isinstance(b, dict) else {"type": "text", "text": b}
+            for b in content
+        ]
+    )
+    last = blocks[-1] if blocks else None
+    if not isinstance(last, dict) or last.get("text") == "":
+        return messages
+    blocks[-1] = {**last, "cache_control": dict(_CACHE_BREAKPOINT)}
+    marked = target.model_copy(update={"content": blocks})
+    return [*messages[: newest - 1], marked, *messages[newest:]]
+
+
 def _token_usage(response: AIMessage) -> TokenUsage | None:
     """TokenUsage from an AIMessage's usage_metadata, or None when the provider didn't report it.
     See specs/instrumentation.md ("Layer 1")."""
@@ -1032,6 +1069,11 @@ class Agent:
         # Instrumentation is observation-only: subscribers receive a defensive copy, never the
         # message list subsequently handed to the model.
         self.on_prompt.emit(copy.deepcopy(messages))
+        if self._provider == "anthropic":
+            # Anthropic caches only at an explicit breakpoint. A transport detail, added after
+            # on_prompt so observers keep the plain rendering. See specs/agent.md ("Prompt
+            # caching").
+            messages = mark_cache_breakpoint(messages)
         builder.prompt_ready_at = now()
 
         builder.model_started_at = now()

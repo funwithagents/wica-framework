@@ -91,12 +91,13 @@ def _run(
     )
     measures = {
         "output_calls": 1.0,
-        "unprompted_output": 0.0,
+        "extra_output": 0.0,
         "output_words": 4.0,
         "turns": 2.0,
         "turns_answered": 1.0,
     }
     samples = {
+        "answer_latency": [latency + 0.5],
         "reaction_latency": [latency, latency + 0.2],
         "input_tokens": [100.0, 100.0],
         "output_tokens": [10.0, 10.0],
@@ -215,7 +216,10 @@ def test_markdown_opens_with_the_per_configuration_table():
     head, _, rest = text.partition("## Configurations")
     assert "## Per configuration" in head and "## greeting" in rest
     row = next(line for line in head.splitlines() if line.startswith("| a |"))
-    assert row.startswith("| a | 1 | 1/1 | 1 | 100% | 50% | 1.10 / 1.20 |")
+    # answer latency (to the first word) sits before reaction latency
+    assert row.startswith(
+        "| a | 1 | 1/1 | 1 | 100% | 50% | 1.50 / 1.50 | 1.10 / 1.20 |"
+    )
     assert "| 100 / 10 | 2 |" in row  # tokens in / out per turn, words per turn
     assert "| b | skipped: disabled |" in head
 
@@ -227,7 +231,9 @@ def test_markdown_has_one_table_per_scenario_with_skips_in_place():
     assert "## greeting" in text and "## question" in text
     assert '- **a**: `{"model": "gpt-4o", "provider": "openai"}`' in text
     row = next(line for line in text.splitlines() if line.startswith("| a |"))
-    assert row.startswith("| a | 1 | 1/1 | 1 | 100% | 1 | — | 1.10 / 1.20 |")
+    assert row.startswith(
+        "| a | 1 | 1/1 | 1 | 100% | 1 | — | 1.50 / 1.50 | 1.10 / 1.20 |"
+    )
     assert "| b | skipped: key unset |" in text
     assert "- b / greeting: key unset" in text
 

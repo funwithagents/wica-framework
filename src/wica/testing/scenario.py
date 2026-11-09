@@ -2,8 +2,8 @@
 steps. Implements specs/wica-tester.md, "Scenarios".
 
 - `input` writes one SUT Input.
-- `wait` paces the conversation ("idle", "speaking", {"running": name}, {"seconds": n}); a timeout
-  stops the run as **failed**, like an expect.
+- `wait` paces the conversation ("idle", "ready", "speaking", {"running": name},
+  {"seconds": n}); a timeout stops the run as **failed**, like an expect.
 - `expect` asserts; a miss stops the run as **failed**.
 - `check` is a rule judged after a completed run, over the window of the input it follows (from
   that input to the next); top-level `checks` cover the whole run.
@@ -42,7 +42,7 @@ _DEFAULT_TIMEOUT_S = 300.0
 _WAIT_WITHIN_S = 60.0
 _EXPECT_WITHIN_S = 30.0
 _NATIVE_COMMANDS = frozenset({NOOP, CANCEL})
-_WAIT_WORDS = frozenset({"idle", "speaking"})
+_WAIT_WORDS = frozenset({"idle", "ready", "speaking"})
 _EXPECT_KINDS = ("output", "action", "text", "no_action", "world", "latency")
 _EXPECT_EXTRAS = {"action": {"where", "state", "result_contains"}}
 _OUTPUT_CHECKS = frozenset({"answers_each_input", "quiet_on_background_change"})
@@ -275,7 +275,7 @@ def _step(raw: Any, registry: Mapping[str, Check], fail: Any) -> Step:
         )
         if not valid:
             raise fail(
-                '\'wait\' is "idle", "speaking", {"running": <Command>} or '
+                '\'wait\' is "idle", "ready", "speaking", {"running": <Command>} or '
                 '{"seconds": <n>}'
             )
         return WaitStep(
