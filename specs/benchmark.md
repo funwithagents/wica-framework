@@ -11,7 +11,6 @@ code:
   - benchmarks/bench.py
   - benchmarks/matrix.json
   - benchmarks/scenarios
-  - benchmarks/pins
 tests:
   - tests/testing/test_scenario.py
   - tests/testing/test_checks.py
@@ -45,7 +44,7 @@ This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"):
 
 - **Target** — an application stood up as a running `Wica` for one benchmark configuration, plus how to shut it down. The runner never builds a `Wica` itself; the application does, exactly as its entry point would (the demo's `build_system` + `wire` + `start`, the interaction app's `build_system` + `wire` + `_start`), so what is benchmarked is the real system with its real persona, Commands and seeding. Only the peripherals the application chooses to bypass are doubled, by the application.
 - **Configuration** — one model under test: an **entry** of the matrix file, whose `agent` block (provider, model, `hf_provider`, `api_key_env`, history settings) is what differs between entries; the persona is shared through the file's `agent_defaults`. Its **label** in every report is the entry's `id`. The file is the **matrix**.
-- **Scenario** — a fixed user: a tester script (driver (b) of the tester spec) and a list of check names, in one JSON file, named by its stem. A benchmark's scenarios are **sessions** — several user turns, paced as a person would pace them — so one run yields a whole conversation's worth of turns to measure; a scenario that pins one rule in a few steps is a **pin**, a regression probe, not a workload.
+- **Scenario** — a fixed user: a tester script (driver (b) of the tester spec) and a list of check names, in one JSON file, named by its stem. A benchmark's scenarios are **sessions** — several user turns, paced as a person would pace them — so one run yields a whole conversation's worth of turns to measure; a scenario that pins one rule in a few steps is a regression probe, not a workload.
 - **Run** — one (configuration, scenario, repetition): one `TestRun`, one `Report`.
 - **Batch** — one invocation of the runner: a matrix × a scenario set × *k*, written to one dated folder of per-run reports plus a summary. Working data, git-ignored.
 - **Result** — a batch worth keeping: its summary and manifest copied under `benchmarks/results/<YYYYMMDD-HHMM>_<name>/` with a hand-written description and findings. Committed, and the only thing a spec or plan cites.
@@ -209,17 +208,7 @@ A header lists each configuration's full `agent` block: the configuration under 
 | `conversation` | "Hello there!" → "What can you do?" → a request for a long story, interrupted with "Stop!" as soon as the reply is issued (`cancel_command`, then a spoken confirmation) → "Hi, I'm Alex." and "Can you hear me?" 0.5 s apart (busy handling) → "Thanks, that's all for now. Goodbye!" → silence for 4 s. Seven user turns; all four primer checks | `speech_input`, an output Command — generic, so it runs unchanged against any application of that shape |
 | `commands` | "Hi!" then `set_emotion("happy")` while the robot still speaks → no second `say` for 4 s (the `noop` clause on the re-trigger step) → "Please dance for me!" → `dance`, then "Stop!" two seconds in → `cancel_command`, a spoken confirmation → `set_closest_user("u2")` → `switch_user_tracking(user_id="u2")` → `set_closest_user("")` → `switch_user_tracking`. Three primer checks (`answers_each_input` left out: a sensor write is not addressed to the agent) | `speech_input`, `emotion`, `closest_user`; `dance`, `switch_user_tracking`; the output Command — the demo's own |
 
-**The pins**, `benchmarks/pins/`: seven micro scenarios, one primer clause each, against the demo's inputs (`speech_input`, `closest_user`) and Commands (`say` output, `dance`, `set_emotion`, `switch_user_tracking`). They are not the workload — a pin run *k* times is a repeated e2e test, not a benchmark — and they are not a live CI gate either, since one sample of a model on a bad day would turn `main` red for a behavior the benchmark exists to measure. They are for reading: when the per-configuration row shows a model breaking rules, `--scenarios benchmarks/pins --only <model> --k 5` says which clause. The first four need only `speech_input` and an output Command; `background-change-is-quiet` also needs a passive `emotion` entry; the last two are the demo's own:
-
-| Pin | Fixed user | What it pins |
-|---|---|---|
-| `greeting` | "Hello there!" → `expect_output` → `expect_no_action("say", for_=4)` | replies through the output Command; no second reply when it completes |
-| `direct-question` | "What can you do?" → `expect_output` | a question is answered, not `noop`ed (`no_noop_on_input`) |
-| `two-quick-utterances` | two `set_speech_input` 0.5 s apart → `expect_output` | busy handling: the dropped or coalesced input is measured, not asserted |
-| `stop-while-speaking` | a long request → `expect_output` → "Stop!" while `say` runs → `expect_action("cancel_command")` → `expect_output` | barge-in by voice (`barge_in` metric), spoken confirmation after |
-| `background-change-is-quiet` | `set_speech_input("Hi!")` → `expect_output` → `set_emotion("happy")` at once, while `say` still speaks → `expect_no_action("say", for_=4)` | the `noop` clause on the **re-trigger step**: `emotion` is passive (non-triggering), so the only step that sees the change is the one the reply's completion wakes, and it must `noop` rather than comment on its mood. The write goes out right after `expect_output` matches, while the demo's `say` is still speaking (0.3 s a word), so it lands before that step runs |
-| `stop-while-dancing` | above | cancel of a long Command, then a spoken confirmation |
-| `closest-user-switches-tracking` | `set_closest_user("u2")` → `expect_action("switch_user_tracking", where={"user_id": "u2"})` → `set_closest_user("")` → `expect_action("switch_user_tracking")` | the demo persona's tracking rule, the demo spec's "LLM-driven, not a hard rule" made measurable |
+**No rule-by-rule micro scenarios ship.** A one-rule scenario run *k* times is a repeated e2e test, not a benchmark, and the session reports already name the clause a model broke — the failed check, the failed expectation, the timeline beside them. When a clean-context check of one rule is wanted (does a model that breaks a rule mid-session also break it cold?), a fifteen-line scenario file written for that model and run with `--scenarios <file>` does it; nothing needs committing.
 
 ### Testing
 
@@ -232,8 +221,8 @@ Fast tier, `tests/testing/`:
 
 Full-loop tier, two files, selected **by file** as [ci.md](ci.md) requires:
 
-- `tests-e2e/test_demo_bench_fake.py` — always-run, key-less: the whole `conversation` session through `DemoTarget` over the matrix's `fake` entry (its script plays every turn, the long story cancelled by a scripted tool-call id), asserting the report is `ok`, seven turns all answered, one unprompted output (the confirmation on the cancel's completion step) and both files written; the `greeting` pin likewise; the committed matrix loads with one enabled `default` per provider and the disabled fixture; the workload and the pins load; a one-run `run_matrix` batch kept with `write_result` produces the five files, a `compliance` of 1 in the total, and leaves an existing `description.md` untouched. Joins the e2e-fake job.
-- `tests-e2e/test_demo_bench.py` — live: the `greeting` pin once through `DemoTarget` per enabled matrix entry (the cheapest probe that the provider drives the demo at all), asserting a reaction ended `ok` and `model_latency` has a sample — **not** that the model answered: one sample of a model's behavior is the benchmark's to measure with *k*, and must not turn `main` red. A `Skip` from the target (its `api_key_env` unset) becomes `pytest.skip`, the tier's rule ([testing.md](testing.md)). Joins the `live` job.
+- `tests-e2e/test_demo_bench_fake.py` — always-run, key-less: the whole `conversation` session through `DemoTarget` over the matrix's `fake` entry (its script plays every turn, the long story cancelled by a scripted tool-call id), asserting the report is `ok`, seven turns all answered, one unprompted output (the confirmation on the cancel's completion step) and both files written; a one-utterance greeting probe (`tests-e2e/support.greeting_probe`, a fixture, not benchmark data) likewise; the committed matrix loads with one enabled `default` per provider and the disabled fixture; the workload loads; a one-run `run_matrix` batch kept with `write_result` produces the five files, a `compliance` of 1 in the total, and leaves an existing `description.md` untouched. Joins the e2e-fake job.
+- `tests-e2e/test_demo_bench.py` — live: the greeting probe once through `DemoTarget` per enabled matrix entry (the cheapest probe that the provider drives the demo at all), asserting a reaction ended `ok` and `model_latency` has a sample — **not** that the model answered: one sample of a model's behavior is the benchmark's to measure with *k*, and must not turn `main` red. A `Skip` from the target (its `api_key_env` unset) becomes `pytest.skip`, the tier's rule ([testing.md](testing.md)). Joins the `live` job.
 
 Both import `benchmarks.bench` as the demo tests import `examples.conversation_demo.app` (the repo root on `sys.path`). One pytest run is a smoke test; the benchmark is the entry point with `--k`.
 
@@ -245,7 +234,7 @@ The split follows one rule: **what another repo imports is in the package; what 
 |---|---|---|
 | scenario format and loader, primer checks, measures | `src/wica/testing/scenario.py`, `checks.py` | per-run concerns of the toolkit; `to_scenario()` (phase 2) emits the format |
 | the matrix format, `Target`, `Skip`, `run_once`, `run_matrix`, `Summary`, `write_result`, `cli` | `src/wica/benchmark/` (`matrix.py`, `runner.py`, `summary.py`, `cli.py`) | what an application's benchmark imports; a subpackage of its own because it is a comparison tool, not a test tool |
-| `DemoTarget` and the entry point, the matrix file, the workload and the pins, the batches, the results, the README | `benchmarks/` at the root | this repo's own benchmark; nobody imports it, so it is not installed and may depend on the `demo` group |
+| `DemoTarget` and the entry point, the matrix file, the workload, the batches, the results, the README | `benchmarks/` at the root | this repo's own benchmark; nobody imports it, so it is not installed and may depend on the `demo` group |
 
 Neither subpackage is re-exported from `wica`, and neither adds a dependency: the Gradio presenters the demo target wires are the `demo` group's, imported only by `benchmarks/bench.py`. `benchmarks/` joins pyright's `include` and is never run by CI beyond the two smoke tests above. The plan adds the modules to the AGENTS.md project map (a `benchmarks/` row in the top-level layout, a `benchmark/` row among the modules) and to this spec's `code:` / `tests:` (the frontmatter above).
 

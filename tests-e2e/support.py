@@ -11,6 +11,7 @@ from wica import Wica
 from wica.agent import build_chat_model
 from wica.config import AgentConfig, MissingEnvError, WicaConfig
 from wica.content import Content, TextPart
+from wica.testing import Requires, Scenario
 
 E2E_DIR = Path(__file__).parent
 
@@ -69,6 +70,27 @@ def real_wica(
         return Wica.init(config, **kwargs)
     except MissingEnvError as exc:
         pytest.skip(f"{exc.env_var} not set — skipping e2e test")
+
+
+def greeting_probe() -> Scenario:
+    """The cheapest probe that a provider drives the demo at all (specs/benchmark.md, "Testing"):
+    one utterance, one `say`. A test fixture, not benchmark data — the benchmark's workload is
+    the session scenarios under benchmarks/scenarios/."""
+
+    def step(command: str, **args: Any) -> dict[str, Any]:
+        return {"tool_calls": [{"name": command, "args": args}]}
+
+    return Scenario(
+        name="greeting",
+        requires=Requires(inputs=("speech_input",), output_command=True),
+        timeout_s=60,
+        checks=("no_failed_reactions", "no_colliding_cancel"),
+        script=[
+            step("set_speech_input", value="Hello there!"),
+            step("expect_output", within=20),
+            step("finish", verdict="pass"),
+        ],
+    )
 
 
 def identity_serialize(value: Any, previous: Any) -> Content:

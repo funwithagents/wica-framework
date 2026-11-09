@@ -7,11 +7,10 @@ Run from the repo root (it imports the demo, `examples.conversation_demo.app`, a
     uv run --group demo python -m benchmarks.bench --k 5
     uv run --group demo python -m benchmarks.bench --only 'openai/*' --scenario greeting --k 3
     uv run --group demo python -m benchmarks.bench --only fake --include-disabled --scenario conversation
-    uv run --group demo python -m benchmarks.bench --scenarios benchmarks/pins --only 'openai/*'
 
 The matrix is `benchmarks/matrix.json` (one entry per model, selected by id glob and tag; the
 `fake` fixture is its opt-in key-less row). The workload is `benchmarks/scenarios/` (two session
-scenarios); `benchmarks/pins/` holds the rule-by-rule micro scenarios. Batches land in `benchmarks/runs/<stamp>/`;
+scenarios). Batches land in `benchmarks/runs/<stamp>/`;
 `--result NAME` keeps one under `benchmarks/results/`.
 """
 
@@ -33,7 +32,6 @@ from wica.testing import Scenario
 BENCH_DIR = Path(__file__).parent
 MATRIX = BENCH_DIR / "matrix.json"
 SCENARIOS_DIR = BENCH_DIR / "scenarios"  # the workload: the session scenarios
-PINS_DIR = BENCH_DIR / "pins"  # rule-by-rule micro scenarios, run by hand (--scenarios)
 RUNS_DIR = BENCH_DIR / "runs"
 RESULTS_DIR = BENCH_DIR / "results"
 

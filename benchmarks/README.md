@@ -14,7 +14,6 @@ it uses is `wica.benchmark`, the scenario format and checks are `wica.testing`'s
 | `bench.py` | `DemoTarget` and the `wica-demo-bench` entry point |
 | `matrix.json` | the matrix: one entry per model under test (`id`, `agent` block, `tags`, `enabled`, `notes`), nineteen models over five providers, the demo's persona shared through `agent_defaults`; the `fake` fixture is its opt-in key-less row — see "Model catalog" |
 | `scenarios/*.json` | **the workload**: `conversation` (a generic session — greeting, question, a story interrupted by "Stop!", two quick utterances, goodbye) and `commands` (the demo's own actions); each a fixed user as a scripted-tester script + the checks to run over the whole session |
-| `pins/*.json` | seven rule-by-rule micro scenarios (one primer clause each), for debugging a specific rule with `--scenarios benchmarks/pins`; not the workload, not run by CI beyond the `greeting` smoke |
 | `runs/<stamp>/` | **batches** — per-run reports and summaries, git-ignored working data |
 | `results/<stamp>_<name>/` | **results** — kept batches: `summary.md`, `summary.json`, `runs.json`, hand-written `description.md` and `findings.md` |
 
@@ -29,8 +28,6 @@ zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run --group demo python -m benchmar
 # one provider's rows, the generic session only
 uv run --group demo python -m benchmarks.bench --only 'openai/*' --scenario conversation --k 3
 
-# the rule pins, one model, to see which clause a model breaks
-uv run --group demo python -m benchmarks.bench --scenarios benchmarks/pins --only 'openai/*' --k 3
 
 # only the providers' committed defaults, every scenario
 uv run --group demo python -m benchmarks.bench --tags default --k 5

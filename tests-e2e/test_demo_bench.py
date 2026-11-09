@@ -1,5 +1,6 @@
 """The demo benchmark against each live provider of the matrix (specs/benchmark.md, "Testing"):
-the `greeting` pin once per enabled `benchmarks/matrix.json` entry through `DemoTarget`. A target's `Skip`
+one greeting (a fixture, `support.greeting_probe`) per enabled `benchmarks/matrix.json` entry through
+`DemoTarget`. A target's `Skip`
 (its `api_key_env` unset) is this tier's `pytest.skip`. It asserts the provider drove the demo (a
 reaction ended `ok`), not the model's behavior. One sample is a smoke test; the benchmark
 is `python -m benchmarks.bench --k N` over the session workload."""
@@ -10,16 +11,17 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.bench import MATRIX, PINS_DIR, DemoTarget
+from benchmarks.bench import MATRIX, DemoTarget
 from wica.benchmark import Completed, Entry, Skipped, load_matrix, run_once
-from wica.testing import load_scenario
+
+from support import greeting_probe
 
 ENABLED = [e for e in load_matrix(MATRIX).entries if e.enabled]
 
 
 @pytest.mark.parametrize("entry", ENABLED, ids=[e.id for e in ENABLED])
 def test_greeting_once_per_enabled_entry(entry: Entry, tmp_path: Path):
-    greeting = load_scenario(PINS_DIR / "greeting.json")
+    greeting = greeting_probe()
     outcome = run_once(DemoTarget(entry), greeting, repetition=1, out_dir=tmp_path)
     if isinstance(outcome, Skipped):
         pytest.skip(outcome.reason)

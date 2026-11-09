@@ -1,13 +1,13 @@
 """The demo benchmark over the matrix's `fake` fixture (specs/benchmark.md, "Testing"): key-less,
 deterministic, **always runs** — the e2e-fake job's fourth file. The `conversation` session and the
-`greeting` pin through the real `DemoTarget` (`build_system` + `wire` + `start`), the committed
-matrix, workload and pins load, and a batch becomes a result."""
+greeting probe through the real `DemoTarget` (`build_system` + `wire` + `start`), the committed
+matrix and workload load, and a batch becomes a result."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from benchmarks.bench import MATRIX, PINS_DIR, SCENARIOS_DIR, DemoTarget
+from benchmarks.bench import MATRIX, SCENARIOS_DIR, DemoTarget
 from wica.benchmark import (
     Completed,
     load_matrix,
@@ -16,6 +16,8 @@ from wica.benchmark import (
     write_result,
 )
 from wica.testing import load_scenario, load_scenarios
+
+from support import greeting_probe
 
 FAKE = load_matrix(MATRIX).entry("fake")
 
@@ -37,19 +39,10 @@ def test_the_committed_matrix_has_one_default_per_provider_and_the_fake_fixture(
     assert not FAKE.enabled and FAKE.skip_reason() is None
 
 
-def test_the_workload_and_the_pins_load():
+def test_the_workload_loads():
     assert [s.name for s in load_scenarios(SCENARIOS_DIR)] == [
         "commands",
         "conversation",
-    ]
-    assert [s.name for s in load_scenarios(PINS_DIR)] == [
-        "background-change-is-quiet",
-        "closest-user-switches-tracking",
-        "direct-question",
-        "greeting",
-        "stop-while-dancing",
-        "stop-while-speaking",
-        "two-quick-utterances",
     ]
 
 
@@ -68,8 +61,8 @@ def test_the_conversation_session_passes_through_the_demo_target(tmp_path: Path)
     assert (tmp_path / "fake" / "conversation" / "1.md").exists()
 
 
-def test_the_greeting_pin_passes_through_the_demo_target(tmp_path: Path):
-    greeting = load_scenario(PINS_DIR / "greeting.json")
+def test_the_greeting_probe_passes_through_the_demo_target(tmp_path: Path):
+    greeting = greeting_probe()
     outcome = run_once(DemoTarget(FAKE), greeting, repetition=1, out_dir=tmp_path)
     assert isinstance(outcome, Completed)
     assert outcome.report.ok, [f for f in outcome.report.findings if not f.ok]
@@ -79,11 +72,8 @@ def test_the_greeting_pin_passes_through_the_demo_target(tmp_path: Path):
 
 
 def test_a_batch_becomes_a_result(tmp_path: Path):
-    pins = load_scenarios(PINS_DIR)
     batch = tmp_path / "batch"
-    summary = run_matrix(
-        [DemoTarget(FAKE)], pins, k=1, out_dir=batch, only_scenarios=["greeting"]
-    )
+    summary = run_matrix([DemoTarget(FAKE)], [greeting_probe()], k=1, out_dir=batch)
     cell = summary.cell("greeting", "fake")
     total = summary.cell("*", "fake")
     assert cell is not None and cell.pass_k == 1 and not summary.skips

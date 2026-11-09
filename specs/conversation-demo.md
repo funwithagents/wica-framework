@@ -259,7 +259,7 @@ everything is wired before `start()`, the setters' intended zone.
 
 ## Benchmark
 
-The demo is also the framework's **reference benchmark** ([benchmark.md](benchmark.md)): `benchmarks/bench.py` stands it up exactly as `main()` does minus the page (`build_system` → `wire` over a `TranscriptLog` and a `SpeakingSlot` of its own → `start`), once per run, for each entry of `benchmarks/matrix.json` (the per-provider variants above as its `default` rows, persona included) against the session workload in `benchmarks/scenarios/` — `conversation`, written to the `speech_input` + `say` shape so it runs unchanged against any application of that shape, and `commands`, the demo's own actions — with the rule-by-rule pins in `benchmarks/pins/`. Nothing in the demo changes for it.
+The demo is also the framework's **reference benchmark** ([benchmark.md](benchmark.md)): `benchmarks/bench.py` stands it up exactly as `main()` does minus the page (`build_system` → `wire` over a `TranscriptLog` and a `SpeakingSlot` of its own → `start`), once per run, for each entry of `benchmarks/matrix.json` (the per-provider variants above as its `default` rows, persona included) against the session workload in `benchmarks/scenarios/` — `conversation`, written to the `speech_input` + `say` shape so it runs unchanged against any application of that shape, and `commands`, the demo's own actions. Nothing in the demo changes for it.
 
 ## Out of scope (for this demo)
 
