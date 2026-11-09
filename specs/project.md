@@ -3,6 +3,7 @@ code:
   - pyproject.toml
 tests:
   - tests/test_project_map.py
+  - tests/test_docs.py
 ---
 
 # Project
@@ -29,7 +30,8 @@ Structure and tooling for the WICA project itself: Python version, dependency/pa
   - `tests-e2e/` at repo root, for the full-loop fake/live tier above — not collected by the default `pytest` run
   - `examples/` at repo root, for runnable demo scripts
   - `.github/workflows/` for continuous integration — one `ci.yml`, specced in [ci.md](ci.md)
-  - `docs/` reserved for future user-facing documentation (usage guides, API reference) — distinct from `specs/`, which holds pre-implementation design/planning docs and continues to exist alongside `docs/` once that appears
+  - `README.md` (the landing page: what WICA is, its status, install, the quick start, the demo, the links into `docs/`, how it is developed), `CONTRIBUTING.md` (how the project is run: one maintainer, no external pull requests for now, feedback through issues) and `docs/` (the consumer documentation, entered by task through `docs/index.md`: `getting-started.md`, `reference/` for the API and the configuration, `guides/` for one page per task). One home per fact: a reference page owns it, every other page links there; `specs/` stays the normative design the docs are written from, and `AGENTS.md` the operating manual for working in the repo — two entry points, consumer and contributor, the shape the sibling repos (`tts-engine`, `reachy-mini-bridge`) use
+- **Documentation checks:** `tests/test_docs.py`, in the fast tier, keeps the Markdown honest the way `tests/test_project_map.py` keeps the AGENTS.md map honest. Every relative link in the root Markdown files and under `docs/`, `specs/`, `benchmarks/`, `examples/`, `tests/` and `tests-e2e/` must resolve, and an anchor into a Markdown file must name one of its headings (GitHub's slugs); links inside code are examples and are skipped. Not scanned: `plans/`, which record what was built and are not rewritten when a file they link to later moves; `analysis/` (untracked); the benchmark's git-ignored `runs/`. The tables that mirror code are checked against it: the provider rows of the README and of `docs/reference/configuration.md` against the extras of `pyproject.toml` (plus the built-in `fake`), the configuration page's `agent` field table against `AgentConfig`'s fields, the API reference's import table against `wica.__all__` and its Events table against the `on_*` attributes of `Wica`. The Python examples a reader copies are executed: the README's quick start, with a scripted `FakeChatModel` standing in for the provider it names and its key variable set, so the imports, names and calls it shows cannot drift from the library; the getting-started application and the testing guide's examples run as written on `provider: "fake"`. Every `owner.method(` in the python fences of `README.md` and `docs/` must name a method that exists on the public API
 
 ## Open questions
 
