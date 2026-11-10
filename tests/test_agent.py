@@ -19,6 +19,7 @@ from langchain_core.messages import (
 )
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from opentelemetry.trace import format_trace_id
 from pydantic import Field
 
@@ -33,6 +34,7 @@ from wica.agent import (
     _EMPTY_OBSERVATION_BLOCK,
     _NOOP_ACK,
     _NOOP_COMMAND_NAME,
+    build_chat_model,
     mark_cache_breakpoint,
 )
 from wica.command import Command
@@ -85,6 +87,8 @@ class ProgrammableChatModel(BaseChatModel):
 
     respond: Callable[[list[BaseMessage]], Awaitable[AIMessage]] | None = None
     calls: list[list[BaseMessage]] = Field(default_factory=list)
+    # One per call, in order: the tool names and tool_choice the call was bound with.
+    bindings: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
@@ -99,6 +103,9 @@ class ProgrammableChatModel(BaseChatModel):
         self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs: Any
     ) -> ChatResult:
         self.calls.append(messages)
+        self.bindings.append(
+            {"tools": kwargs.get("tools"), "tool_choice": kwargs.get("tool_choice")}
+        )
         assert self.respond is not None, (
             "ProgrammableChatModel.respond must be set before use"
         )
@@ -108,7 +115,12 @@ class ProgrammableChatModel(BaseChatModel):
     def bind_tools(
         self, tools, *, tool_choice=None, **kwargs: Any
     ) -> Runnable[Any, AIMessage]:
-        return self
+        # Bound like a real integration: the tool names and choice reach every call as kwargs,
+        # which _agenerate records in `bindings`.
+        return self.bind(
+            tools=[convert_to_openai_tool(tool)["function"]["name"] for tool in tools],
+            tool_choice=tool_choice,
+        )
 
 
 def text_response(text: str) -> Callable[[list[BaseMessage]], Awaitable[AIMessage]]:
@@ -191,6 +203,7 @@ def make_agent(
     history_budget: float | None = None,
     context_window: int | None = None,
     model_timeout: float | None = 10.0,
+    force_tool_call: bool = True,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
@@ -206,6 +219,7 @@ def make_agent(
         history_budget=history_budget,
         context_window=context_window,
         model_timeout=model_timeout,
+        force_tool_call=force_tool_call,
     )
     agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
     if output_sink is not None:
@@ -1685,6 +1699,207 @@ def test_clearing_the_output_command_restores_free_text_mode(loop, world, sink):
     assert "private reasoning" not in agent.system_prompt
     agent.register_command(_named("say"))  # no longer reserved
     agent.stop()
+
+
+# --- Forcing a tool call (specs/agent.md, "Forcing a tool call") -------------------------
+
+
+def _speak_and_noop_model() -> ProgrammableChatModel:
+    return ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("say", {"text": "hello"}, "s1")]),
+            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+        )
+    )
+
+
+def _say_command(spoken: list[str]) -> Command:
+    async def say(text: str) -> str:
+        """Say something to the user."""
+        spoken.append(text)
+        return "spoken"
+
+    return Command(say)
+
+
+def test_output_command_forces_a_tool_call_on_every_step(loop, world, sink):
+    """With an output Command bound, every model call is bound with a forced tool choice over the
+    full tool set — the speaking step and the follow-up step that ends with noop alike."""
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    spoken: list[str] = []
+    model = _speak_and_noop_model()
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        output_command=_say_command(spoken),
+        coalesce_window=0,
+    )
+    agent.start()
+    world.update("input", "greet the user")
+    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    agent.stop()
+
+    assert spoken == ["hello"]
+    assert len(model.bindings) == 2
+    for binding in model.bindings:
+        assert binding["tool_choice"] == "any"
+        assert set(binding["tools"]) == {"say", _NOOP_COMMAND_NAME, "cancel_command"}
+
+
+def test_without_an_output_command_the_binding_is_not_forced(loop, world, sink):
+    """Free text is the reply: a text-only answer must stay possible, so force_tool_call is not
+    read."""
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=text_response("hello"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+    world.update("input", "greet the user")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert sink.texts == ["hello"]
+    assert model.bindings[0]["tool_choice"] is None
+
+
+def test_force_tool_call_false_leaves_the_output_command_unforced(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    spoken: list[str] = []
+    model = _speak_and_noop_model()
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        output_command=_say_command(spoken),
+        force_tool_call=False,
+        coalesce_window=0,
+    )
+    agent.start()
+    world.update("input", "greet the user")
+    wait_until(lambda: len(model.bindings) == 2)
+    agent.stop()
+
+    assert spoken == ["hello"]
+    assert [b["tool_choice"] for b in model.bindings] == [None, None]
+
+
+def test_forcing_follows_the_output_command_as_it_is_set_and_cleared(loop, world, sink):
+    """Forced exactly while the output Command is bound: not before it is set, from the moment it
+    is set on a running Agent, and no longer once it is cleared."""
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=text_response("ok"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.start()
+
+    def step(n: int) -> None:
+        world.update("input", f"input {n}")
+        wait_until(lambda: len(model.bindings) == n)
+        wait_until(
+            lambda: len(sink.texts) == n
+        )  # the step has delivered its text and ended
+
+    step(1)
+    agent.set_output_command(_say_command([]))
+    step(2)
+    agent.set_output_command(None)
+    step(3)
+    agent.stop()
+
+    assert [b["tool_choice"] for b in model.bindings] == [None, "any", None]
+
+
+def test_huggingface_hub_is_forced_with_required_past_its_single_tool_check(
+    loop, world, sink
+):
+    """ChatHuggingFace.bind_tools refuses a tool_choice with more than one tool; the Agent binds it
+    directly, so the Hub client receives tool_choice="required" with every tool. Driven offline:
+    the real huggingface-hub model from build_chat_model, its async client replaced by one that
+    records the request."""
+    from huggingface_hub import ChatCompletionOutput
+    from langchain_huggingface import ChatHuggingFace
+
+    requests: list[dict[str, Any]] = []
+
+    class RecordingClient:
+        async def chat_completion(self, **kwargs: Any) -> ChatCompletionOutput:
+            requests.append(kwargs)
+            return ChatCompletionOutput.parse_obj_as_instance(
+                {
+                    "id": "r1",
+                    "created": 0,
+                    "model": "m",
+                    "system_fingerprint": "",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "n1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": _NOOP_COMMAND_NAME,
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                }
+            )
+
+    model = build_chat_model(
+        AgentConfig(
+            provider="huggingface-hub",
+            model="openai/gpt-oss-120b",
+            hf_provider="cerebras",
+            api_key="hf_test",
+            system_prompt="You are terse.",
+        )
+    )
+    assert isinstance(model, ChatHuggingFace)
+    object.__setattr__(model.llm, "async_client", RecordingClient())
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_sink=sink,
+        output_command=_say_command([]),
+    )
+    agent.start()
+    world.update("input", "greet the user")
+    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    agent.stop()
+
+    assert requests[0]["tool_choice"] == "required"
+    assert {tool["function"]["name"] for tool in requests[0]["tools"]} == {
+        "say",
+        _NOOP_COMMAND_NAME,
+        "cancel_command",
+    }
 
 
 def test_set_output_sink_after_start_takes_effect_next_step_and_none_silences(

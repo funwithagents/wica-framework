@@ -59,6 +59,9 @@ class AgentConfig:
     # abandoned with the `model_timeout` outcome; None = no deadline. See specs/agent.md
     # ("Model-call deadline").
     model_timeout: float | None = DEFAULT_MODEL_TIMEOUT
+    # Read only while an output Command is bound: every model call must then call a tool (the
+    # output Command to speak, noop to do nothing). See specs/agent.md ("Forcing a tool call").
+    force_tool_call: bool = True
 
     def __post_init__(self) -> None:
         # The structural invariants the loaders enforce, applied to direct construction too, so
@@ -81,6 +84,7 @@ class AgentConfig:
         _validate_history_budget(self.history_budget, block="agent")
         _validate_context_window(self.context_window, block="agent")
         _validate_model_timeout(self.model_timeout, block="agent")
+        _validate_force_tool_call(self.force_tool_call, block="agent")
 
     @classmethod
     def from_dict(
@@ -143,6 +147,7 @@ _AGENT_OPTIONAL_COMMON = {
     "history_budget",
     "context_window",
     "model_timeout",
+    "force_tool_call",
 }
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent"}
@@ -203,6 +208,15 @@ def _validate_model_timeout(value: Any, *, block: str) -> float | None:
             f"{block}: 'model_timeout' must be a positive number of seconds or null, got {value!r}"
         )
     return float(value)
+
+
+def _validate_force_tool_call(value: Any, *, block: str) -> bool:
+    """A boolean. See specs/config.md."""
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"{block}: 'force_tool_call' must be true or false, got {value!r}"
+        )
+    return value
 
 
 def _require_str(data: dict[str, Any], key: str, *, block: str) -> str:
@@ -300,6 +314,9 @@ def _parse_agent_block(
     model_timeout = _validate_model_timeout(
         data.get("model_timeout", DEFAULT_MODEL_TIMEOUT), block=block
     )
+    force_tool_call = _validate_force_tool_call(
+        data.get("force_tool_call", True), block=block
+    )
 
     return {
         "provider": provider,
@@ -314,6 +331,7 @@ def _parse_agent_block(
         "history_budget": history_budget,
         "context_window": context_window,
         "model_timeout": model_timeout,
+        "force_tool_call": force_tool_call,
     }
 
 
