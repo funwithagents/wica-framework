@@ -275,7 +275,7 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
 
     world.update("input", "add 1 and 2")
 
-    key = "agent:command:call1"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
     entry = world.get_entry(key)
     assert entry.current.value.name == "add"
@@ -296,7 +296,7 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
     # its tool_result is a fixed ack pointing at the command entry, never the outcome
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        m.tool_call_id == "call1" and m.content == _command_ack("c1")
         for m in tool_messages
     )
     # the outcome (3) is delivered by the command's World entry, rendered into the observation
@@ -342,7 +342,7 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
 
     assert any(c["name"] == "add" for m in ai_messages for c in m.tool_calls)
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        m.tool_call_id == "call1" and m.content == _command_ack("c1")
         for m in tool_messages
     )
     # no *assistant* message renders the call as prose (the outcome lives in the observation, a
@@ -383,7 +383,7 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
     # the tool_result is the fixed ack; the failure is delivered by the command's World entry
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        m.tool_call_id == "call1" and m.content == _command_ack("c1")
         for m in tool_messages
     )
     observation = "".join(
@@ -420,7 +420,7 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
     agent.start()
 
     world.update("input", "dance for me")
-    key = "agent:command:call1"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
     wait_until(
         lambda: agent._busy is False
@@ -440,7 +440,7 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
     # its tool_result is the fixed ack, never a completed result
     tool_messages = [m for m in step2 if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        m.tool_call_id == "call1" and m.content == _command_ack("c1")
         for m in tool_messages
     )
     assert world.get_entry(key).current.value.state == "running"
@@ -477,8 +477,8 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
 
     world.update("input", "run both")
 
-    fast_key = "agent:command:fast"
-    slow_key = "agent:command:slow"
+    fast_key = "agent:command:c1"
+    slow_key = "agent:command:c2"
     wait_until(lambda: world.get_entry(slow_key).current.value.state == "running")
 
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
@@ -497,8 +497,8 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
         for m in second_call_messages
         if isinstance(m, ToolMessage)
     }
-    assert tool_contents.get("fast") == _command_ack("fast")
-    assert tool_contents.get("slow") == _command_ack("slow")
+    assert tool_contents.get("fast") == _command_ack("c1")
+    assert tool_contents.get("slow") == _command_ack("c2")
     # the mixed status is delivered by the command entries in the observation: fast completed,
     # slow was still running when this prompt was built
     observation = "".join(
@@ -570,7 +570,7 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
     # Let slow finish: its completion trigger arrives while busy and is dropped (no step runs).
     loop.call_soon_threadsafe(release_slow.set)
     wait_until(
-        lambda: world.get_entry("agent:command:slow").current.value.state == "complete"
+        lambda: world.get_entry("agent:command:c2").current.value.state == "complete"
     )
 
     # Finish step 2. fast was observed and retired by it; slow's completion was dropped, so no
@@ -579,8 +579,8 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
     assert sink.texts == ["done"]
     assert len(model.calls) == 2
-    assert _is_unregistered(world, "agent:command:fast")
-    assert world.get_entry("agent:command:slow").current.value.state == "complete"
+    assert _is_unregistered(world, "agent:command:c1")
+    assert world.get_entry("agent:command:c2").current.value.state == "complete"
 
     # A fresh input starts step 3, which observes slow: its outcome renders into that step's
     # prompt, and only then is the entry retired — the completion reaches history before it goes.
@@ -592,7 +592,7 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
         str(m.content) for m in model.calls[2] if isinstance(m, HumanMessage)
     )
     assert "Called slow() → slow-result" in step3_observation
-    wait_until(lambda: _is_unregistered(world, "agent:command:slow"))
+    wait_until(lambda: _is_unregistered(world, "agent:command:c2"))
 
     agent.stop()
 
@@ -772,7 +772,7 @@ def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, s
     world.update("input", "add them")
     assert sink.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert commands == [CommandIssued("add", {"a": 1, "b": 2}, "call1")]
+    assert commands == [CommandIssued("add", {"a": 1, "b": 2}, "c1")]
 
     agent.stop()
 
@@ -872,17 +872,17 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
 
     world.update("input", "block please")
 
-    key = "agent:command:call1"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
 
-    agent.cancel_command("call1")
+    agent.cancel_command("c1")
     wait_until(lambda: sink.event.is_set())
 
     second_call_messages = model.calls[1]
     # the tool_result is the fixed ack; the cancellation is delivered by the command's World entry
     tool_messages = [m for m in second_call_messages if isinstance(m, ToolMessage)]
     assert any(
-        m.tool_call_id == "call1" and m.content == _command_ack("call1")
+        m.tool_call_id == "call1" and m.content == _command_ack("c1")
         for m in tool_messages
     )
     observation = "".join(
@@ -915,7 +915,7 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
 
     world.update("input", "block please")
 
-    key = "agent:command:call1"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
 
     agent.stop()
@@ -967,7 +967,7 @@ def test_model_can_cancel_a_running_command(loop, world, sink):
     model = ProgrammableChatModel(
         respond=sequence(
             tool_call_response([("block_forever", {}, "target")]),
-            tool_call_response([("cancel_command", {"call_id": "target"}, "cancel1")]),
+            tool_call_response([("cancel_command", {"call_id": "c1"}, "cancel1")]),
             text_response("stopped it"),
         )
     )
@@ -979,11 +979,11 @@ def test_model_can_cancel_a_running_command(loop, world, sink):
 
     # Step 1: the model dispatches the long-running command, then the agent goes idle.
     world.update("input", "start working")
-    key = "agent:command:target"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
 
     # Step 2: a fresh input drives a step where the model observes it still running and issues
-    # cancel_command(call_id="target"). The cancellation lands as the command's World entry going
+    # cancel_command(call_id="c1"). The cancellation lands as the command's World entry going
     # terminal — the causally-correct point — and reaches the model as an observation.
     world.update("input", "actually, stop")
     _wait_for_render(model, world, "Called block_forever() → cancelled")
@@ -1013,16 +1013,16 @@ def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
     agent.start()
 
     world.update("input", "go")
-    key = "agent:command:t2"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
 
     # The model may copy the entry key verbatim; the handler strips the agent:command: prefix and
-    # still finds the running task — the "cancelling t2" result proves the lookup hit (a miss would
+    # still finds the running task — the "cancelling c1" result proves the lookup hit (a miss would
     # read "not a running command").
     future = asyncio.run_coroutine_threadsafe(
-        agent._cancel_command_action("agent:command:t2"), loop
+        agent._cancel_command_action("agent:command:c1"), loop
     )
-    assert future.result(timeout=WAIT_TIMEOUT) == "cancelling t2"
+    assert future.result(timeout=WAIT_TIMEOUT) == "cancelling c1"
     _wait_for_render(model, world, "Called block_forever() → cancelled")
 
     agent.stop()
@@ -1223,7 +1223,7 @@ def test_register_command_accepts_a_command_object(loop, world, sink):
     agent.start()
 
     world.update("input", "add them")
-    key = "agent:command:call1"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "complete")
     assert world.get_entry(key).current.value.result == "3"
 
@@ -1324,9 +1324,9 @@ def test_noop_takes_no_action_and_does_not_retrigger(loop, world, sink):
         e.key.startswith("agent:command:") for e in world.get_prompt_entries()
     )
     assert sink.texts == []
-    assert issued == [CommandIssued("noop", {}, "n1")]
+    assert issued == [CommandIssued("noop", {}, "c1")]
     assert not world.is_registered(
-        "agent:command:n1"
+        "agent:command:c1"
     )  # a call_id, but no entry behind it
     assert len(model.calls) == 1
     # History records the declined reaction as a dedicated NoReactionRecord.
@@ -1513,7 +1513,9 @@ def test_invalid_provider_call_id_gets_a_safe_world_key_but_keeps_its_message_id
     agent.stop()
 
 
-def test_colliding_provider_call_ids_get_distinct_entries(loop, world, sink):
+def test_call_ids_are_minted_in_order_whatever_the_provider_id(loop, world, sink):
+    # The model is pointed at a short id WICA mints (c1, c2, …), never the provider's: a model
+    # copying a long opaque id into cancel_command garbles it. A provider reusing an id is harmless.
     release = threading.Event()
 
     async def slow() -> str:
@@ -1521,22 +1523,70 @@ def test_colliding_provider_call_ids_get_distinct_entries(loop, world, sink):
         await asyncio.get_running_loop().run_in_executor(None, release.wait)
         return "done"
 
-    model = ProgrammableChatModel(respond=tool_call_response([("slow", {}, "same")]))
+    model = ProgrammableChatModel(
+        respond=tool_call_response([("slow", {}, "toolu_01Same")])
+    )
+    issued: list[CommandIssued] = []
     agent = make_agent(
         model, world=world, loop=loop, output_sink=sink, coalesce_window=0
     )
+    agent.on_command.subscribe(issued.append)
     agent.register_command(slow)
     world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     agent.start()
     world.update("speech", "one")
-    wait_until(lambda: world.is_registered("agent:command:same"))
+    wait_until(lambda: world.is_registered("agent:command:c1"))
+    wait_until(lambda: agent._busy is False)
     world.update("speech", "two")  # second step, same provider id, first still running
-    wait_until(lambda: len(model.calls) >= 2)
-    wait_until(lambda: len(agent._command_keys) == 2)
-    assert "agent:command:same" in agent._command_keys
+    wait_until(lambda: world.is_registered("agent:command:c2"))
+    assert [c.call_id for c in issued] == ["c1", "c2"]
+    # The native pair keeps the provider's id; its acknowledgement points at the minted one.
+    tool_messages = [m for m in model.calls[1] if isinstance(m, ToolMessage)]
+    assert [(m.tool_call_id, m.content) for m in tool_messages] == [
+        ("toolu_01Same", _command_ack("c1"))
+    ]
     release.set()
+    agent.stop()
+
+
+def test_minted_ids_count_noop_skip_taken_keys_and_survive_a_restart(loop, world, sink):
+    async def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response(
+                [(_NOOP_COMMAND_NAME, {}, "p1"), ("add", {"a": 1, "b": 2}, "p2")]
+            ),
+            text_response("three"),
+            tool_call_response([("add", {"a": 2, "b": 2}, "p3")]),
+            text_response("four"),
+        )
+    )
+    issued: list[CommandIssued] = []
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.on_command.subscribe(issued.append)
+    agent.register_command(add)
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    # Someone else already holds agent:command:c2: the Agent skips that number.
+    world.register("agent:command:c2", str, serialize_fn=identity_serialize)
+    agent.start()
+    world.update("input", "add 1 and 2")
+    wait_until(lambda: sink.texts == ["three"])
+    agent.stop()
+    agent.start()
+    world.update("input", "add 2 and 2")
+    wait_until(lambda: sink.texts == ["three", "four"])
+    assert [(c.name, c.call_id) for c in issued] == [
+        (_NOOP_COMMAND_NAME, "c1"),
+        ("add", "c3"),
+        ("add", "c4"),
+    ]
     agent.stop()
 
 
@@ -1947,7 +1997,7 @@ def test_command_finishing_after_the_world_stopped_does_not_raise(loop, world, s
     agent.register_command(finish_late)
     agent.start()
     world.update("input", "go")
-    key = "agent:command:late1"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
     task = agent._running_tasks[key]
 
@@ -3104,7 +3154,7 @@ def test_command_outcome_still_renders_after_its_dispatch_was_cut(loop, world, s
     agent.start()
 
     world.update("input", "dance")
-    key = "agent:command:call1"
+    key = "agent:command:c1"
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
     wait_until(lambda: agent._busy is False)
     world.update(

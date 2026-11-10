@@ -24,7 +24,7 @@ The function's name is the tool's name, its docstring the description the model 
 
 ## What happens when the model calls one
 
-Every issued Command runs as an asyncio task on the Wica's loop and is tracked as a World entry **`agent:command:<call_id>`**, whose value is a `CommandExecution` (`name`, `args`, `state`, `result`, `error`). It reads `running` while in flight and turns `complete`, `failed` (the function raised; the error text is the model's observation) or `cancelled`.
+Every issued Command runs as an asyncio task on the Wica's loop and is tracked as a World entry **`agent:command:<call_id>`**, where `call_id` is a short id WICA numbers itself (`c1`, `c2`, … over the Agent's lifetime, never the provider's tool-call id), and whose value is a `CommandExecution` (`name`, `args`, `state`, `result`, `error`). It reads `running` while in flight and turns `complete`, `failed` (the function raised; the error text is the model's observation) or `cancelled`.
 
 The model receives an immediate acknowledgement that the Command was **dispatched**, not its result: the result arrives later, when the entry turns terminal, as an observation in a new reasoning step. The runtime primer tells the model so. Two consequences:
 
