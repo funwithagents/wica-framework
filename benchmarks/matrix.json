@@ -101,18 +101,18 @@
             {
               "tool_calls": [
                 {
-                  "name": "say",
-                  "args": {
-                    "text": "Yes!"
-                  }
+                  "name": "noop",
+                  "args": {}
                 }
               ]
             },
             {
               "tool_calls": [
                 {
-                  "name": "noop",
-                  "args": {}
+                  "name": "say",
+                  "args": {
+                    "text": "Yes!"
+                  }
                 }
               ]
             },
