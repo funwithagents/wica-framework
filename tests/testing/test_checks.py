@@ -226,11 +226,16 @@ def test_no_failed_reactions_cites_the_outcome_and_error():
 # --- no_colliding_cancel ----------------------------------------------------------------------
 
 
-def _cancel_reaction(other: str | None) -> list[SutEvent]:
-    calls = ["k1"] + (["o1"] if other else [])
-    events = [_issued(0.5, "cancel_command", "k1")]
-    if other:
-        events.append(_issued(0.5, other, "o1"))
+def _cancel_reaction(
+    target: str, *others: str, target_id: str = "d1"
+) -> list[SutEvent]:
+    """`target` running as d1, then one reaction cancelling *target_id* beside *others*."""
+    calls = ["k1"] + [f"o{i}" for i, _ in enumerate(others)]
+    events = [
+        _ev("command_state", 0.1, name=target, call_id="d1", state="running"),
+        _issued(0.5, "cancel_command", "k1", call_id=target_id),
+    ]
+    events += [_issued(0.5, other, f"o{i}") for i, other in enumerate(others)]
     events.append(
         _ev(
             "reaction_ended",
@@ -241,12 +246,24 @@ def _cancel_reaction(other: str | None) -> list[SutEvent]:
     return events
 
 
-def test_no_colliding_cancel_broken_only_by_another_action_in_the_same_reaction():
-    collided = _check("no_colliding_cancel", _cancel_reaction("dance"))
-    assert not collided.ok and "['dance']" in collided.detail
-    assert _check("no_colliding_cancel", _cancel_reaction(None)).ok
-    # "Okay, stopping" while cancelling is what a person does: the output Command is allowed.
-    assert _check("no_colliding_cancel", _cancel_reaction("say")).ok
+def test_no_colliding_cancel_broken_only_by_a_new_call_of_the_cancelled_command():
+    collided = _check("no_colliding_cancel", _cancel_reaction("dance", "dance"))
+    assert (
+        not collided.ok and "cancelled dance and issued dance again" in collided.detail
+    )
+    assert _check("no_colliding_cancel", _cancel_reaction("dance")).ok
+    # A harmless action beside the cancel races with nothing; cutting off a speech to say "okay,
+    # stopping" is what a person does: neither collides.
+    assert _check("no_colliding_cancel", _cancel_reaction("dance", "set_emotion")).ok
+    assert _check("no_colliding_cancel", _cancel_reaction("dance", "say")).ok
+    assert _check("no_colliding_cancel", _cancel_reaction("say", "say")).ok
+
+
+def test_no_colliding_cancel_resolves_a_prefixed_target_and_skips_an_unknown_one():
+    prefixed = _cancel_reaction("dance", "dance", target_id="agent:command:d1")
+    assert not _check("no_colliding_cancel", prefixed).ok
+    unknown = _cancel_reaction("dance", "dance", target_id="toolu_gone")
+    assert _check("no_colliding_cancel", unknown).ok
 
 
 # --- the step checks: judged over the window of their input -------------------------------------
