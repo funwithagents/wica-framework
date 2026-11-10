@@ -1,0 +1,12 @@
+{
+  "name": "long_answer",
+  "description": "A long text goes into one tool call: a story of about 250 words written to the notebook, marked (long) by write_note from 150 words. Fails on an output cap cutting the model off before its tool call, a timeout, or truncated arguments.",
+  "timeout_s": 150,
+  "checks": ["no_noop_on_input", "no_failed_reactions"],
+  "steps": [
+    {"input": {"speech_input": "Please write a story of about 250 words about a lighthouse keeper into your notebook."}},
+    {"check": {"acts_when_asked": "write_note"}},
+    {"expect": {"action": "write_note", "state": "complete", "result_contains": "(long)"}, "within": 60},
+    {"wait": "idle", "within": 30}
+  ]
+}

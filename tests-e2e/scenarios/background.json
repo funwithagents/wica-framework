@@ -1,0 +1,11 @@
+{
+  "name": "background",
+  "description": "A background change addressed to no one wakes the robot, which stays silent and settles. Fails when the robot speaks at an observation that needs nothing (a noop or primer regression).",
+  "timeout_s": 120,
+  "checks": ["no_failed_reactions"],
+  "steps": [
+    {"input": {"ambient_sound": "the air conditioning switches on with a low hum"}},
+    {"check": "quiet_on_background_change"},
+    {"wait": "idle", "within": 30}
+  ]
+}

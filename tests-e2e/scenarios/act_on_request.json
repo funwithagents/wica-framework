@@ -1,0 +1,12 @@
+{
+  "name": "act_on_request",
+  "description": "A request for an action calls that Command, which runs to completion, and the robot settles. Fails on tools not bound or a broken forced binding.",
+  "timeout_s": 120,
+  "checks": ["no_noop_on_input", "no_failed_reactions"],
+  "steps": [
+    {"input": {"speech_input": "Can you dance for me?"}},
+    {"check": {"acts_when_asked": "dance"}},
+    {"expect": {"action": "dance", "state": "complete"}, "within": 30},
+    {"wait": "idle", "within": 30}
+  ]
+}
