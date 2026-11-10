@@ -1,6 +1,6 @@
 # Live e2e set as a regression gate
 
-**Status:** In progress
+**Status:** Done
 
 Turn the live e2e set into a regression alarm for the behaviours WICA promises ([specs/testing.md](../specs/testing.md) "The live set as a regression gate", [specs/ci.md](../specs/ci.md)), after two framework fixes it depends on: WICA-minted call ids ([specs/commands.md](../specs/commands.md), [specs/agent.md](../specs/agent.md)) and a narrower `no_colliding_cancel` ([specs/wica-tester.md](../specs/wica-tester.md)). Background and the maintainer's decisions: `analysis/_e2e-improvements.md` (2026-11-10).
 
@@ -54,4 +54,4 @@ Vetting, 2026-11-10 (the whole `test_robot.py` per provider: 7 focused steps + 7
 
 Mean model call over the gate: haiku 1.10 s, gpt-4o 1.39 s, gpt-oss 0.53 s, flash-lite 1.01 s, ministral-14b 1.12 s. Before switching Mistral, `ministral-14b-latest` (added to the benchmark matrix) and `mistral-small-latest` were benchmarked at k = 5 on the demo: compliance 100% (one `quiet_on_background_change` miss) vs 84%.
 
-The history-cut check passed on every provider in every run. CI: see the pull request.
+The history-cut check passed on every provider in every run. CI on the branch (PR #16): every job green, the five `live` jobs included, with their `live-reports-<provider>` artifacts; a Windows-only timing flake in a pre-existing harness test (a 0.2 s wait measured as 0.187 s) was fixed with one clock tick of slack.

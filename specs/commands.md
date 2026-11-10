@@ -9,7 +9,7 @@ tests:
 
 # Commands
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 
