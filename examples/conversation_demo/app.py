@@ -100,8 +100,10 @@ def _maybe_enable_console_traces() -> None:
 
 def _speech(value: Any, previous: Any) -> Content:
     if value is None:
-        return [TextPart("The person hasn't said anything to you yet.")]
-    return [TextPart(f'The closest person just said to you: "{value}"')]
+        return [TextPart("You haven't heard anyone say anything to you yet.")]
+    # Who spoke is not known — speech arrives without a speaker, so this must not claim it came
+    # from the closest person (which contradicts an empty closest_user and makes models wait).
+    return [TextPart(f'You hear someone saying to you: "{value}"')]
 
 
 def _closest_user(value: Any, previous: Any) -> Content:
