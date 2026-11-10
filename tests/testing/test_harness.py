@@ -338,7 +338,8 @@ def test_wait_for_running_and_speaking_hold_once_started_since_the_last_input(
         assert "no output Command" in run.wait_for("speaking", within=0.1).detail
         started = time.monotonic()
         assert run.wait_for({"seconds": 0.2}).ok
-        assert time.monotonic() - started >= 0.2
+        # One tick of slack: Windows' monotonic clock moves in ~15.6 ms steps (specs/ci.md).
+        assert time.monotonic() - started >= 0.2 - 0.016
     finally:
         run.close()
         sut.close()
