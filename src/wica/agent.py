@@ -498,7 +498,14 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
             task="text-generation",
             **endpoint_kwargs,
         )
-        return ChatHuggingFace(llm=endpoint)
+        chat = ChatHuggingFace(llm=endpoint)
+        if "max_new_tokens" not in config.model_kwargs:
+            # HuggingFaceEndpoint caps output at 512 tokens by default and ChatHuggingFace copies
+            # that cap into every request; a reasoning model is cut off before its tool call. Unset,
+            # the request carries no cap and the backend's own limit applies, as with the other
+            # providers. See specs/config.md ("Providers").
+            chat.max_tokens = None
+        return chat
 
     model_kwargs = dict(config.model_kwargs)
     if api_key is not None:

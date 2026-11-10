@@ -712,10 +712,12 @@ def test_build_chat_model_huggingface_hub_omits_token_when_no_api_key(
         def __init__(self, **kwargs: Any) -> None:
             captured["endpoint"] = kwargs
 
+    class FakeChat:
+        def __init__(self, *, llm: Any) -> None:
+            pass
+
     monkeypatch.setattr(langchain_huggingface, "HuggingFaceEndpoint", FakeEndpoint)
-    monkeypatch.setattr(
-        langchain_huggingface, "ChatHuggingFace", lambda *, llm: object()
-    )
+    monkeypatch.setattr(langchain_huggingface, "ChatHuggingFace", FakeChat)
 
     config = AgentConfig(
         provider="huggingface-hub", model="meta-llama/x", system_prompt="hi"
@@ -726,6 +728,34 @@ def test_build_chat_model_huggingface_hub_omits_token_when_no_api_key(
     # env var (mirrors how the init_chat_model providers behave when api_key is unset).
     assert "huggingfacehub_api_token" not in captured["endpoint"]
     assert captured["endpoint"]["provider"] == "auto"
+
+
+def _hub_request_params(model_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The parameters a real ChatHuggingFace (built offline) sends with each Hub request."""
+    from langchain_huggingface import ChatHuggingFace
+
+    model = agent_module.build_chat_model(
+        AgentConfig(
+            provider="huggingface-hub",
+            model="openai/gpt-oss-120b",
+            hf_provider="cerebras",
+            api_key="hf_test",
+            system_prompt="hi",
+            model_kwargs=model_kwargs,
+        )
+    )
+    assert isinstance(model, ChatHuggingFace)
+    return model._default_params  # pyright: ignore[reportPrivateUsage]
+
+
+def test_build_chat_model_huggingface_hub_sends_no_output_cap_by_default():
+    """HuggingFaceEndpoint's 512-token default would cut a reasoning model off before its tool
+    call; unless the config sets one, the request carries no cap. See specs/config.md."""
+    assert "max_tokens" not in _hub_request_params({})
+
+
+def test_build_chat_model_huggingface_hub_keeps_a_configured_output_cap():
+    assert _hub_request_params({"max_new_tokens": 300})["max_tokens"] == 300
 
 
 # --- Direct-construction invariants and frozen configs ---------------------------
