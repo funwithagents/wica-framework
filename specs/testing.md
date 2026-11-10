@@ -130,7 +130,7 @@ Each step's run writes its own report under `--wica-report-dir`.
 
 ### What fails
 
-**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped.
+**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped — `KNOWN_FLAKY` in `tests-e2e/test_robot.py`, which holds today (huggingface-hub, background) and (mistralai, background): both models, woken by a background sound, sometimes check in or repeat the previous request instead of calling `noop`.
 
 ### Alongside the steps
 
@@ -138,13 +138,15 @@ Each step's run writes its own report under `--wica-report-dir`.
 
 The committed configs and their key env vars:
 
-| Config | Provider | Key env var |
-|---|---|---|
-| `tests-e2e/e2e.anthropic.config.json` | `anthropic` | `WICA_ANTHROPIC_API_KEY` |
-| `tests-e2e/e2e.openai.config.json` | `openai` | `WICA_OPENAI_API_KEY` |
-| `tests-e2e/e2e.huggingface-hub.config.json` | `huggingface-hub` | `WICA_HF_TOKEN` |
-| `tests-e2e/e2e.google-genai.config.json` | `google_genai` | `WICA_GEMINI_API_KEY` |
-| `tests-e2e/e2e.mistralai.config.json` | `mistralai` | `WICA_MISTRAL_API_KEY` |
+| Config | Provider | Model | Key env var |
+|---|---|---|---|
+| `tests-e2e/e2e.anthropic.config.json` | `anthropic` | `claude-haiku-4-5` | `WICA_ANTHROPIC_API_KEY` |
+| `tests-e2e/e2e.openai.config.json` | `openai` | `gpt-4o` | `WICA_OPENAI_API_KEY` |
+| `tests-e2e/e2e.huggingface-hub.config.json` | `huggingface-hub` | `openai/gpt-oss-120b` on `cerebras` | `WICA_HF_TOKEN` |
+| `tests-e2e/e2e.google-genai.config.json` | `google_genai` | `gemini-3.5-flash-lite` | `WICA_GEMINI_API_KEY` |
+| `tests-e2e/e2e.mistralai.config.json` | `mistralai` | `ministral-14b-latest` | `WICA_MISTRAL_API_KEY` |
+
+**The models are chosen for the gate**, by running its steps at least three times on each candidate: a gate model must show the promised behaviours reliably, or the gate goes red on noise. `gemini-3.8-flash` was replaced by `gemini-3.5-flash-lite` (the former hit the 10 s `model_timeout` twice on long texts; the latter passed 45/45 at about 1 s a call), `ministral-8b` by `ministral-14b-latest` (the former ran away in the conversation in every run; the latter passed 44/45). Which models an application should use is the benchmark's question, not this table's.
 
 The provider/extra surface these configs select from is specced in [config.md](config.md) ("Providers") and packaged as install-time extras per [project.md](project.md) ("Provider integrations are optional extras").
 

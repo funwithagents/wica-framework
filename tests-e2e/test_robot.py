@@ -41,7 +41,27 @@ STEPS = [
 ]
 CONVERSATION_HISTORY_REACTIONS = 4
 
+# (config stem, step) pairs a committed model does not pass reliably, found while vetting a step
+# (at least three runs by hand on every model): xfail(strict=False) with the reason, never dropped.
+# Remove a pair once its model passes the step reliably. See specs/testing.md ("What fails").
+KNOWN_FLAKY: dict[tuple[str, str], str] = {
+    ("e2e.huggingface-hub.config", "background"): (
+        "gpt-oss-120b speaks when a background sound wakes it (3 of 6 attempts, 2026-11-10): "
+        "it checks in or follows up the previous turn instead of calling noop"
+    ),
+    ("e2e.mistralai.config", "background"): (
+        "ministral-14b, woken by a background sound right after the dance step, dances again "
+        "(1 of 6 attempts, 2026-11-10): it takes the wake as a cue to repeat the last request"
+    ),
+}
+
 WriteReport = Callable[[Report], None]
+
+
+def mark_known_flaky(request: pytest.FixtureRequest, label: str, step: str) -> None:
+    reason = KNOWN_FLAKY.get((label, step))
+    if reason is not None:
+        request.applymarker(pytest.mark.xfail(reason=reason, strict=False))
 
 
 def _failure(report: Report) -> str:
@@ -67,7 +87,13 @@ def test_every_step_has_its_scenario_file() -> None:
 
 @pytest.mark.parametrize("step", STEPS)
 @pytest.mark.parametrize("config_path", PROVIDER_CONFIGS, ids=lambda p: p.stem)
-def test_step(config_path: Path, step: str, write_report: WriteReport) -> None:
+def test_step(
+    config_path: Path,
+    step: str,
+    write_report: WriteReport,
+    request: pytest.FixtureRequest,
+) -> None:
+    mark_known_flaky(request, config_path.stem, step)
     wica = build_robot(config_path)
     try:
         run, report = play(wica, step, config_path.stem, write_report)
@@ -92,7 +118,10 @@ class Conversation:
     def _on_prompt(self, messages: list[BaseMessage]) -> None:
         self.prompt_sizes.append(len(messages))
 
-    def step(self, step: str, write_report: WriteReport) -> None:
+    def step(
+        self, step: str, write_report: WriteReport, request: pytest.FixtureRequest
+    ) -> None:
+        mark_known_flaky(request, self.label, step)
         self._settle()
         self.steps_played += 1
         # Kept, passed or failed: the next step settles on it.
@@ -143,28 +172,61 @@ class TestConversation:
         finally:
             conversation.close()
 
-    def test_greeting(self, conversation: Conversation, write_report: WriteReport):
-        conversation.step("greeting", write_report)
+    def test_greeting(
+        self,
+        conversation: Conversation,
+        write_report: WriteReport,
+        request: pytest.FixtureRequest,
+    ):
+        conversation.step("greeting", write_report, request)
 
     def test_act_on_request(
-        self, conversation: Conversation, write_report: WriteReport
+        self,
+        conversation: Conversation,
+        write_report: WriteReport,
+        request: pytest.FixtureRequest,
     ):
-        conversation.step("act_on_request", write_report)
+        conversation.step("act_on_request", write_report, request)
 
-    def test_background(self, conversation: Conversation, write_report: WriteReport):
-        conversation.step("background", write_report)
+    def test_background(
+        self,
+        conversation: Conversation,
+        write_report: WriteReport,
+        request: pytest.FixtureRequest,
+    ):
+        conversation.step("background", write_report, request)
 
-    def test_long_answer(self, conversation: Conversation, write_report: WriteReport):
-        conversation.step("long_answer", write_report)
+    def test_long_answer(
+        self,
+        conversation: Conversation,
+        write_report: WriteReport,
+        request: pytest.FixtureRequest,
+    ):
+        conversation.step("long_answer", write_report, request)
 
-    def test_interrupt(self, conversation: Conversation, write_report: WriteReport):
-        conversation.step("interrupt", write_report)
+    def test_interrupt(
+        self,
+        conversation: Conversation,
+        write_report: WriteReport,
+        request: pytest.FixtureRequest,
+    ):
+        conversation.step("interrupt", write_report, request)
 
-    def test_memory(self, conversation: Conversation, write_report: WriteReport):
-        conversation.step("memory", write_report)
+    def test_memory(
+        self,
+        conversation: Conversation,
+        write_report: WriteReport,
+        request: pytest.FixtureRequest,
+    ):
+        conversation.step("memory", write_report, request)
 
-    def test_goodbye(self, conversation: Conversation, write_report: WriteReport):
-        conversation.step("goodbye", write_report)
+    def test_goodbye(
+        self,
+        conversation: Conversation,
+        write_report: WriteReport,
+        request: pytest.FixtureRequest,
+    ):
+        conversation.step("goodbye", write_report, request)
 
     def test_history_was_cut(self, conversation: Conversation):
         """With `history_reactions = 4` the conversation outgrows the window several times: some

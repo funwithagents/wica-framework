@@ -40,4 +40,18 @@ Turn the live e2e set into a regression alarm for the behaviours WICA promises (
 
 ## Results
 
-_To fill in: vetting runs per provider and step, what was flaky, the CI runs._
+Vetting, 2026-11-10 (the whole `test_robot.py` per provider: 7 focused steps + 7 conversation steps + the history-cut check):
+
+| Provider / model | Runs | Result | What failed |
+|---|---|---|---|
+| Anthropic `claude-haiku-4-5` | 3 | 45/45 | — |
+| OpenAI `gpt-4o` | 3 | 45/45 | — |
+| Hugging Face `gpt-oss-120b` | 3 | 42/45 | Background ×3 (focused 1, conversation 2): speaks when woken by the sound → `xfail` |
+| Gemini `gemini-3.8-flash` | 3 | 43/45 | `model_timeout` (> 10 s) ×2 on long texts → replaced |
+| Gemini **`gemini-3.5-flash-lite`** | 3 | 45/45 | — (≈ 85 s per round, 1.0 s mean per call) |
+| Mistral `ministral-8b-latest` | 3 | 40/45 | runaway chains in the conversation, every run → replaced |
+| Mistral **`ministral-14b-latest`** | 3 | 44/45 | Background ×1 (conversation): dances again when woken → `xfail` |
+
+Mean model call over the gate: haiku 1.10 s, gpt-4o 1.39 s, gpt-oss 0.53 s, flash-lite 1.01 s, ministral-14b 1.12 s. Before switching Mistral, `ministral-14b-latest` (added to the benchmark matrix) and `mistral-small-latest` were benchmarked at k = 5 on the demo: compliance 100% (one `quiet_on_background_change` miss) vs 84%.
+
+The history-cut check passed on every provider in every run. CI: see the pull request.
