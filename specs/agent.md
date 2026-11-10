@@ -7,7 +7,7 @@ tests:
 
 # Agent
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -81,8 +81,8 @@ History is an ordered list of four record kinds:
 |---|---|---|
 | Observation | `entries: list[ObservedEntry]` | Each `ObservedEntry` is the `WorldEntry` snapshot **plus the `serialize_fn` and `archival_serialize_fn` that governed it at observation time** (captured via `World.get_prompt_snapshot()`); history renders through these captured serializers, never through the World's live registration, so an observation renders identically after the key is unregistered or re-registered. Captures the full `include_in_prompt` bundle at step start, not just the entry that fired (see above) |
 | Assistant text | `text: str` | The model's own free-text output for a step — the v1 utterance delivered to the output sink |
-| Command | `call_id: str`, `tool_call_id: str`, `name: str`, `args: dict[str, Any]` | Written at dispatch time, before the result is known — no `result` field here; the result surfaces later via a subsequent Observation record once the Command's World entry goes terminal, not by mutating this record. `tool_call_id` is the provider's id (used to reconstruct the native call) while `call_id` is the World-key suffix and `cancel_command` target — equal in the common case (see [commands.md](commands.md)) (code: `CommandRecord`) |
-| No-reaction | `call_id: str`, `tool_call_id: str` | Written when the model issues `noop` — its explicit "I chose not to act" (see [commands.md](commands.md), "`noop`"). A **dedicated** record, *not* a `CommandRecord`: `noop` is not a World action, so it has no `name`/`args` to record and never becomes an Observation outcome. It exists only to keep the provider message stream valid and to show the declined reaction in context. `tool_call_id` is the provider's id while `call_id` is the World-key suffix, equal in the common case (code: `NoReactionRecord`) |
+| Command | `call_id: str`, `tool_call_id: str`, `name: str`, `args: dict[str, Any]` | Written at dispatch time, before the result is known — no `result` field here; the result surfaces later via a subsequent Observation record once the Command's World entry goes terminal, not by mutating this record. `tool_call_id` is the provider's id (used to reconstruct the native call) while `call_id` is the World-key suffix and `cancel_command` target, a short id WICA mints (`c1`, `c2`, … — see [commands.md](commands.md), "Command execution as a World entry") (code: `CommandRecord`) |
+| No-reaction | `call_id: str`, `tool_call_id: str` | Written when the model issues `noop` — its explicit "I chose not to act" (see [commands.md](commands.md), "`noop`"). A **dedicated** record, *not* a `CommandRecord`: `noop` is not a World action, so it has no `name`/`args` to record and never becomes an Observation outcome. It exists only to keep the provider message stream valid and to show the declined reaction in context. `tool_call_id` is the provider's id while `call_id` is the WICA-minted id (`c<n>`) (code: `NoReactionRecord`) |
 
 All four are immutable once created; history grows only at its tail — no record is ever edited after creation, including the Command record once its result is known. The only other mutation is the **history window** cutting whole reactions off the *head* (below); it never touches or reorders what it keeps.
 

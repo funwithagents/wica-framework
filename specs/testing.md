@@ -8,16 +8,19 @@ code:
   - tests-e2e/e2e.huggingface-hub.config.json
   - tests-e2e/e2e.google-genai.config.json
   - tests-e2e/e2e.mistralai.config.json
+  - tests-e2e/robot_app.py
+  - tests-e2e/scenarios
 tests:
   - tests-e2e/test_smoke.py
   - tests-e2e/test_wica.py
+  - tests-e2e/test_robot.py
   - tests-e2e/test_fake_flows.py
   - tests-e2e/test_example_flow.py
 ---
 
 # Testing
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -40,7 +43,7 @@ Tests split into two directories, and the split is structural — a directory bo
 
 **On CI** ([ci.md](ci.md)) the split carries over as jobs: the fast tier on every pull request and every supported platform, the scripted-fake flows on every pull request, the live set on pushes to `main` with the repository's keys.
 
-The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_command.py`, `test_config.py`, `test_content.py`, `test_events.py`, `test_fake_model.py`, `test_wica.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_wica.py`, `test_fake_flows.py`) rather than modules. The runnable **example** is tested the same way, one tier per grain: its presenter logic in the fast tier (`tests/test_conversation_demo.py`) and its whole wiring end-to-end in the full-loop tier (`tests-e2e/test_example_flow.py`, an always-run scripted-fake flow — see below). Both are governed by [conversation-demo.md](conversation-demo.md), so they sit outside the `src/wica`-module-mirroring rule; importing the `examples` package under pytest is what `pyproject.toml`'s `pythonpath = ["."]` enables.
+The two tiers mirror the structure of what they exercise: `tests/` mirrors the `src/wica/` module layout (`test_world.py`, `test_agent.py`, `test_command.py`, `test_config.py`, `test_content.py`, `test_events.py`, `test_fake_model.py`, `test_wica.py`, plus the `test_project_map.py` drift-guard), while `tests-e2e/` is organized around whole-loop scenarios (`test_smoke.py`, `test_wica.py`, `test_robot.py`, `test_fake_flows.py`) rather than modules. The runnable **example** is tested the same way, one tier per grain: its presenter logic in the fast tier (`tests/test_conversation_demo.py`) and its whole wiring end-to-end in the full-loop tier (`tests-e2e/test_example_flow.py`, an always-run scripted-fake flow — see below). Both are governed by [conversation-demo.md](conversation-demo.md), so they sit outside the `src/wica`-module-mirroring rule; importing the `examples` package under pytest is what `pyproject.toml`'s `pythonpath = ["."]` enables.
 
 ## Always-run scripted-fake flows
 
@@ -75,7 +78,63 @@ The live e2e set is **parametrized over one committed config per provider**, not
 - **A provider's rate limit skips, too.** A key that is set but rate-limited or out of quota says nothing about the code, yet it fails the call. A `pytest_runtest_call` wrapper in `tests-e2e/conftest.py` therefore turns a test failure into a skip when an HTTP 429 sits in the chain of the raised exception **or of any exception logged under the `wica` logger while the test ran** — the Agent catches a failed model call and logs it (`model call failed; step abandoned`), so in a `Wica`-driven test the 429 surfaces only as an expectation that timed out. The check is duck-typed over the providers' SDKs (`status_code`, `code`, `response.status_code` equal to 429; none is imported), as tts-engine's is; any other failure still fails, and the skip reason carries the provider's message, so `-rs` shows it. A test that failed for another reason while a 429 was also logged skips too — accepted, since the provider then failed a call of that test anyway.
 - **Filter to one provider with `-k <provider>`.** Because the configs are named symmetrically, the provider name matches its config-filename stem, so `-k openai` runs just that one.
 - **The live cases run on the `wica.testing` Harness** and can keep one JSON report per test per provider (`--wica-report-dir`) — see [wica-tester.md](wica-tester.md), "Relation to existing tests". Their assertions stay behavioral; no latency threshold is added.
+- **A missing key can be made to fail.** With `WICA_E2E_FAIL_ON_MISSING=1` in the environment (CI's `live` job sets it — [ci.md](ci.md) "Secrets"), a config whose key env var is unset **fails** its tests instead of skipping, so the job cannot go green with a provider silently untested. A local run without the variable keeps skipping. The name and meaning are `wica-interaction`'s. A rate-limited key still skips (below): that is the account's state, not a missing secret.
 - **The live set is not linked to the benchmark.** It is a fixed, scoped list — `PROVIDER_CONFIGS`, one committed config per provider — and nothing in it is parametrized over the benchmark's matrix (`benchmarks/matrix.json`), which lives its own life ([benchmark.md](benchmark.md) "Testing"). The benchmark's models are exercised by running the benchmark (`python -m benchmarks.bench --k N`); its code is covered key-less by `tests-e2e/test_demo_bench_fake.py`.
+
+## The live set as a regression gate
+
+The live set's job is to turn `main` red when a change breaks a behaviour the framework promises, on a real provider, and to say which. It is **not** the benchmark ([benchmark.md](benchmark.md)): the benchmark compares models over *k* runs with no threshold, hard and ambiguous cases included; the gate runs **once per committed model** and fails on a single bad run, so it holds only clear-cut behaviours every committed model reliably shows.
+
+### The SUT: a test robot
+
+The gate's steps run against a **dedicated test app**, `tests-e2e/robot_app.py`: a social robot about as rich as the conversation demo, so the model faces a realistic World and Command list, not a two-tool toy. It is not the demo and imports nothing from `examples/`, so a demo change cannot turn `main` red. No image Input.
+
+| Kind | Name | Triggers | Role |
+|---|---|---|---|
+| Input | `speech_input` | yes | what someone says to the robot |
+| Input | `closest_user` | yes | who stands closest (empty: no one) |
+| Input | `ambient_sound` | yes | a background change addressed to no one |
+| Input | `people_present`, `battery_level`, `time_of_day` | no | ordinary context |
+| State | `emotion`, `tracked_user` | no | written by the Commands |
+| Output Command | `say(text)` | | speech: takes time in proportion to its words, up to a cap, and is cancellable |
+| Command | `set_emotion`, `switch_user_tracking`, `look_at`, `wave` | | short expressive actions |
+| Command | `dance` | | a few seconds, cancellable |
+| Command | `write_note(title, text)` | | saves a note; its result names the word count, marked `(long)` from 150 words |
+
+`say` is a fake: no TTS, it waits and completes. Only the Interrupt step needs that wait (the running `say` must outlast the model's reaction to "Stop"); every other step speaks a sentence or two. Long output goes through `write_note`, not `say`: the failure it guards against — a reasoning model cut off by an output cap before its tool call — is about tool arguments, not speech. Each `Wica` is set up as a person (`u1`) walking up: the app writes its context and `closest_user`, then waits for the robot to settle **before** the step's own `TestRun` begins, so that first reaction is not judged.
+
+### The steps
+
+Each behaviour is one **scenario file** in `tests-e2e/scenarios/`, in the format of [wica-tester.md](wica-tester.md) "Scenarios" — the benchmark's format, so the gate and the benchmark judge "correct" with the same expects and checks. One file per behaviour, so a stopped scenario stops only that behaviour's test.
+
+| Step | The input | Fails when | Guards against |
+|---|---|---|---|
+| `greeting` | "Hello!" | no `say`, or no settle | replies in plain text; reply loops |
+| `act_on_request` | "Can you dance for me?" | `dance` not called or not completed | tools not bound, a broken forced binding |
+| `background` | an `ambient_sound` change | `say` issued | speaking at every observation (a `noop` or primer regression) |
+| `long_answer` | a request for a ~300-word story in the notebook | no `write_note` marked `(long)`, a failed or empty reaction | an output cap before the tool call, timeouts, truncated arguments |
+| `interrupt` | a request for a long story; once `say` runs and the Agent is ready, "Stop, please." | no `cancel_command`, or a colliding one | cancellation, or the visibility of running Commands, breaking |
+| `memory` | "My name is Alex." → settled → "What's my name?" | the reply lacks "Alex" | history rendering, caching changes |
+| `goodbye` | "Goodbye!" | no `say`, or no settle | — |
+
+Every step carries `no_failed_reactions`; the steps that address the robot carry `answers_each_input` and `no_noop_on_input`; each step ends on `wait idle within 30` — **30 s to settle**, so a runaway chain of steps fails fast instead of at a test timeout.
+
+### Two kinds of test, written once
+
+`tests-e2e/test_robot.py` plays the same step files two ways, parametrized over `PROVIDER_CONFIGS`:
+
+- **Focused tests**, one per (provider, step), each on a **fresh** robot: a quick diagnostic that names the behaviour that broke.
+- **A conversation per provider** (`TestConversation`): the steps in the order above as one test each, on **one** robot, run with **`history_reactions = 4`** so the history is cut several times during it. A step plays on its own `TestRun` (a scenario ends its run), attached to the shared `Wica`; before it, the previous step's run waits for the robot to settle and anything a failed step left running is cancelled, so one failure does not take the next step with it. No step relies on an earlier one: `-k` on a single step runs it alone. After the last step the conversation asserts that **a history cut happened** — some prompt held fewer messages than the one before it — which checks the cut against a real provider without asking the model to show it. Recall across a cut is **not** tested: state that must outlive the window belongs in a World entry ([agent.md](agent.md), "History window").
+
+Each step's run writes its own report under `--wica-report-dir`.
+
+### What fails
+
+**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped.
+
+### Alongside the steps
+
+`test_wica.py` keeps the cases the robot does not cover: `test_plain_text_round_trip` (a reply in free text, no output Command) and `test_noop_empty_reaction_live` (`noop` with **no** output Command, so not forced). `test_smoke.py` checks the model answers at all. The two cases it held before are steps now: the voice-persona output-Command case is `greeting`, the tool-calling round trip is `act_on_request`.
 
 The committed configs and their key env vars:
 
@@ -98,5 +157,5 @@ The provider/extra surface these configs select from is specced in [config.md](c
 
 ## Open questions
 
-1. **e2e assertion depth.** The live tests assert coarse behavior (non-empty output, a Command was invoked). Whether richer live assertions are worth their flakiness/cost — or whether a recorded-cassette approach (replaying captured provider responses in the fast tier) would cover more without the live tax — is unexplored.
+1. **e2e assertion depth.** ~~The live tests assert coarse behavior.~~ The gate's steps (above) assert the framework's promised behaviours with the benchmark's expects and checks. Whether a recorded-cassette approach (replaying captured provider responses in the fast tier) would cover more without the live tax is unexplored.
 2. **Provider matrix growth.** `PROVIDER_CONFIGS` lists the three providers WICA supports today. As providers are added (or the extras change), the parametrization grows with them; there's no automated check that every supported provider has a committed e2e config — nor that CI's `live` job maps a secret for each ([ci.md](ci.md) "Secrets") — so that pairing is kept honest by hand for now.

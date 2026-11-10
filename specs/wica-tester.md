@@ -206,7 +206,7 @@ The built-in checks are generic: they hold for any WICA agent because the runtim
 | `answers_each_input` | — | a write to a triggering Input whose trigger was observed is never answered through the output Command before the next such write. Writes one reaction saw together (coalesced) count once; a dropped write counts with the step that saw it |
 | `no_noop_on_input` | — | a reaction triggered by a write to an Input ends in `noop` alone |
 | `no_failed_reactions` | — | a reaction ends with `outcome != "ok"` (model error, empty response) |
-| `no_colliding_cancel` | — | a reaction issues `cancel_command` together with another *action*. The output Command is allowed alongside: "okay, stopping" while cancelling is what a person does |
+| `no_colliding_cancel` | — | a reaction cancels a Command and, in the same response, issues a new call of that same Command (`cancel_command` on a running `dance` plus `dance`): the two race, since a response's Commands start at once. Any other action beside the cancel is not a collision (a `set_emotion`), and neither is a new call of the **output Command**: cutting off a speech to say "okay, stopping" is what a person does. The target is the Command whose `call_id` the cancel names (bare or as `agent:command:<call_id>`), resolved from the window's events; a target the window does not name is not judged |
 | `cancels_when_asked` | — | `cancel_command` is never issued |
 | `acts_when_asked` | a Command name, or `{<Command>: {<arg>: <value>}}` | the Command (with those args) is never issued |
 | `quiet_on_background_change` | — | the output Command is issued: the SUT commented on a change it was not asked about |
