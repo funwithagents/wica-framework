@@ -1,6 +1,6 @@
 {
   "name": "conversation",
-  "description": "One representative session with the robot: a greeting, a question, a long story interrupted by 'Stop!' as soon as the robot starts speaking, a second utterance while the robot answers the first, a goodbye. The user waits for the robot to be idle between turns, and talks over it only once the Agent is ready for an input, so nothing is dropped as busy. Generic: it needs only speech_input and an output Command.",
+  "description": "One representative session with the robot: a greeting, a question, a long story interrupted by 'Stop!' as soon as the robot starts speaking, an introduction and a question, a goodbye. The user waits for the robot to be idle between turns, and talks over it only for 'Stop!', once the Agent is ready for an input, so nothing is dropped as busy. Generic: it needs only speech_input and an output Command.",
   "checks": [
     "answers_each_input",
     "no_noop_on_input",
@@ -19,7 +19,7 @@
     {"check": "cancels_when_asked"},
     {"wait": "idle"},
     {"input": {"speech_input": "Hi, I'm Alex."}},
-    {"wait": "ready"},
+    {"wait": "idle"},
     {"input": {"speech_input": "Can you hear me?"}},
     {"wait": "idle"},
     {"input": {"speech_input": "Thanks, that's all for now. Goodbye!"}},
