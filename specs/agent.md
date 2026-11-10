@@ -204,6 +204,14 @@ The v1 Agent permits **one LLM reasoning call at a time**. While `_busy` is true
 
 Commands have a different lifetime. **All the Commands of one response dispatch at once:** the step creates one task per tool call, in the response's order, and ends; the tasks then run concurrently, with no ordering and no exclusivity between them — WICA neither serializes a response's Commands nor asks the provider to disable parallel tool use. A resource two Commands share (a speaker, a motor, a file) is therefore the application's to guard (a lock inside its Commands) or the model's to sequence across steps, which is what the runtime primer's concurrency line tells it to do (see "System prompt composition"; a per-response sequential dispatch mode or resource-exclusive Commands are possible future options, see [commands.md](commands.md) open question 2). Once a reasoning step dispatches its Commands, that step ends and the Agent becomes available even if one or more Commands are still running. A later input can therefore start a new reasoning step while a long Command continues in the background. The new step observes the Command's `agent:command:<call_id>` World entry as `running` and may issue `cancel_command(call_id)`. “Single in flight” refers to reasoning calls, not to Commands.
 
+**Why at once, not one after another.** Three reasons, none of them a provider constraint:
+
+- **It follows from asynchronous Commands.** A step dispatches its Commands and ends, so the Agent can react to a new input while a speech or a dance is still running, and cancel it. Running a response's calls one after another would need either a step that waits for its Commands — the Agent unavailable for as long as the slowest chain runs — or a per-response queue owned by WICA, a scheduler the design otherwise does without.
+- **It fits the domain.** An embodied agent's actions are mostly independent and meant to overlap: speak while changing expression, speak while dancing, turn toward someone while greeting them. A sequential order would make the common case wait on the uncommon one.
+- **Latency.** Independent actions start together; nothing waits on an action it does not depend on.
+
+The price is that dependent actions issued together race: a cancel and a new call of the same Command, two Commands driving the same motor. WICA does not resolve that for the model; it tells it (the primer's concurrency line), leaves shared resources to the application, and lets the benchmark measure what models do (`no_colliding_cancel`, [benchmark.md](benchmark.md)). A per-response sequential mode or resource-exclusive Commands stay possible later, as additions.
+
 The output sink receives one complete text response per step; token streaming, `agent:reaction` World entries, concurrent reasoning calls, and model-issued `cancel_reaction` are future work described below.
 
 ### Model-call deadline
