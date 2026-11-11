@@ -394,10 +394,13 @@ _OUTPUT_COMMAND_PROMPT = (
     "free-text responses are private reasoning and are not shown to the user."
 )
 # Always appended last — references the reply mechanism established just above, and is deliberately
-# conservative so it never suppresses an expected response. See specs/commands.md ("noop").
+# conservative so it never suppresses an expected response. It names what noop replaces (checking
+# in, repeating) but not the wake itself: "being called is not a cue to speak" made gpt-4o noop
+# plain requests. See specs/agent.md (primer part 4), specs/commands.md ("noop").
 _NOOP_PROMPT = (
     "\n- You need not act on every observation. If one genuinely calls for nothing from you — "
-    f"passive background state, say — call {_NOOP_COMMAND_NAME} to do nothing. But a request, a "
+    f"passive background state, say — call {_NOOP_COMMAND_NAME} to do nothing, rather than checking "
+    "in, filling the silence, or repeating something you already said or did. But a request, a "
     f"question, or anything addressed to you should be answered; never use {_NOOP_COMMAND_NAME} to "
     "skip an expected response."
 )
