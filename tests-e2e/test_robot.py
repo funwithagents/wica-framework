@@ -46,12 +46,8 @@ CONVERSATION_HISTORY_REACTIONS = 4
 # Remove a pair once its model passes the step reliably. See specs/testing.md ("What fails").
 KNOWN_FLAKY: dict[tuple[str, str], str] = {
     ("e2e.huggingface-hub.config", "background"): (
-        "gpt-oss-120b speaks when a background sound wakes it (3 of 6 attempts, 2026-11-10): "
-        "it checks in or follows up the previous turn instead of calling noop"
-    ),
-    ("e2e.mistralai.config", "background"): (
-        "ministral-14b, woken by a background sound right after the dance step, dances again "
-        "(1 of 6 attempts, 2026-11-10): it takes the wake as a cue to repeat the last request"
+        "gpt-oss-120b sometimes speaks when a background sound wakes it, checking in or following "
+        "up the previous turn instead of calling noop (1 of 13 attempts, 2026-11-11)"
     ),
 }
 
