@@ -293,7 +293,7 @@ def test_stop_with_an_in_flight_command_tears_down_cleanly(wica_factory):
     wica.start()
 
     wica.world.update("go", "start")
-    key = "agent:command:fake_call_0_0"
+    key = "agent:command:c1"
     wait_until(lambda: wica.world.get_entry(key).current.value.state == "running")
 
     wica.stop()  # must not raise, even with a command in flight; joins the owned loop thread last

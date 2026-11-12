@@ -1,0 +1,11 @@
+{
+  "name": "greeting",
+  "description": "A greeting is answered through the output Command, and the robot settles. Fails on a reply in plain text (the output Command left uncalled) and on a reply loop.",
+  "timeout_s": 120,
+  "checks": ["answers_each_input", "no_noop_on_input", "no_failed_reactions"],
+  "steps": [
+    {"input": {"speech_input": "Hello!"}},
+    {"expect": {"output": {}}, "within": 30},
+    {"wait": "idle", "within": 30}
+  ]
+}

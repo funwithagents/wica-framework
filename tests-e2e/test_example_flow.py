@@ -210,13 +210,9 @@ def test_barge_in_cancels_the_running_say(fast_say: None):
     config = fake_config(
         [
             {"tool_calls": [{"name": "say", "args": {"text": long_text}}]},
-            # The fake model's tool-call ids are deterministic (fake_call_<step>_<i>), so the
-            # scripted step can name the running say.
-            {
-                "tool_calls": [
-                    {"name": "cancel_command", "args": {"call_id": "fake_call_0_0"}}
-                ]
-            },
+            # WICA numbers the calls it receives (c1, c2, …), so the scripted step can name the
+            # running say: it is the first call.
+            {"tool_calls": [{"name": "cancel_command", "args": {"call_id": "c1"}}]},
         ]
     )
 
@@ -252,7 +248,7 @@ def test_barge_in_cancels_the_running_say(fast_say: None):
         assert say["content"] == long_text  # no result on a cancelled Command
         cancel = items_titled(convo, "🦾 cancel_command")[0]
         assert cancel["metadata"]["title"] == "🦾 cancel_command ✅"
-        assert "fake_call_0_0" in cancel["content"]
+        assert "c1" in cancel["content"]
 
         speaking = handle.speaking.read()
         assert speaking is not None

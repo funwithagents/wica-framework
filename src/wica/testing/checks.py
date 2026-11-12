@@ -22,6 +22,7 @@ from wica.testing.report import Finding, SutEvent
 
 NOOP = "noop"
 CANCEL = "cancel_command"
+_COMMAND_KEY_PREFIX = "agent:command:"
 
 Placement = Literal["anywhere", "step"]
 ArgKind = Literal["none", "command"]
@@ -240,24 +241,36 @@ def no_failed_reactions(window: list[SutEvent], context: CheckContext) -> Findin
 
 def no_colliding_cancel(window: list[SutEvent], context: CheckContext) -> Finding:
     """Primer: "when one action must finish before another starts, do not issue both together" —
-    no reaction issues `cancel_command` together with another *action*. Speaking while cancelling
-    ("okay, stopping") is what a person does, so the output Command may go with it."""
+    no reaction cancels a Command and issues a new call of that same Command (cancel a running
+    `dance` + `dance`): a response's Commands start at once, so the two race. Any other action
+    beside the cancel is not a collision (a `set_emotion`), and neither is a new call of the
+    output Command: cutting off a speech and saying "okay, stopping" is what a person does. The
+    target is resolved from the window by the call id the cancel names; a target the window does
+    not name is not judged."""
     name = "no_colliding_cancel"
-    allowed = {NOOP, context.output_command_name}
+    names_by_call = {
+        e.call_id: e.name
+        for e in window
+        if e.kind in ("command_issued", "command_state") and e.call_id and e.name
+    }
     for reaction_id, issued in commands_by_reaction(window).items():
-        names = [e.name for e in issued if e.name not in allowed]
-        if CANCEL in names and len(names) > 1:
-            others = [n for n in names if n != CANCEL]
-            first = next(e for e in issued if e.name == CANCEL)
-            return _finding(
-                name,
-                window,
-                False,
-                f"reaction {reaction_id} issued {CANCEL} together with {others} at "
-                f"{_at(first, context)}",
-                first,
-            )
-    return _finding(name, window, True, f"no {CANCEL} issued alongside another action")
+        for cancel in (e for e in issued if e.name == CANCEL):
+            target_id = str((cancel.args or {}).get("call_id", ""))
+            target = names_by_call.get(target_id.removeprefix(_COMMAND_KEY_PREFIX))
+            if target is None or target in (CANCEL, context.output_command_name):
+                continue
+            if any(e.name == target and e is not cancel for e in issued):
+                return _finding(
+                    name,
+                    window,
+                    False,
+                    f"reaction {reaction_id} cancelled {target} and issued {target} again "
+                    f"at {_at(cancel, context)}",
+                    cancel,
+                )
+    return _finding(
+        name, window, True, f"no {CANCEL} issued with a new call of its target"
+    )
 
 
 def cancels_when_asked(window: list[SutEvent], context: CheckContext) -> Finding:

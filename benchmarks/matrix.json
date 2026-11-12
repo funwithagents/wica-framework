@@ -55,8 +55,7 @@
                   "name": "say",
                   "args": {
                     "text": "Once upon a time a little robot named Bolt wanted to dance. Every night it practiced alone in the workshop. Its first steps were clumsy and it fell many times. Slowly the moves became smooth and joyful. One day it danced for everyone and they cheered."
-                  },
-                  "id": "story"
+                  }
                 }
               ]
             },
@@ -65,7 +64,7 @@
                 {
                   "name": "cancel_command",
                   "args": {
-                    "call_id": "story"
+                    "call_id": "c5"
                   }
                 }
               ]
@@ -157,7 +156,7 @@
       "tags": [
         "fixture"
       ],
-      "notes": "The key-less path: a scripted fake that plays the whole `conversation` session (one scripted model call per step, the long story cancelled by id), so `conversation` passes and `commands` does not. Harness floor; opt in with --only fake --include-disabled."
+      "notes": "The key-less path: a scripted fake that plays the whole `conversation` session (one scripted model call per step, the long story cancelled by its minted id, c5: every call before it, noop included, takes a number), so `conversation` passes and `commands` does not. Harness floor; opt in with --only fake --include-disabled."
     },
     {
       "id": "anthropic/claude-haiku-4-5",
@@ -374,6 +373,19 @@
         "small"
       ],
       "notes": "Alias of ministral-8b-2512."
+    },
+    {
+      "id": "mistralai/ministral-14b-latest",
+      "agent": {
+        "provider": "mistralai",
+        "model": "ministral-14b-latest",
+        "api_key_env": "WICA_MISTRAL_API_KEY"
+      },
+      "tags": [
+        "api",
+        "small"
+      ],
+      "notes": "Alias of ministral-14b-2512, the largest Ministral."
     },
     {
       "id": "mistralai/mistral-small-latest",

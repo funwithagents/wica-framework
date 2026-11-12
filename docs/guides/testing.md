@@ -94,7 +94,7 @@ print(report.metrics["reaction_latency"].median)
 
 - **The expectation family**: `set(key, value)` (through the Probe, moving the watermark), `wait(seconds)`, `expect_action(name, where=…, state=…, result_contains=…, within=…)`, `expect_output(contains=…, within=…)` (the output Command, whatever its name), `expect_text(contains=…, within=…)` (the free text), `expect_no_action(name, for_=…)`, `expect_world(key, equals=…, within=…)`, `expect_latency(metric, p95_below=…)`, plus `note`, `report_issue` and `finish(verdict, summary)`. Each returns a pass/fail **finding**. Expectations scan forward from a watermark, so a sequence never re-matches an earlier event and repeating one means "the next one".
 - **The report** (`run.report()`) is a dataclass with the timeline, the metrics (`reaction_latency`, `model_latency`, `coalescing_wait`, `busy_time`, `command_duration`, `reactions_per_input`, `input_tokens`, `output_tokens`, each a min/median/p95 summary), the dropped-input count, the findings, the issues and the verdict; `report.ok` is what a test asserts; `report.write(path)` saves it as JSON, or as Markdown for a `.md` path; `report.to_markdown()` renders it. Latency is a measure, never a built-in threshold: `expect_latency` is the one way to make it fail a run.
-- The same harness drives a **live** model: the repo's own live e2e set is one `TestRun` per provider ([specs/testing.md](../../specs/testing.md)), each a smoke test with a report, not a benchmark.
+- The same harness drives a **live** model: the repo's own live e2e set plays scenario files on a `TestRun` per step against a test robot, once per provider, and fails a step on a single bad run ([specs/testing.md](../../specs/testing.md), "The live set as a regression gate"); a regression gate with a report per step, not a benchmark.
 
 ## A scripted tester
 
@@ -117,4 +117,4 @@ The tester's Commands are `set_<key>` for each Input the Probe found on your age
 
 ## Where the repo's own tests sit
 
-The fast tier (`tests/`) exercises every feature against the `fake` provider; `tests-e2e/` holds the always-run scripted flows (`-k fake`, `-k tester`, `-k example`) and the live set, one config per provider, each skipping when its key is unset ([specs/testing.md](../../specs/testing.md); the commands are in [AGENTS.md](../../AGENTS.md)).
+The fast tier (`tests/`) exercises every feature against the `fake` provider; `tests-e2e/` holds the always-run scripted flows (`-k fake`, `-k tester`, `-k example`) and the live set, one config per provider, each skipping when its key is unset (failing instead under `WICA_E2E_FAIL_ON_MISSING=1`, as CI sets it) ([specs/testing.md](../../specs/testing.md); the commands are in [AGENTS.md](../../AGENTS.md)).

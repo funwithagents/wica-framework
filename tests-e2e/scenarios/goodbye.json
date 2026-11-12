@@ -1,0 +1,11 @@
+{
+  "name": "goodbye",
+  "description": "A goodbye is answered through the output Command, and the robot settles.",
+  "timeout_s": 120,
+  "checks": ["answers_each_input", "no_noop_on_input", "no_failed_reactions"],
+  "steps": [
+    {"input": {"speech_input": "Thanks, that's all for now. Goodbye!"}},
+    {"expect": {"output": {}}, "within": 30},
+    {"wait": "idle", "within": 30}
+  ]
+}

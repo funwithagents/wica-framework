@@ -1,0 +1,14 @@
+{
+  "name": "interrupt",
+  "description": "A long spoken story is cut off: once the robot speaks and the Agent is ready, 'Stop, please.' cancels the running say. Fails when cancellation, or the visibility of running Commands, breaks.",
+  "timeout_s": 150,
+  "checks": ["no_failed_reactions", "no_colliding_cancel"],
+  "steps": [
+    {"input": {"speech_input": "Tell me a long story about a robot who learns to paint, at least ten sentences."}},
+    {"wait": "speaking", "within": 30},
+    {"wait": "ready", "within": 30},
+    {"input": {"speech_input": "Stop, please."}},
+    {"check": "cancels_when_asked"},
+    {"wait": "idle", "within": 30}
+  ]
+}

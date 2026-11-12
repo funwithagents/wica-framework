@@ -48,7 +48,7 @@ from wica.instrumentation import (
     parent_trigger,
     tracer,
 )
-from wica.world import World, WorldEntry, validate_key
+from wica.world import World, WorldEntry
 
 _logger = logging.getLogger(__name__)
 
@@ -663,6 +663,8 @@ class Agent:
         # call_id -> (the running version's timestamp, the reaction that issued it), consumed by
         # _emit_command_ended when the terminal write lands. See specs/instrumentation.md.
         self._command_started: dict[str, tuple[datetime, int]] = {}
+        # The last number _mint_call_id handed out; never reset, so a restart keeps ids unique.
+        self._call_counter = 0
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         # Every task the Agent creates, including trigger shims, reasoning batches, and Commands.
         # stop() cancels this complete set. An off-loop caller also drains cancellation before an
@@ -1206,9 +1208,9 @@ class Agent:
 
         for call in response.tool_calls:
             # The provider's tool-call id reconstructs the native tool_call/tool_result pair; the
-            # World-key suffix is that id when it's a safe, free key, else a generated one.
+            # model is pointed at a short id WICA mints instead (see _mint_call_id).
             tool_call_id = call["id"] or uuid.uuid4().hex
-            call_id = self._world_call_id(tool_call_id)
+            call_id = self._mint_call_id()
             if call["name"] == _NOOP_COMMAND_NAME:
                 # noop is the model declaring no reaction: record it (so context shows the choice
                 # and the tool_call has a matching tool_result), but do not dispatch it — no World
@@ -1230,19 +1232,16 @@ class Agent:
             self._apply_history_budget(builder.usage.input_tokens)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
 
-    def _world_call_id(self, provider_id: str | None) -> str:
-        """The `<call_id>` for a new agent:command:<call_id> entry: the provider's tool-call id
-        when it is a valid World key and that key is free, else a generated one. See
-        specs/commands.md ("Command execution as a World entry")."""
-        if provider_id:
-            try:
-                validate_key(provider_id)
-            except ValueError:
-                pass
-            else:
-                if not self._world.is_registered(f"{_COMMAND_KEY_PREFIX}{provider_id}"):
-                    return provider_id
-        return uuid.uuid4().hex
+    def _mint_call_id(self) -> str:
+        """The `<call_id>` for a new tool call: `c1`, `c2`, … over the Agent's lifetime, skipping a
+        number whose agent:command:c<n> key is already registered. Never the provider's id: a
+        model copying a long opaque id back into cancel_command garbles it (Claude Haiku dropped
+        the `toolu_` prefix). See specs/commands.md ("Command execution as a World entry")."""
+        while True:
+            self._call_counter += 1
+            call_id = f"c{self._call_counter}"
+            if not self._world.is_registered(f"{_COMMAND_KEY_PREFIX}{call_id}"):
+                return call_id
 
     def _dispatch_command(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         _logger.debug(

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 from langchain_core.language_models import BaseChatModel
@@ -29,6 +30,20 @@ PROVIDER_CONFIGS = [
 ]
 
 
+# Set to "1" (CI's live job does), a missing key fails the test instead of skipping it, so a run
+# cannot go green with a provider silently untested. Same name and meaning as in wica-interaction.
+# See specs/testing.md ("Live tier").
+FAIL_ON_MISSING = "WICA_E2E_FAIL_ON_MISSING"
+
+
+def missing_key(exc: MissingEnvError) -> NoReturn:
+    """Skip the calling test for a key that is not set — or fail it under `FAIL_ON_MISSING`."""
+    reason = f"{exc.env_var} not set — skipping e2e test"
+    if os.environ.get(FAIL_ON_MISSING) == "1":
+        pytest.fail(f"{exc.env_var} not set ({FAIL_ON_MISSING}=1)", pytrace=False)
+    pytest.skip(reason)
+
+
 def load_agent_config(config_path: Path) -> AgentConfig:
     """Load the config (inert — validates only, reads no env/files). The api key resolves later, at
     build; the skip-when-unset lives in the build helpers below."""
@@ -43,11 +58,15 @@ def real_chat_model(config_path: Path) -> BaseChatModel:
     try:
         return build_chat_model(load_agent_config(config_path))
     except MissingEnvError as exc:
-        pytest.skip(f"{exc.env_var} not set — skipping e2e test")
+        missing_key(exc)
 
 
 def real_wica(
-    config_path: Path, *, system_prompt: str | None = None, **kwargs: Any
+    config_path: Path,
+    *,
+    system_prompt: str | None = None,
+    agent_overrides: dict[str, Any] | None = None,
+    **kwargs: Any,
 ) -> Wica:
     """Stand up a full Wica (its own loop + World + Agent) from a committed config, through the real
     entrypoint — `Wica.init`. This is what makes the live tier meaningful: it drives the whole
@@ -56,20 +75,20 @@ def real_wica(
     `loop`) go to `Wica.init`; the output sink / output Command are wired by the caller afterwards
     (`wica.set_output_sink(...)`, `wica.set_output_command(...)`). `system_prompt` overrides the
     committed persona when a test needs a specific one (replacing the committed persona; the file
-    field is cleared so the exactly-one invariant holds). Skips when the config's api_key_env is
-    unset — the key resolves at build inside `Wica.init`, so `MissingEnvError -> pytest.skip` lives
-    here."""
+    field is cleared so the exactly-one invariant holds); `agent_overrides` replaces other
+    `AgentConfig` fields (e.g. `history_reactions`). Skips when the config's api_key_env is unset
+    (fails under `FAIL_ON_MISSING`) — the key resolves at build inside `Wica.init`, so
+    `MissingEnvError -> pytest.skip` lives here."""
     config = WicaConfig.from_json_file(config_path)
+    overrides = dict(agent_overrides or {})
     if system_prompt is not None:
-        config = WicaConfig(
-            agent=dataclasses.replace(
-                config.agent, system_prompt=system_prompt, system_prompt_file=None
-            )
-        )
+        overrides.update(system_prompt=system_prompt, system_prompt_file=None)
+    if overrides:
+        config = WicaConfig(agent=dataclasses.replace(config.agent, **overrides))
     try:
         return Wica.init(config, **kwargs)
     except MissingEnvError as exc:
-        pytest.skip(f"{exc.env_var} not set — skipping e2e test")
+        missing_key(exc)
 
 
 def greeting_probe() -> Scenario:

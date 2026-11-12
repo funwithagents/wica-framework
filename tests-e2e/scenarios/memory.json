@@ -1,0 +1,13 @@
+{
+  "name": "memory",
+  "description": "What was said one turn earlier is recalled: a name given, then asked for. Fails on history rendering or caching changes. Recall across a history cut is not tested: state that must outlive the window belongs in a World entry (specs/agent.md, 'History window').",
+  "timeout_s": 150,
+  "checks": ["answers_each_input", "no_noop_on_input", "no_failed_reactions"],
+  "steps": [
+    {"input": {"speech_input": "My name is Alex."}},
+    {"wait": "idle", "within": 30},
+    {"input": {"speech_input": "What's my name?"}},
+    {"expect": {"output": {"contains": "Alex"}}, "within": 30},
+    {"wait": "idle", "within": 30}
+  ]
+}
