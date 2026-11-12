@@ -53,6 +53,11 @@ KNOWN_FLAKY: dict[tuple[str, str], str] = {
         "ministral-14b, woken by a background sound right after the dance step, dances again "
         "(1 of 6 attempts, 2026-11-10): it takes the wake as a cue to repeat the last request"
     ),
+    ("e2e.huggingface-hub.config", "long_answer"): (
+        "gpt-oss-120b, after writing the note, chains check-in says instead of calling noop; "
+        "about 3 in 10 runs end near the 30 s idle bound and some miss it (CI on main, "
+        "2026-11-12: five says, still speaking at 30 s)"
+    ),
 }
 
 WriteReport = Callable[[Report], None]
