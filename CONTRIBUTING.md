@@ -23,4 +23,4 @@ Issues are the way in, at [github.com/funwithagents/wica-framework/issues](https
 
 ## Working with the code anyway
 
-The code is MIT-licensed, so forking it and building on it is welcome. The commands to lint, type check and run the two test tiers are in [AGENTS.md](AGENTS.md), which also explains how the specs, plans and their statuses fit together; the consumer documentation starts at [docs/index.md](docs/index.md). If your fork grows something you think belongs upstream, open an issue describing it: that is the conversation that will lead to accepting pull requests later.
+The code is Apache-2.0-licensed, so forking it and building on it is welcome. The commands to lint, type check and run the two test tiers are in [AGENTS.md](AGENTS.md), which also explains how the specs, plans and their statuses fit together; the consumer documentation starts at [docs/index.md](docs/index.md). If your fork grows something you think belongs upstream, open an issue describing it: that is the conversation that will lead to accepting pull requests later.
