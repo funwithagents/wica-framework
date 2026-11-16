@@ -95,10 +95,11 @@ Wraps a callable (name from `__name__`, description from the docstring, both ove
 
 Before a model response is used (its text delivered, its Commands dispatched), WICA checks it with its **response guards**. A guard that finds a mistake rejects the response: the model is called again, over the same conversation plus a correction, up to `max_retries` times (default `1`, [configuration.md](configuration.md#the-agent-block)). Only the accepted response enters the history, so later prompts never show the mistake. Out of retries, the reaction ends with the `rejected` outcome: nothing is said or done, and an ERROR log line carries the reason.
 
-Three guards are on by default:
+Four guards are on by default:
 
 | Guard | Rejects a response that |
 |---|---|
+| `incomplete_response` | was cut at the output cap (`max_tokens` and the like) in the middle of a Command call, or before the call an output Command requires; the model is asked again with a length to stay under. Without this guard a cut call is dropped, or dispatched with the arguments that survived |
 | `unknown_command` | calls a Command that is not registered |
 | `invalid_args` | calls a Command with arguments that do not fit its signature |
 | `output_command_required` | has no Command call at all while an output Command is set (its text would reach nobody) |

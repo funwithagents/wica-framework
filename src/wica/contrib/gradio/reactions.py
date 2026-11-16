@@ -101,6 +101,10 @@ def render_reaction_trace(trace: ReactionTrace) -> str:
         lines.append(f"render time: {trace.render_time:.3f}s")
     if trace.model_latency is not None:
         lines.append(f"model latency: {trace.model_latency:.3f}s")
+    if trace.time_to_first_content is not None:
+        lines.append(f"time to first content: {trace.time_to_first_content:.3f}s")
+    if trace.generation_time is not None:
+        lines.append(f"generation time: {trace.generation_time:.3f}s")
     if trace.guard_duration is not None:
         lines.append(f"guard time: {trace.guard_duration:.3f}s")
     if trace.sink_duration is not None:

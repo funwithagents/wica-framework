@@ -37,6 +37,7 @@ from wica.agent import (
     _NOOP_ACK,
     _NOOP_COMMAND_NAME,
     _assemble,
+    _was_truncated,
     build_chat_model,
     mark_cache_breakpoint,
 )
@@ -3840,6 +3841,7 @@ def test_a_raising_guard_accepts_and_an_async_guard_is_awaited(
 def test_guards_are_listed_added_and_removed_by_name(loop, world):
     agent = make_agent(ProgrammableChatModel(), world=world, loop=loop)
     assert list(agent.response_guards) == [
+        "incomplete_response",
         "unknown_command",
         "invalid_args",
         "output_command_required",
@@ -3848,6 +3850,7 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
     agent.add_response_guard(lambda r: None, name="mine")
     agent.remove_response_guard("invalid_args")
     assert list(agent.response_guards) == [
+        "incomplete_response",
         "unknown_command",
         "output_command_required",
         "mine",
@@ -4056,8 +4059,8 @@ def test_a_streamed_response_is_used_once_whole(loop, world, sink):
 def test_a_streamed_call_cut_by_the_cap_is_not_dispatched_and_is_retried(
     loop, world, sink
 ):
-    """A `say` whose arguments were cut is malformed: not spoken, and with no other call the
-    output_command_required guard asks again."""
+    """A `say` whose arguments were cut is malformed: not spoken, and the incomplete_response guard
+    asks for it again — as a reminder, since the broken call cannot be replayed."""
     spoken: list[str] = []
     agent, model, traces, done = _streaming_agent(
         [
@@ -4076,6 +4079,8 @@ def test_a_streamed_call_cut_by_the_cap_is_not_dispatched_and_is_retried(
         sink,
         output_command=_say_command(spoken),
     )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
     agent.start()
 
     world.update("input", "tell me a story")
@@ -4087,6 +4092,16 @@ def test_a_streamed_call_cut_by_the_cap_is_not_dispatched_and_is_retried(
     assert traces[0].outcome == "ok"
     assert traces[0].attempts == 2
     assert len(model.calls) == 3
+    [rejection] = rejections
+    assert rejection.show_response is False
+    [malformed] = rejection.response.malformed
+    assert (malformed.name, malformed.raw_args) == ("say", '{"text": "Once upon a ti')
+    assert "not complete JSON" in malformed.error
+    # One correction, from incomplete_response alone: output_command_required leaves it the case.
+    assert rejection.feedback.startswith("Your call to `say` was not executed")
+    retry_prompt = model.calls[1]
+    assert not any(isinstance(m, AIMessage) for m in retry_prompt)
+    assert "Your call to `say` was not executed" in human_texts(retry_prompt[-1])
 
 
 def _failing_after_first_chunk() -> AsyncIterator[AIMessageChunk]:
@@ -4142,3 +4157,302 @@ def test_a_stream_that_does_not_complete_discards_its_partial_message(
     assert traces[0].error is not None and error in traces[0].error
     assert sink.texts == []
     assert not any(isinstance(r, AssistantTextRecord) for r in agent._history)
+
+
+def test_without_the_malformed_guard_a_cut_call_is_dropped_and_the_rest_used(
+    loop, world, sink
+):
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                AIMessageChunk(content="On it."),
+                _tool_chunk(0, '{"color": "re', name="set_light", call_id="c1"),
+            )
+        ],
+        loop,
+        world,
+        sink,
+    )
+    lights: list[str] = []
+
+    async def set_light(color: str) -> str:
+        """Set the light's color."""
+        lights.append(color)
+        return "ok"
+
+    agent.register_command(set_light)
+    agent.remove_response_guard("incomplete_response")
+    agent.start()
+
+    world.update("input", "make it red")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert sink.texts == ["On it."]
+    assert lights == []
+    assert traces[0].outcome == "ok"
+    assert traces[0].attempts == 1
+    assert traces[0].command_call_ids == ()
+    assert len(model.calls) == 1
+
+
+def test_a_response_with_a_malformed_call_is_never_shown_in_a_retry(loop, world, sink):
+    """A guard asking to show the rejected response gets a reminder instead when the response
+    holds a malformed call: the broken call cannot be replayed to a provider."""
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                AIMessageChunk(content="On it."),
+                _tool_chunk(0, '{"color": "re', name="set_light", call_id="c1"),
+            ),
+            chunks_stream(AIMessageChunk(content="Done.")),
+        ],
+        loop,
+        world,
+        sink,
+    )
+    agent.remove_response_guard("incomplete_response")
+    agent.add_response_guard(
+        lambda r: Retry("Say it differently.") if r.malformed else None,
+        name="shows",
+    )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+
+    world.update("input", "make it red")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert sink.texts == ["Done."]
+    assert rejections[0].show_response is False
+    retry_prompt = model.calls[1]
+    assert not any(isinstance(m, AIMessage) for m in retry_prompt)
+    assert "Say it differently." in human_texts(retry_prompt[-1])
+
+
+def _slow_stream(*steps: AIMessageChunk | float) -> Stream:
+    """A stream that sleeps for each number and yields each chunk."""
+
+    async def stream() -> AsyncIterator[AIMessageChunk]:
+        for step in steps:
+            if isinstance(step, AIMessageChunk):
+                yield step
+            else:
+                await asyncio.sleep(step)
+
+    return stream
+
+
+def test_first_content_is_stamped_at_the_first_chunk_carrying_an_answer(
+    loop, world, sink
+):
+    """A leading chunk with only metadata or reasoning does not count; the stamp splits the model
+    latency into the wait and the arrival."""
+    thinking = {"type": "thinking", "thinking": "hm", "index": 0}
+    agent, _, traces, done = _streaming_agent(
+        [
+            _slow_stream(
+                AIMessageChunk(content=""),
+                AIMessageChunk(content=[thinking]),
+                0.1,
+                AIMessageChunk(content="Hel"),
+                0.1,
+                AIMessageChunk(content="lo."),
+            )
+        ],
+        loop,
+        world,
+        sink,
+    )
+    agent.start()
+    world.update("input", "hello")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    trace = traces[0]
+    assert sink.texts == ["Hello."]
+    assert trace.model_started_at is not None and trace.model_ended_at is not None
+    assert trace.first_content_at is not None
+    assert trace.model_started_at < trace.first_content_at < trace.model_ended_at
+    assert trace.time_to_first_content is not None and trace.generation_time is not None
+    assert trace.time_to_first_content >= 0.05
+    assert trace.generation_time >= 0.05
+
+
+def test_first_content_counts_a_tool_call_and_is_the_last_attempts(loop, world, sink):
+    """A tool-call chunk is content. After a retry the stamp is the accepted attempt's, so
+    generation_time is the used response's and time_to_first_content includes the rejected one."""
+    spoken: list[str] = []
+    agent, _, traces, done = _streaming_agent(
+        [
+            _slow_stream(AIMessageChunk(content="Hello there."), 0.1),
+            _slow_stream(
+                0.1,
+                _tool_chunk(0, '{"text": "Hello', name="say", call_id="s1"),
+                _tool_chunk(0, ' there."}'),
+            ),
+            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+        ],
+        loop,
+        world,
+        sink,
+        output_command=_say_command(spoken),
+    )
+    agent.start()
+    world.update("input", "greet")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: spoken == ["Hello there."])
+    agent.stop()
+
+    trace = traces[0]
+    assert trace.attempts == 2
+    assert trace.time_to_first_content is not None and trace.generation_time is not None
+    # First attempt (0.1 s) + the second's wait before its tool call (0.1 s).
+    assert trace.time_to_first_content >= 0.1
+    assert trace.generation_time < trace.time_to_first_content / 2
+
+
+def test_first_content_survives_a_failed_stream_and_is_none_when_nothing_arrived(
+    loop, world, sink
+):
+    agent, _, traces, done = _streaming_agent(
+        [_failing_after_first_chunk, _empty_stream], loop, world, sink
+    )
+    agent.start()
+    world.update("input", "one")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    done.clear()
+    world.update("input", "two")
+    wait_until(lambda: len(traces) == 2)
+    agent.stop()
+
+    assert traces[0].outcome == "model_error"
+    assert traces[0].first_content_at is not None
+    assert traces[1].outcome == "model_error"
+    assert traces[1].first_content_at is None
+    assert traces[1].time_to_first_content is None
+
+
+def test_a_model_without_a_streaming_path_stamps_first_content_at_its_whole_message(
+    loop, world, sink
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        await asyncio.sleep(0.1)
+        return AIMessage(content="hi")
+
+    agent = make_agent(
+        ProgrammableChatModel(respond=respond), world=world, loop=loop, output_sink=sink
+    )
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+    world.update("input", "hello")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    trace = traces[0]
+    assert trace.time_to_first_content is not None and trace.generation_time is not None
+    assert trace.time_to_first_content >= 0.05
+    assert trace.generation_time < trace.time_to_first_content / 2
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"stop_reason": "max_tokens"}, True),  # Anthropic
+        ({"finish_reason": "length"}, True),  # OpenAI, Mistral, the Hub
+        ({"finish_reason": "MAX_TOKENS"}, True),  # Gemini
+        ({"finish_reason": "stop"}, False),
+        ({"stop_reason": "tool_use"}, False),
+        ({"finish_reason": "tool_calls"}, False),
+        ({}, False),
+    ],
+)
+def test_a_response_is_truncated_when_its_stop_reason_is_the_output_cap(
+    metadata, expected
+):
+    assert (
+        _was_truncated(AIMessage(content="x", response_metadata=metadata)) is expected
+    )
+
+
+def _cut_at_the_cap(tokens: int) -> AIMessageChunk:
+    """The closing chunk of a response the provider stopped at its output cap."""
+    return AIMessageChunk(
+        content="",
+        response_metadata={"finish_reason": "length"},
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": tokens,
+            "total_tokens": 10 + tokens,
+        },
+    )
+
+
+def test_a_well_formed_call_in_a_response_cut_at_the_cap_is_retried(loop, world, sink):
+    """A provider may return a cut call well-formed, with empty arguments. The stop reason marks
+    the response truncated: incomplete_response alone corrects it (invalid_args stays silent
+    about the cut call), as a reminder, with the cap as the length to stay under."""
+    spoken: list[str] = []
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                _tool_chunk(0, "", name="say", call_id="s1"), _cut_at_the_cap(60)
+            ),
+            chunks_stream(
+                _tool_chunk(0, '{"text": "A robot woke up."}', name="say", call_id="s2")
+            ),
+            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+        ],
+        loop,
+        world,
+        sink,
+        output_command=_say_command(spoken),
+    )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    agent.stop()
+
+    assert spoken == ["A robot woke up."]
+    assert traces[0].attempts == 2
+    [rejection] = rejections
+    assert rejection.response.truncated is True
+    assert rejection.response.output_tokens == 60
+    assert rejection.show_response is False
+    assert rejection.feedback.startswith(
+        "Your response was cut off at the output length limit while you were writing the call "
+        "to `say`"
+    )
+    assert "keep it under 60 characters" in rejection.feedback
+    assert "invalid" not in rejection.feedback
+    assert not any(isinstance(m, AIMessage) for m in model.calls[1])
+
+
+def test_free_text_cut_at_the_cap_is_still_the_reply_without_an_output_command(
+    loop, world, sink
+):
+    agent, model, traces, done = _streaming_agent(
+        [chunks_stream(AIMessageChunk(content="Once upon a"), _cut_at_the_cap(4))],
+        loop,
+        world,
+        sink,
+    )
+    agent.start()
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert sink.texts == ["Once upon a"]
+    assert traces[0].outcome == "ok"
+    assert traces[0].attempts == 1

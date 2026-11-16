@@ -46,6 +46,7 @@ def test_compute_metrics_from_a_hand_built_timeline():
         prompt_ready_at=_at(0.32),
         model_started_at=_at(0.35),
         model_ended_at=_at(1.0),
+        first_content_at=_at(0.8),
         outcome="ok",
         error=None,
         text_length=0,
@@ -77,6 +78,8 @@ def test_compute_metrics_from_a_hand_built_timeline():
     metrics, dropped = compute_metrics(timeline, output_command_name=None)
     assert metrics["reaction_latency"].min == 1.05
     assert round(metrics["model_latency"].min, 6) == 0.65
+    assert round(metrics["time_to_first_content"].min, 6) == 0.45
+    assert round(metrics["generation_time"].min, 6) == 0.2
     assert round(metrics["coalescing_wait"].min, 6) == 0.2
     assert metrics["command_duration"].min == 0.5
     assert metrics["input_tokens"].min == 120

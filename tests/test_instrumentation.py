@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -86,6 +88,28 @@ def test_reaction_properties_are_differences_in_seconds():
     assert reaction.render_time == pytest.approx(0.05)
     assert reaction.model_latency == pytest.approx(1.0)
     assert reaction.busy_time == pytest.approx(1.2)
+
+
+def test_first_content_splits_the_model_latency_in_two():
+    reaction = _reaction(
+        triggers=(_trigger(arrived=0.0),),
+        window_opened=0.0,
+        window_closed=0.2,
+        model_started=0.3,
+        model_ended=1.3,
+        ended=1.4,
+    )
+    # Without the stamp (nothing arrived, or a record from before it existed): no measure.
+    assert reaction.time_to_first_content is None
+    assert reaction.generation_time is None
+
+    stamped = dataclasses.replace(reaction, first_content_at=_t(0.7))
+    assert stamped.time_to_first_content == pytest.approx(0.4)
+    assert stamped.generation_time == pytest.approx(0.6)
+    # Content arrived, then the call never ended (cancelled): only the first half exists.
+    cut = dataclasses.replace(stamped, model_ended_at=None)
+    assert cut.time_to_first_content == pytest.approx(0.4)
+    assert cut.generation_time is None
 
 
 def test_parent_trigger_prefers_the_earliest_external_trigger():

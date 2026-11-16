@@ -16,7 +16,7 @@ tests:
 
 # Instrumentation
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -48,7 +48,7 @@ A **reaction** is one turn of the Agent's loop — the trigger(s) that woke it, 
 | Raw trigger reaches the loop | `on_trigger` emission after the `call_soon_threadsafe` hop | `arrived_at` |
 | Coalescing window | `_handle_trigger` → `_flush_window` | `window_opened_at`, `window_closed_at` |
 | Observation + rendering | `_run_step` before `on_prompt` | `prompt_ready_at` |
-| Model call | `astream`, chunks summed into one message ([agent.md](agent.md), "Streaming the model call") | `model_started_at`, `model_ended_at` (the last chunk) |
+| Model call | `astream`, chunks summed into one message ([agent.md](agent.md), "Streaming the model call") | `model_started_at`, `first_content_at` (the first chunk carrying text or a tool call), `model_ended_at` (the last chunk) |
 | Free text to the sink | `await self._output_sink(text)` | `sink_duration` |
 | Command dispatch, reaction end | end of `_run_step` | `ended_at` |
 | Command running → terminal | the Command task | the entry's `running` and terminal version timestamps |
@@ -103,6 +103,7 @@ class ReactionTrace:
     attempts: int                             # model calls made: 1, or more after rejected responses
     rejections: tuple[str, ...]               # the combined guard feedback of each rejected attempt, in order
     guard_duration: float | None              # seconds spent in response guards over all attempts; None when none ran
+    first_content_at: datetime | None         # the LAST attempt's first chunk carrying text or a tool call; None when none arrived
     ended_at: datetime
     trace_id: str | None                      # OpenTelemetry ids when an SDK is installed, else None
     span_id: str | None
@@ -117,7 +118,9 @@ class CommandTrace:
     state: Literal["complete", "failed", "cancelled"]
 ```
 
-Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `busy_time`, `duration` on `CommandTrace`) are read-only properties over the stamps, so a record stays raw and a consumer never recomputes a subtraction differently.
+Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `time_to_first_content`, `generation_time`, `busy_time`, `duration` on `CommandTrace`) are read-only properties over the stamps, so a record stays raw and a consumer never recomputes a subtraction differently.
+
+**The first content.** The model call is streamed ([agent.md](agent.md), "Streaming the model call"), so the record stamps when the answer began to arrive: `first_content_at` is the first chunk carrying text or a tool call (its name or its arguments); reasoning and metadata chunks do not count. It splits `model_latency` in two: `time_to_first_content` (the wait before anything) and `generation_time` (the answer arriving). What it means depends on the provider and the output mode: free text arrives progressively everywhere measured, while a tool call's arguments arrive progressively on some providers and in one burst at the end on others, with only the call's name early. It is stamped when content arrived even if the call then failed or passed its deadline, and is `None` when nothing did. With retries it is the last attempt's, like `model_ended_at`.
 
 **A reaction with retries.** When the response guards reject a response and the Agent calls the model again ([agent.md](agent.md), "Response guards"), the reaction stays **one** record: `model_started_at` is the first attempt's start and `model_ended_at` the last attempt's end, so `model_latency` covers the whole model phase — every attempt and the guards between them, which is what the user waits for; `guard_duration` separates the guards' share. `attempts` and `rejections` say what happened, `usage` adds up what it cost (`cache_read_tokens` summed when every attempt reported it, else `None`). A reaction that ran out of retries ends `rejected`, with `error` holding the last rejection's feedback.
 
@@ -144,7 +147,7 @@ The spans, all under the tracer named `wica`:
 |---|---|---|
 | `wica.world.update` | the **caller's** current context — a speech recognizer writing from inside its own span makes that span the ancestor of the whole reaction | `wica.key`, `wica.version_id`. Opened only for an update that **triggers** (qualifies to wake the Agent), so a 30 fps non-triggering sensor entry costs no span; every update still propagates context (below) |
 | `wica.agent.reaction` | the context captured with the reaction's **parent trigger** (rule below); the other coalesced triggers are span **links** | `wica.reaction_id`, `wica.trigger_count`, `wica.outcome`, `wica.text_length`, `wica.command_count`, `wica.noop`, `wica.attempts` |
-| `wica.agent.model` | the reaction | GenAI semantic conventions: `gen_ai.operation.name = chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| `wica.agent.model` | the reaction | GenAI semantic conventions: `gen_ai.operation.name = chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`; a `wica.first_content` span event when the first content arrives |
 | `wica.agent.guards` | the reaction; one per attempt | `wica.attempt`, `wica.rejected` |
 | `wica.agent.sink` | the reaction | — (its duration is the point) |
 | `wica.agent.command` | the reaction; **current inside the Command's task** from dispatch to terminal write | `wica.command.name`, `wica.call_id`, `wica.command.state` |
@@ -173,6 +176,8 @@ There is no enable/disable API. The cost per reaction is a handful of `datetime.
 | `hop` | per trigger, `written_at` → `arrived_at` (the cross-thread hop; a sanity number) |
 | `render_time` | `window_closed_at` → `prompt_ready_at` |
 | `model_latency` | `model_started_at` → `model_ended_at` (every attempt and the guards between them) |
+| `time_to_first_content` | `model_started_at` → `first_content_at`: how long before the model's answer began to arrive, rejected attempts included |
+| `generation_time` | `first_content_at` → `model_ended_at`: how long the used response took to arrive once it had begun — the most that streaming output could save on that reaction |
 | `guard_time` | `guard_duration` |
 | `sink_time` | `sink_duration` |
 | `busy_time` | `window_closed_at` → `ended_at` — the interval during which a new input is dropped |

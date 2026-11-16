@@ -202,7 +202,12 @@ def test_response_guards_are_delegated_to_the_agent(wica_factory):
     wica.remove_response_guard("output_command_required")
     wica.add_response_guard(lambda response: None, name="mine")
     assert list(wica.response_guards) == list(wica.agent.response_guards)
-    assert list(wica.response_guards) == ["unknown_command", "invalid_args", "mine"]
+    assert list(wica.response_guards) == [
+        "incomplete_response",
+        "unknown_command",
+        "invalid_args",
+        "mine",
+    ]
 
 
 def test_fake_flow_yields_reaction_and_command_traces(wica_factory):
