@@ -13,6 +13,9 @@ This is **test tooling**, deliberately reached via its own submodule
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from langchain_core.callbacks import (
@@ -20,8 +23,9 @@ from langchain_core.callbacks import (
     CallbackManagerForLLMRun,
 )
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages.tool import tool_call_chunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from pydantic import Field, PrivateAttr
@@ -197,3 +201,61 @@ class FakeChatModel(BaseChatModel):
             await asyncio.sleep(self.delay_s)
         step, call_index = self._next_step()
         return self._to_result(step, call_index, messages)
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        # The Agent streams every call, so the fake streams too, in a fixed split: the text at word
+        # boundaries, each tool call as id + name + the first half of its JSON arguments then the
+        # rest, the usage on a last empty chunk. Summed, the chunks equal the ainvoke message. See
+        # specs/fake-provider.md ("Streaming").
+        self._calls.append(list(messages))
+        self._validate_once()
+        if self.delay_s:
+            await asyncio.sleep(self.delay_s)
+        step, call_index = self._next_step()
+        message = cast(
+            "AIMessage",
+            self._to_result(step, call_index, messages).generations[0].message,
+        )
+        for piece in _split_words(message.text):
+            yield ChatGenerationChunk(message=AIMessageChunk(content=piece))
+        for index, call in enumerate(message.tool_calls):
+            raw = json.dumps(call["args"])
+            half = len(raw) // 2
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        tool_call_chunk(
+                            name=call["name"],
+                            args=raw[:half],
+                            id=call["id"],
+                            index=index,
+                        )
+                    ],
+                )
+            )
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        tool_call_chunk(
+                            name=None, args=raw[half:], id=None, index=index
+                        )
+                    ],
+                )
+            )
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content="", usage_metadata=message.usage_metadata)
+        )
+
+
+def _split_words(text: str) -> list[str]:
+    """`text` cut where whitespace gives way to a word, each piece keeping its trailing space, so
+    the pieces join back to `text` exactly. Empty text gives no piece."""
+    return [piece for piece in re.split(r"(?<=\s)(?=\S)", text) if piece]

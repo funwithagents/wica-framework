@@ -26,7 +26,7 @@ Two servers were tried with WICA, with Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Inst
 
   `-c` is the context size, `-np` the number of requests served at once.
 
-- **`mlx_lm.server`, works with two limits.** It ignores `tool_choice`, so forcing a tool call has no effect, and a cancelled call keeps generating until its output cap (see [Cancellation](#cancellation)). It downloads and loads the model on the first request that names it:
+- **`mlx_lm.server`, works with one limit.** It ignores `tool_choice`, so forcing a tool call has no effect. It downloads and loads the model on the first request that names it:
 
   ```
   mlx_lm.server --model mlx-community/Qwen2.5-7B-Instruct-4bit --port 8080
@@ -78,19 +78,16 @@ Expect a 7B-class model to drive Commands, and a model under about 3B not to. Th
 |---|---|
 | `context_window` | A local model has no LangChain profile, so `history_budget` needs it. Match the server's context size (`-c`) |
 | `model_timeout` | The default 10 s fails a cold start (48 s on `mlx_lm.server` with a download) or a long prompt on a small machine. Raise it, or warm the server with one request before `start()` |
-| `model_kwargs.max_tokens` | An output cap. A model too small for forced tool calls writes until the deadline on every reaction; a cap bounds the damage, and bounds an abandoned generation on `mlx_lm.server` |
+| `model_kwargs.max_tokens` | An output cap. A model too small for forced tool calls writes until the deadline on every reaction; a cap bounds the damage |
 | `force_tool_call` | Read only with an output Command. `llama-server` honours `tool_choice: "required"`, `mlx_lm.server` ignores it; set `false` for a server that rejects it (every call then fails `model_error`) |
 
 Token usage and prompt-prefix reuse are reported by both servers tried: `history_budget` works, and `cache_read_tokens` in the reaction record shows the reused prefix ([latency-and-traces.md](latency-and-traces.md)).
 
 ## Cancellation
 
-When a reaction is abandoned (a `model_timeout`, `stop()`, `close()`), WICA closes the connection.
+When a reaction is abandoned (a `model_timeout`, `stop()`, `close()`), WICA closes the connection. The model call is streamed, so the server's next write fails and it stops generating within about a token: measured on `llama-server` and `mlx_lm.server`, and the next call is served at once.
 
-- **`llama-server`** stops generating within about a second, and the next call is served at once.
-- **`mlx_lm.server`** does not notice: the abandoned generation runs to its output cap and slows the next calls while it shares the GPU. Set `max_tokens`.
-
-A proxy or load balancer between WICA and the server may not pass the disconnect through promptly; check on the real path, not only on localhost. See also [limits.md](limits.md).
+A proxy or load balancer between WICA and the server may not pass the disconnect through promptly; check on the real path, not only on localhost.
 
 ## On a cloud server
 
