@@ -5,6 +5,7 @@ import base64
 import contextvars
 import copy
 import inspect
+import json
 import math
 import logging
 import uuid
@@ -19,11 +20,15 @@ from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
+    InvalidToolCall,
     SystemMessage,
+    ToolCall,
     ToolMessage,
 )
+from langchain_core.messages.tool import invalid_tool_call, tool_call
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -379,6 +384,80 @@ def _retry_messages(
             last.model_copy(update={"content": [*content, reminder]}),
         ]
     return [*messages, HumanMessage(content=[reminder])]
+
+
+def _strict_args(raw: str) -> tuple[dict[str, Any], None] | tuple[None, str]:
+    """A streamed tool call's raw arguments, parsed strictly: (args, None), or (None, the error).
+    Empty means no arguments; anything else must be one complete JSON object."""
+    if not raw.strip():
+        return {}, None
+    try:
+        args = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"arguments are not complete JSON ({exc})"
+    if not isinstance(args, dict):
+        return None, f"arguments are a JSON {type(args).__name__}, not an object"
+    return args, None
+
+
+def _assemble(summed: AIMessageChunk) -> AIMessage:
+    """The summed chunks of a streamed call as one AIMessage, its tool calls parsed strictly.
+
+    LangChain assembles streamed arguments with a lenient partial-JSON parser that closes whatever
+    is left open, so a call cut by the output cap would come out valid with truncated arguments.
+    Each call's raw arguments are parsed strictly instead; a malformed call goes to
+    `invalid_tool_calls`, where a non-streamed call with the same arguments lands, and is logged.
+    Content, usage and metadata are kept as summed. See specs/agent.md ("Streaming the model
+    call")."""
+    calls: list[ToolCall] = []
+    invalid: list[InvalidToolCall] = []
+    for part in summed.tool_call_chunks:
+        name, raw, call_id = part["name"], part["args"] or "", part["id"]
+        args, error = _strict_args(raw)
+        if args is not None and not name:
+            args, error = None, "the call has no name"
+        if args is None or not name:
+            invalid.append(
+                invalid_tool_call(name=name, args=raw, id=call_id, error=error)
+            )
+            _logger.warning("malformed tool call %r dropped: %s", name, error)
+            continue
+        calls.append(tool_call(name=name, args=args, id=call_id))
+    return AIMessage(
+        content=summed.content,
+        additional_kwargs=summed.additional_kwargs,
+        response_metadata=summed.response_metadata,
+        usage_metadata=summed.usage_metadata,
+        id=summed.id,
+        name=summed.name,
+        tool_calls=calls,
+        invalid_tool_calls=invalid,
+    )
+
+
+async def _stream_response(
+    bound_model: Runnable[Any, AIMessage], messages: list[BaseMessage]
+) -> AIMessage:
+    """One model call, streamed: the chunks summed and assembled into one AIMessage. A model with
+    no streaming path yields its whole AIMessage once (LangChain's fallback), used as is. See
+    specs/agent.md ("Streaming the model call")."""
+    summed: AIMessageChunk | None = None
+    whole: AIMessage | None = None
+    async for piece in bound_model.astream(messages):
+        if isinstance(piece, AIMessageChunk) and whole is None:
+            summed = piece if summed is None else summed + piece
+        elif isinstance(piece, AIMessage) and summed is None and whole is None:
+            whole = piece
+        else:
+            raise TypeError(
+                f"the model streamed an unexpected {type(piece).__name__} after "
+                f"{'a whole message' if whole is not None else 'chunks'}"
+            )
+    if whole is not None:
+        return whole
+    if summed is None:
+        raise ValueError("the model's stream yielded nothing")
+    return _assemble(summed)
 
 
 def _token_usage(response: AIMessage) -> TokenUsage | None:
@@ -1448,7 +1527,7 @@ class Agent:
                 },
             ) as model_span:
                 async with deadline:
-                    response = await bound_model.ainvoke(messages)
+                    response = await _stream_response(bound_model, messages)
                 usage = _token_usage(response)
                 if usage is not None:
                     model_span.set_attributes(

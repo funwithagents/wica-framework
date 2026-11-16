@@ -48,7 +48,7 @@ A **reaction** is one turn of the Agent's loop — the trigger(s) that woke it, 
 | Raw trigger reaches the loop | `on_trigger` emission after the `call_soon_threadsafe` hop | `arrived_at` |
 | Coalescing window | `_handle_trigger` → `_flush_window` | `window_opened_at`, `window_closed_at` |
 | Observation + rendering | `_run_step` before `on_prompt` | `prompt_ready_at` |
-| Model call | `ainvoke` | `model_started_at`, `model_ended_at` |
+| Model call | `astream`, chunks summed into one message ([agent.md](agent.md), "Streaming the model call") | `model_started_at`, `model_ended_at` (the last chunk) |
 | Free text to the sink | `await self._output_sink(text)` | `sink_duration` |
 | Command dispatch, reaction end | end of `_run_step` | `ended_at` |
 | Command running → terminal | the Command task | the entry's `running` and terminal version timestamps |

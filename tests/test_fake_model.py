@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.tools import tool
 
 from wica.fake_model import FakeChatModel
@@ -176,3 +176,84 @@ def test_scripted_usage_overrides_the_estimate():
     assert message.usage_metadata["input_tokens"] == 90000
     assert message.usage_metadata["output_tokens"] == 7
     assert message.usage_metadata["total_tokens"] == 90007
+
+
+# --- Streaming (specs/fake-provider.md "Streaming") ----------------------------------------------
+
+
+async def _collect(model: FakeChatModel, prompt: str) -> list[AIMessageChunk]:
+    chunks: list[AIMessageChunk] = []
+    async for chunk in model.astream(prompt):
+        assert isinstance(chunk, AIMessageChunk)
+        chunks.append(chunk)
+    return chunks
+
+
+STEP = {
+    "text": "Adding them now.",
+    "tool_calls": [
+        {"name": "add", "args": {"a": 1, "b": 2}},
+        {"name": "greet", "args": {"name": "Ada"}},
+    ],
+}
+
+
+def test_astream_splits_a_step_into_chunks_that_sum_to_the_ainvoke_message():
+    async def scenario() -> None:
+        streamed = FakeChatModel(script=[STEP], delay_s=0)
+        chunks = await _collect(streamed, "q")
+        whole = await FakeChatModel(script=[STEP], delay_s=0).ainvoke("q")
+
+        # The text arrives in pieces, each tool call across two chunks, the usage on one chunk
+        # after them (LangChain may close the stream with an empty chunk of its own).
+        assert [c.text for c in chunks if c.text] == ["Adding ", "them ", "now."]
+        assert sum(1 for c in chunks if c.tool_call_chunks) == 4
+        with_usage = [i for i, c in enumerate(chunks) if c.usage_metadata]
+        assert len(with_usage) == 1
+        assert chunks[with_usage[0]].usage_metadata == whole.usage_metadata
+        assert with_usage[0] > max(
+            i for i, c in enumerate(chunks) if c.tool_call_chunks
+        )
+        summed = chunks[0]
+        for chunk in chunks[1:]:
+            summed = summed + chunk
+        assert summed.text == whole.text
+        assert summed.tool_calls == whole.tool_calls
+        assert summed.usage_metadata == whole.usage_metadata
+        # One call recorded, one script step consumed.
+        assert len(streamed.calls) == 1
+        assert (await streamed.ainvoke("q")).text == ""
+
+    asyncio.run(scenario())
+
+
+def test_astream_of_an_empty_step_yields_only_the_usage():
+    async def scenario() -> None:
+        chunks = await _collect(FakeChatModel(script=[{}], delay_s=0), "four")
+        assert all(c.text == "" and c.tool_call_chunks == [] for c in chunks)
+        usages = [c.usage_metadata for c in chunks if c.usage_metadata]
+        assert len(usages) == 1
+        assert usages[0]["input_tokens"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_astream_is_cancellable_during_the_delay_before_its_first_chunk():
+    async def scenario() -> None:
+        model = FakeChatModel(script=[{"text": "slow"}], delay_s=5)
+        task = asyncio.create_task(_collect(model, "q"))
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_astream_validates_scripted_tool_names_like_ainvoke():
+    model = FakeChatModel(
+        script=[{"tool_calls": [{"name": "typo", "args": {}}]}], delay_s=0
+    )
+    model.bind_tools([add])
+    with pytest.raises(ValueError, match="typo"):
+        asyncio.run(_collect(model, "q"))

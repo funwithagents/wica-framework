@@ -5,19 +5,21 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from typing import Any
 
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages.tool import tool_call_chunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from opentelemetry.trace import format_trace_id
@@ -34,6 +36,7 @@ from wica.agent import (
     _EMPTY_OBSERVATION_BLOCK,
     _NOOP_ACK,
     _NOOP_COMMAND_NAME,
+    _assemble,
     build_chat_model,
     mark_cache_breakpoint,
 )
@@ -1886,48 +1889,45 @@ def test_huggingface_hub_is_forced_with_required_past_its_single_tool_check(
     directly, so the Hub client receives tool_choice="required" with every tool. Driven offline:
     the real huggingface-hub model from build_chat_model, its async client replaced by one that
     records the request."""
-    from huggingface_hub import ChatCompletionOutput
     from langchain_huggingface import ChatHuggingFace
 
     requests: list[dict[str, Any]] = []
 
-    class RecordingClient:
-        async def chat_completion(self, **kwargs: Any) -> ChatCompletionOutput:
-            requests.append(kwargs)
-            return ChatCompletionOutput.parse_obj_as_instance(
+    async def stream() -> AsyncIterator[dict[str, Any]]:
+        # The Agent streams the call: a tool-call delta, then the usage chunk the Hub sends when
+        # asked to (stream_options.include_usage).
+        yield {
+            "choices": [
                 {
-                    "id": "r1",
-                    "created": 0,
-                    "model": "m",
-                    "system_fingerprint": "",
-                    "object": "chat.completion",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "finish_reason": "tool_calls",
-                            "message": {
-                                "role": "assistant",
-                                "content": None,
-                                "tool_calls": [
-                                    {
-                                        "id": "n1",
-                                        "type": "function",
-                                        "function": {
-                                            "name": _NOOP_COMMAND_NAME,
-                                            "arguments": "{}",
-                                        },
-                                    }
-                                ],
-                            },
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 1,
-                        "completion_tokens": 1,
-                        "total_tokens": 2,
+                    "index": 0,
+                    "finish_reason": "tool_calls",
+                    "delta": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "n1",
+                                "type": "function",
+                                "function": {
+                                    "name": _NOOP_COMMAND_NAME,
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
                     },
                 }
-            )
+            ]
+        }
+        yield {
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    class RecordingClient:
+        async def chat_completion(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+            requests.append(kwargs)
+            return stream()
 
     model = build_chat_model(
         AgentConfig(
@@ -3856,3 +3856,289 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
         agent.add_response_guard(lambda r: None, name="mine")
     with pytest.raises(ValueError, match="no response guard"):
         agent.remove_response_guard("invalid_args")
+
+
+# --- Streaming the model call (specs/agent.md "Streaming the model call") ------------------------
+
+
+def _tool_chunk(
+    index: int, args: str, *, name: str | None = None, call_id: str | None = None
+) -> AIMessageChunk:
+    return AIMessageChunk(
+        content="",
+        tool_call_chunks=[
+            tool_call_chunk(name=name, args=args, id=call_id, index=index)
+        ],
+    )
+
+
+def _usage_chunk(input_tokens: int, output_tokens: int) -> AIMessageChunk:
+    return AIMessageChunk(
+        content="",
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    )
+
+
+def _sum(chunks: Sequence[AIMessageChunk]) -> AIMessageChunk:
+    summed = chunks[0]
+    for chunk in chunks[1:]:
+        summed = summed + chunk
+    return summed
+
+
+type Stream = Callable[[], AsyncIterator[AIMessageChunk]]
+
+
+def chunks_stream(*chunks: AIMessageChunk) -> Stream:
+    async def stream() -> AsyncIterator[AIMessageChunk]:
+        for chunk in chunks:
+            await asyncio.sleep(0)
+            yield chunk
+
+    return stream
+
+
+class StreamingChatModel(BaseChatModel):
+    """A streaming double: each call plays the next scripted stream of chunks (the last one
+    repeats). Like ProgrammableChatModel, injected through the Agent's `model=` seam."""
+
+    streams: list[Stream] = Field(default_factory=list)
+    calls: list[list[BaseMessage]] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-stream"
+
+    def _generate(
+        self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs: Any
+    ) -> ChatResult:
+        raise NotImplementedError("StreamingChatModel only streams")
+
+    async def _astream(
+        self, messages: list[BaseMessage], stop=None, run_manager=None, **kwargs: Any
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        index = min(len(self.calls), len(self.streams) - 1)
+        self.calls.append(messages)
+        async for chunk in self.streams[index]():
+            yield ChatGenerationChunk(message=chunk)
+
+    def bind_tools(
+        self, tools, *, tool_choice=None, **kwargs: Any
+    ) -> Runnable[Any, AIMessage]:
+        return self.bind(tool_choice=tool_choice)
+
+
+def test_assemble_sums_split_text_tool_calls_and_usage():
+    summed = _sum(
+        [
+            AIMessageChunk(content="Turning it "),
+            AIMessageChunk(content="red."),
+            _tool_chunk(0, '{"col', name="set_light", call_id="c1"),
+            _tool_chunk(0, 'or": "red"}'),
+            _tool_chunk(1, "", name=_NOOP_COMMAND_NAME, call_id="c2"),
+            _usage_chunk(30, 12),
+        ]
+    )
+
+    message = _assemble(summed)
+
+    assert type(message) is AIMessage
+    assert message.text == "Turning it red."
+    assert message.tool_calls == [
+        {
+            "name": "set_light",
+            "args": {"color": "red"},
+            "id": "c1",
+            "type": "tool_call",
+        },
+        {"name": _NOOP_COMMAND_NAME, "args": {}, "id": "c2", "type": "tool_call"},
+    ]
+    assert message.invalid_tool_calls == []
+    assert message.usage_metadata is not None
+    assert message.usage_metadata["input_tokens"] == 30
+    assert message.usage_metadata["output_tokens"] == 12
+
+
+def test_assemble_drops_a_call_cut_mid_arguments_that_langchain_would_close(caplog):
+    summed = _sum(
+        [
+            _tool_chunk(0, '{"text": "Once upon', name="say", call_id="c1"),
+            _tool_chunk(0, " a time, in"),
+        ]
+    )
+    # LangChain's own lenient assembly turns the cut call into a valid one.
+    assert summed.tool_calls[0]["args"] == {"text": "Once upon a time, in"}
+
+    with caplog.at_level(logging.WARNING, logger="wica"):
+        message = _assemble(summed)
+
+    assert message.tool_calls == []
+    [invalid] = message.invalid_tool_calls
+    assert invalid["name"] == "say"
+    assert invalid["args"] == '{"text": "Once upon a time, in'
+    assert invalid["id"] == "c1"
+    assert invalid["error"] is not None and "not complete JSON" in invalid["error"]
+    assert "malformed tool call 'say'" in caplog.text
+
+
+def test_assemble_rejects_arguments_that_are_not_an_object():
+    message = _assemble(_tool_chunk(0, "[1, 2]", name="say", call_id="c1"))
+    assert message.tool_calls == []
+    [invalid] = message.invalid_tool_calls
+    assert invalid["error"] == "arguments are a JSON list, not an object"
+
+
+def test_assemble_keeps_list_content_such_as_a_thinking_block():
+    thinking = {"type": "thinking", "thinking": "hm", "signature": "s", "index": 0}
+    message = _assemble(_sum([AIMessageChunk(content=[thinking])]))
+    assert message.content == [thinking]
+
+
+def _streaming_agent(
+    streams: Sequence[Stream], loop, world, sink, **kwargs: Any
+) -> tuple[Agent, StreamingChatModel, list[ReactionTrace], threading.Event]:
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = StreamingChatModel(streams=list(streams))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, coalesce_window=0, **kwargs
+    )
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    return agent, model, traces, done
+
+
+def test_a_streamed_response_is_used_once_whole(loop, world, sink):
+    """Split text reaches the sink once, whole; a split tool call is dispatched once with all its
+    arguments; the usage from the last chunk lands in the reaction record."""
+    lights: list[str] = []
+
+    async def set_light(color: str) -> str:
+        """Set the light's color."""
+        lights.append(color)
+        return "ok"
+
+    agent, _, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                AIMessageChunk(content="Turning "),
+                AIMessageChunk(content="it red."),
+                _tool_chunk(0, '{"color"', name="set_light", call_id="c1"),
+                _tool_chunk(0, ': "red"}'),
+                _usage_chunk(40, 9),
+            ),
+            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+        ],
+        loop,
+        world,
+        sink,
+    )
+    agent.register_command(set_light)
+    agent.start()
+
+    world.update("input", "make it red")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: lights == ["red"])
+    agent.stop()
+
+    assert sink.texts == ["Turning it red."]
+    assert traces[0].outcome == "ok"
+    assert traces[0].usage == TokenUsage(40, 9, None)
+    assert len(traces[0].command_call_ids) == 1
+
+
+def test_a_streamed_call_cut_by_the_cap_is_not_dispatched_and_is_retried(
+    loop, world, sink
+):
+    """A `say` whose arguments were cut is malformed: not spoken, and with no other call the
+    output_command_required guard asks again."""
+    spoken: list[str] = []
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                _tool_chunk(0, '{"text": "Once upon a ti', name="say", call_id="s1")
+            ),
+            chunks_stream(
+                _tool_chunk(
+                    0, '{"text": "Once upon a time."}', name="say", call_id="s2"
+                )
+            ),
+            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+        ],
+        loop,
+        world,
+        sink,
+        output_command=_say_command(spoken),
+    )
+    agent.start()
+
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    agent.stop()
+
+    assert spoken == ["Once upon a time."]
+    assert traces[0].outcome == "ok"
+    assert traces[0].attempts == 2
+    assert len(model.calls) == 3
+
+
+def _failing_after_first_chunk() -> AsyncIterator[AIMessageChunk]:
+    async def stream() -> AsyncIterator[AIMessageChunk]:
+        yield AIMessageChunk(content="Hel")
+        raise ConnectionError("stream broken")
+
+    return stream()
+
+
+def _stalling_after_first_chunk() -> AsyncIterator[AIMessageChunk]:
+    async def stream() -> AsyncIterator[AIMessageChunk]:
+        yield AIMessageChunk(content="Hel")
+        await asyncio.Event().wait()
+        yield AIMessageChunk(content="lo")
+
+    return stream()
+
+
+def _empty_stream() -> AsyncIterator[AIMessageChunk]:
+    async def stream() -> AsyncIterator[AIMessageChunk]:
+        return
+        yield  # an async generator that yields nothing
+
+    return stream()
+
+
+@pytest.mark.parametrize(
+    ("stream", "outcome", "error"),
+    [
+        (_failing_after_first_chunk, "model_error", "stream broken"),
+        (
+            _stalling_after_first_chunk,
+            "model_timeout",
+            "model call exceeded its 0.1 s deadline",
+        ),
+        (_empty_stream, "model_error", "No generation chunks were returned"),
+    ],
+)
+def test_a_stream_that_does_not_complete_discards_its_partial_message(
+    loop, world, sink, stream, outcome, error
+):
+    agent, _, traces, done = _streaming_agent(
+        [stream], loop, world, sink, model_timeout=0.1
+    )
+    agent.start()
+
+    world.update("input", "hello")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert traces[0].outcome == outcome
+    assert traces[0].error is not None and error in traces[0].error
+    assert sink.texts == []
+    assert not any(isinstance(r, AssistantTextRecord) for r in agent._history)

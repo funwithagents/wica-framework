@@ -668,7 +668,8 @@ def test_model_timeout_from_config_bounds_the_model_call(wica_factory):
 
 class ChatCompletionsServer:
     """An in-process stand-in for a server implementing OpenAI's Chat Completions API: records each
-    request and answers with one assistant text and a usage block. No socket is opened."""
+    request and streams one assistant text, then a usage chunk, as server-sent events (the Agent
+    streams every call). No socket is opened."""
 
     def __init__(self, text: str) -> None:
         self.text = text
@@ -676,20 +677,26 @@ class ChatCompletionsServer:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "id": "cmpl-1",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "local",
+        head = {"id": "cmpl-1", "object": "chat.completion.chunk", "created": 0}
+        head["model"] = "local"
+        chunks = [
+            {
+                **head,
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": self.text},
-                        "finish_reason": "stop",
+                        "delta": {"role": "assistant", "content": self.text},
+                        "finish_reason": None,
                     }
                 ],
+            },
+            {
+                **head,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+            {
+                **head,
+                "choices": [],
                 "usage": {
                     "prompt_tokens": 120,
                     "completion_tokens": 4,
@@ -697,6 +704,12 @@ class ChatCompletionsServer:
                     "prompt_tokens_details": {"cached_tokens": 100},
                 },
             },
+        ]
+        body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+        return httpx.Response(
+            200,
+            content=body + "data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
         )
 
 
@@ -757,6 +770,8 @@ def test_a_compatible_server_is_reached_at_its_base_url_with_a_placeholder_key(
     assert str(request.url) == "http://127.0.0.1:8080/v1/chat/completions"
     body = json.loads(request.content)
     assert body["model"] == "qwen2.5-7b-instruct"
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
     assert body["messages"][-1]["role"] == "user"
     authorization = request.headers["authorization"]
     assert "sk-meant-for-openai" not in authorization
