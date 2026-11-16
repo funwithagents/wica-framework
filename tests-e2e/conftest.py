@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from support import rate_limited
 from wica.testing import Report
 
 
@@ -21,26 +22,6 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     This conftest loads only when tests-e2e/ is collected, so the fast tier keeps its workers.
     See specs/testing.md ("Tooling")."""
     config.option.numprocesses = 0
-
-
-def _rate_limited(exc: BaseException) -> BaseException | None:
-    """The provider error in `exc`'s chain that reports HTTP 429 (a rate limit or an exhausted
-    quota), if any. Duck-typed over the SDKs the providers raise through — `status_code` (OpenAI,
-    Anthropic), `code` (google-genai's `ClientError`), `response.status_code` (httpx's
-    `HTTPStatusError` from Mistral, huggingface_hub's `HfHubHTTPError`) — so no SDK is imported."""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        response = getattr(current, "response", None)
-        if 429 in (
-            getattr(current, "status_code", None),
-            getattr(current, "code", None),
-            getattr(response, "status_code", None),
-        ):
-            return current
-        current = current.__cause__ or current.__context__
-    return None
 
 
 class _LoggedErrors(logging.Handler):
@@ -62,7 +43,9 @@ def pytest_runtest_call(item: pytest.Item):
     """A provider that rate-limits the key (HTTP 429) says nothing about WICA: skip the failed
     test, as for a missing key, instead of failing the tier on the account's state
     (specs/testing.md, "Live tier"). The 429 is looked for in the raised exception's chain and in
-    every exception logged under `wica` while the test ran. Any other failure still fails."""
+    every exception logged under `wica` while the test ran. Any other failure still fails. A 429
+    the provider's client retries past `model_timeout` never surfaces here: the once-per-provider
+    preflight catches that one (`support.skip_if_rate_limited`)."""
     logged = _LoggedErrors()
     logger = logging.getLogger("wica")
     logger.addHandler(logged)
@@ -70,7 +53,7 @@ def pytest_runtest_call(item: pytest.Item):
         return (yield)
     except Exception as exc:
         for candidate in (exc, *logged.errors):
-            limited = _rate_limited(candidate)
+            limited = rate_limited(candidate)
             if limited is not None:
                 pytest.skip(f"provider rate limit (429): {str(limited)[:160]}")
         raise
