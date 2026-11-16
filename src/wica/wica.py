@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -11,6 +11,7 @@ from wica.agent import Agent, CommandIssued
 from wica.command import Command
 from wica.config import WicaConfig
 from wica.events import Event
+from wica.guards import ResponseGuard, ResponseRejection
 from wica.instrumentation import CommandTrace, ReactionTrace
 from wica.world import World, WorldEntry
 
@@ -55,6 +56,9 @@ class Wica:
         self.on_world_trigger: Event[WorldEntry] = world.on_trigger
         self.on_agent_trigger: Event[WorldEntry] = agent.on_trigger
         self.on_agent_prompt: Event[list[BaseMessage]] = agent.on_prompt
+        self.on_agent_response_rejected: Event[ResponseRejection] = (
+            agent.on_response_rejected
+        )
         self.on_agent_command: Event[CommandIssued] = agent.on_command
         self.on_agent_text: Event[str] = agent.on_text
         self.on_agent_reaction_ended: Event[ReactionTrace] = agent.on_reaction_ended
@@ -208,6 +212,25 @@ class Wica:
         delegated"). Command names are unique and ``noop``/``cancel_command`` are reserved: a
         duplicate or reserved name raises ``ValueError`` (see specs/commands.md)."""
         self.agent.register_command(fn)
+
+    @property
+    def response_guards(self) -> Mapping[str, ResponseGuard]:
+        """The Agent's response guards by name, in run order (= ``agent.response_guards``). See
+        specs/agent.md ("Response guards")."""
+        return self.agent.response_guards
+
+    def add_response_guard(
+        self, guard: ResponseGuard, *, name: str | None = None
+    ) -> None:
+        """**Experimental** — delegates to ``agent.add_response_guard``: add a guard that checks every
+        model response before it is used (``None`` accepts, a ``wica.guards.Retry`` rejects and the
+        model is called again, up to ``max_retries``). See specs/agent.md ("Response guards")."""
+        self.agent.add_response_guard(guard, name=name)
+
+    def remove_response_guard(self, name: str) -> None:
+        """Remove a response guard by name, a default one included — delegates to
+        ``agent.remove_response_guard``."""
+        self.agent.remove_response_guard(name)
 
     def set_output_sink(self, sink: Callable[[str], Awaitable[None]] | None) -> None:
         """Set (or, with None, clear) the async sink receiving the model's free text each step —

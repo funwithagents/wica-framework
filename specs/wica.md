@@ -34,9 +34,11 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 | `wica.register_command(fn)` | method | Delegates to `agent.register_command` — mirrored onto `Wica` since it's part of the everyday setup flow. Takes one argument, `fn: Callable \| Command`; override name/description by passing a `Command(fn, name=…, description=…)` (see [commands.md](commands.md), "The `Command` object"). |
 | `wica.set_output_sink(sink)` | method | Delegates to `agent.set_output_sink` — sets (or, with `None`, clears) the async sink that receives the model's free text each step (see [agent.md](agent.md), "Output"). A single replaceable slot, hence `set_`, not `register_`. |
 | `wica.set_output_command(fn)` | method | Delegates to `agent.set_output_command` — sets (or, with `None`, clears) the user-facing output Command (`Callable \| Command`; see [agent.md](agent.md), "Output"). When set, free text becomes the agent's private reasoning stream. A single replaceable slot. |
+| `wica.add_response_guard(guard, *, name=None)` / `wica.remove_response_guard(name)` / `wica.response_guards` | methods / mapping | Delegate to the Agent's response guards (see [agent.md](agent.md), "Response guards"): remove a default guard by name, or — **experimental** — add an application guard. Mirrored for the same reason `register_command` is: it is setup. |
 | `wica.on_world_trigger` | `Event[WorldEntry]` | The World's **raw** trigger — fires on every qualifying update, pre-coalescing (= `world.on_trigger`). |
 | `wica.on_agent_trigger` | `Event[WorldEntry]` | The Agent's **filtered** trigger — fires once per trigger a run-to-completion step actually observes (= `agent.on_trigger`). |
-| `wica.on_agent_prompt` | `Event[list[BaseMessage]]` | Fires with the exact rendered messages before each model call (= `agent.on_prompt`). |
+| `wica.on_agent_prompt` | `Event[list[BaseMessage]]` | Fires with the exact rendered messages before each reaction's first model call (= `agent.on_prompt`). |
+| `wica.on_agent_response_rejected` | `Event[ResponseRejection]` | Fires once per response attempt the response guards reject (= `agent.on_response_rejected`; see [agent.md](agent.md), "Response guards"). |
 | `wica.on_agent_command` | `Event[CommandIssued]` | Fires with each Command the model issues, at dispatch time (= `agent.on_command`). |
 | `wica.on_agent_text` | `Event[str]` | Fires with the model's complete free text for a step, right before the output sink receives it (= `agent.on_text`). Observation only — the sink stays the delivery slot. |
 | `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | Fires once at the end of every reaction that started, whatever its outcome (= `agent.on_reaction_ended`; see [instrumentation.md](instrumentation.md)). |
@@ -116,7 +118,8 @@ The World and the Agent each own their instrumentation as `Event`s (see [world.m
 |---|---|---|
 | `wica.on_world_trigger` | `world.on_trigger` | `Event[WorldEntry]` — **raw** trigger, every qualifying update (pre-coalescing) |
 | `wica.on_agent_trigger` | `agent.on_trigger` | `Event[WorldEntry]` — **filtered** trigger, per trigger a step observed |
-| `wica.on_agent_prompt` | `agent.on_prompt` | `Event[list[BaseMessage]]` — the rendered messages before each model call |
+| `wica.on_agent_prompt` | `agent.on_prompt` | `Event[list[BaseMessage]]` — the rendered messages before each reaction's first model call |
+| `wica.on_agent_response_rejected` | `agent.on_response_rejected` | `Event[ResponseRejection]` — once per response attempt the response guards reject |
 | `wica.on_agent_command` | `agent.on_command` | `Event[CommandIssued]` — each Command issued, at dispatch |
 | `wica.on_agent_text` | `agent.on_text` | `Event[str]` — the step's complete free text, before the sink receives it |
 | `wica.on_agent_reaction_ended` | `agent.on_reaction_ended` | `Event[ReactionTrace]` — once at the end of every reaction that started, whatever its outcome |

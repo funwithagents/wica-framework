@@ -2,7 +2,7 @@
 
 The public surface of WICA: what you import, the entry point and what it owns, the World API, `Command`, the Events, the errors, and the contracts that hold across them. The normative design, with its rationale, is in the specs each section links.
 
-On this page: [Imports](#imports) · [Construction](#construction) · [The `Wica` surface](#the-wica-surface) · [The World](#the-world) · [`Command`](#command) · [Events](#events) · [Errors](#errors) · [Contracts](#contracts).
+On this page: [Imports](#imports) · [Construction](#construction) · [The `Wica` surface](#the-wica-surface) · [The World](#the-world) · [`Command`](#command) · [Response guards](#response-guards) · [Events](#events) · [Errors](#errors) · [Contracts](#contracts).
 
 ## Imports
 
@@ -21,7 +21,7 @@ From `wica`:
 | `ConfigError`, `MissingEnvError` | The errors a caller catches ([Errors](#errors)) |
 | `Agent` | The reasoning loop, owned by `Wica` and reached as `wica.agent`; constructible directly for a programmatic model double ([../guides/testing.md](../guides/testing.md)) |
 
-Three subpackages are imported explicitly, never re-exported from `wica`: **`wica.contrib.gradio`** (the browser panels, behind the `gradio` extra: [../guides/gradio-panels.md](../guides/gradio-panels.md)), **`wica.testing`** (the Probe, the `TestRun` harness, the report, the scripted tester, scenario files and checks: [../guides/testing.md](../guides/testing.md)) and **`wica.benchmark`** (the matrix, `Target`, the runner, the summary, the CLI: [../guides/benchmarking.md](../guides/benchmarking.md)). `wica.fake_model.FakeChatModel` is the scripted model behind `provider: "fake"`, for the direct seam. `wica.instrumentation` holds the measures over the records (`reaction_latency`, `reactions_per_input`).
+Three subpackages are imported explicitly, never re-exported from `wica`: **`wica.contrib.gradio`** (the browser panels, behind the `gradio` extra: [../guides/gradio-panels.md](../guides/gradio-panels.md)), **`wica.testing`** (the Probe, the `TestRun` harness, the report, the scripted tester, scenario files and checks: [../guides/testing.md](../guides/testing.md)) and **`wica.benchmark`** (the matrix, `Target`, the runner, the summary, the CLI: [../guides/benchmarking.md](../guides/benchmarking.md)). `wica.fake_model.FakeChatModel` is the scripted model behind `provider: "fake"`, for the direct seam. `wica.instrumentation` holds the measures over the records (`reaction_latency`, `reactions_per_input`). `wica.guards` holds the response-guard types ([Response guards](#response-guards)); writing your own guard is experimental.
 
 ## Construction
 
@@ -41,13 +41,16 @@ wica.set_output_command(fn_or_command | None)     # the user-facing output chann
 wica.start(); wica.stop(); wica.start()           # restartable: stop() is a pause
 wica.close()                                      # terminal: releases an owned loop; no restart
 wica.is_running                                   # True between start() and stop()
-wica.on_<event>.subscribe(handler)                # the eight Events (below)
+wica.remove_response_guard(name)                  # drop a default response guard (below)
+wica.response_guards                              # name -> guard, in the order they run
+wica.on_<event>.subscribe(handler)                # the nine Events (below)
 ```
 
 - **`register_command(fn)`**: a sync or async function (its name and docstring become the tool's name and description), or a `Command`. Names are unique and `noop`/`cancel_command` are reserved: a duplicate or reserved name raises `ValueError`. Register before `start()`. [../guides/commands.md](../guides/commands.md).
 - **`set_output_sink(sink)`**: an `async def sink(text: str) -> None`, called once per reasoning step with the model's complete free text, when there is any. `None` clears it. Without an output Command, this text is the reply; with one, it is the model's private reasoning.
 - **`set_output_command(fn)`**: the Command the model must call to address the user (speech, a chat bubble). It is registered like any Command and also recomposes the system prompt, so set it before `start()`; a bare callable gets `triggers_on_completion=True`. `None` clears it.
 - **Lifecycle**: `start()` starts the World then the Agent (and the loop thread when owned); `stop()` cancels in-flight Commands and stops both, keeping registrations, values, subscriptions and history; `close()` stops if needed and releases the loop. `start()` on a running Wica is a no-op; `start()` after `close()` raises `RuntimeError`.
+- **Response guards** check every model response before it is used, and send a wrong one back to the model: [Response guards](#response-guards).
 - **`wica.world` and `wica.agent` are borrowed references**, valid for the life of the Wica.
 
 [specs/wica.md](../../specs/wica.md).
@@ -88,6 +91,28 @@ Command(fn: Callable | BaseTool, *, name: str | None = None, description: str | 
 
 Wraps a callable (name from `__name__`, description from the docstring, both overridable) or an existing LangChain `BaseTool` (its own name and description; overriding them raises `ValueError`). `triggers_on_completion=False` makes the Command's terminal completion wake no reasoning step. [../guides/commands.md](../guides/commands.md); [specs/commands.md](../../specs/commands.md).
 
+## Response guards
+
+Before a model response is used (its text delivered, its Commands dispatched), WICA checks it with its **response guards**. A guard that finds a mistake rejects the response: the model is called again, over the same conversation plus a correction, up to `max_retries` times (default `1`, [configuration.md](configuration.md#the-agent-block)). Only the accepted response enters the history, so later prompts never show the mistake. Out of retries, the reaction ends with the `rejected` outcome: nothing is said or done, and an ERROR log line carries the reason.
+
+Three guards are on by default:
+
+| Guard | Rejects a response that |
+|---|---|
+| `unknown_command` | calls a Command that is not registered |
+| `invalid_args` | calls a Command with arguments that do not fit its signature |
+| `output_command_required` | has no Command call at all while an output Command is set (its text would reach nobody) |
+
+Each retry is a full model call the person waits for, and the Agent drops new inputs meanwhile, like during any step. To turn a guard off:
+
+```python
+wica.remove_response_guard("output_command_required")
+```
+
+`max_retries: 0` keeps the guards but never retries: a rejected response ends the reaction at once, its other Commands included.
+
+**Your own guards are experimental.** `wica.add_response_guard(guard, name=None)` adds one: a function that receives a `wica.guards.ModelResponse` (`text`, `commands`, `bound`, `output_command_name`) and returns `None` to accept or a `wica.guards.Retry(feedback, show_response=True)` to reject; `show_response=False` retries with a reminder instead of showing the model its response. The shape may change without notice while we learn how guards behave, so do not build on it yet. A sync guard runs on the event loop and holds everything while it runs; an async one (an LLM judging the answer) holds the reaction, so inputs are dropped for as long as it takes. [specs/agent.md](../../specs/agent.md), "Response guards".
+
 ## Events
 
 Each is an `Event[T]` you `.subscribe(handler)` on, multi-consumer, emitted on the loop thread; a raising handler is isolated from the others. The same objects are reachable on `wica.world` and `wica.agent`.
@@ -97,7 +122,8 @@ Each is an `Event[T]` you `.subscribe(handler)` on, multi-consumer, emitted on t
 | `wica.on_world_trigger` | `WorldEntry` | Raw: every qualifying World update, before coalescing, including the triggers a busy Agent later drops |
 | `wica.on_agent_trigger` | `WorldEntry` | Filtered: once per trigger a reasoning step observed (several per step when a burst was coalesced) |
 | `wica.on_agent_trigger_dropped` | `WorldEntry` | A trigger that arrived while a step was in flight and was dropped |
-| `wica.on_agent_prompt` | `list[BaseMessage]` | The exact rendered messages, before each model call |
+| `wica.on_agent_prompt` | `list[BaseMessage]` | The exact rendered messages, before each reaction's first model call |
+| `wica.on_agent_response_rejected` | `ResponseRejection` | A response the [response guards](#response-guards) rejected: `attempt`, `response`, `feedback`, `show_response`, `will_retry` |
 | `wica.on_agent_command` | `CommandIssued` | Each Command the model issues, at dispatch, `noop` included; the `agent:command:<call_id>` entry exists when it fires |
 | `wica.on_agent_command_ended` | `CommandTrace` | A Command's terminal state (`complete`, `failed`, `cancelled`), with its timing |
 | `wica.on_agent_text` | `str` | The step's complete free text, right before the output sink receives it |
@@ -112,7 +138,7 @@ Each is an `Event[T]` you `.subscribe(handler)` on, multi-consumer, emitted on t
 | `ConfigError` | the loaders, `AgentConfig`, `Wica.init` | A missing, unknown or mistyped key, an invalid field combination; an unreadable prompt file; a `history_budget` with no known context window |
 | `MissingEnvError` | `Wica.init` | `api_key_env` names a variable that is unset (a `ConfigError` subclass) |
 | `ImportError` | `Wica.init` | The selected provider's extra is not installed |
-| `ValueError` | `register_command`, `set_output_command`, `world.register`, `Command` | A duplicate or reserved Command name; an invalid World key or an already registered one; a name or description override on a `BaseTool` |
+| `ValueError` | `register_command`, `set_output_command`, `remove_response_guard`, `add_response_guard`, `world.register`, `Command` | A duplicate or reserved Command name; an unknown or duplicate guard name; an invalid World key or an already registered one; a name or description override on a `BaseTool` |
 | `TypeError` | `world.update` | A value that is not of the entry's declared type (`None` is always allowed) |
 | `RuntimeError` | `world.update`, `start`, `stop`, `close` | `update()` while not running; `start()` after `close()`, or on an injected loop that is not running; `stop()`/`close()` called from the Wica's own loop thread |
 

@@ -102,6 +102,28 @@ def test_render_reaction_trace_shows_usage_commands_noop_and_error():
     assert "error: boom" in render_reaction_trace(failed)
 
 
+def test_render_reaction_trace_shows_retries_only_when_there_were_some():
+    retried = make_reaction_trace(
+        attempts=2, rejections=("never say bad",), guard_duration=0.002
+    )
+    out = render_reaction_trace(retried)
+    assert "attempts: 2" in out
+    assert "rejected attempt 1: never say bad" in out
+    assert "guard time: 0.002s" in out
+
+    assert "attempts" not in render_reaction_trace(make_reaction_trace())
+
+    rejected = make_reaction_trace(
+        outcome="rejected",
+        attempts=2,
+        rejections=("too long", "still too long"),
+        error="still too long",
+    )
+    out = render_reaction_trace(rejected)
+    assert out.startswith("reaction 1 — rejected")
+    assert "rejected attempt 2: still too long" in out
+
+
 # --- the log -------------------------------------------------------------------------
 
 

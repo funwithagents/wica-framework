@@ -89,8 +89,9 @@ def render_messages(messages: list[BaseMessage]) -> str:
 def render_reaction_trace(trace: ReactionTrace) -> str:
     """The reaction's ReactionTrace as readable text: outcome, the derived measures (only the ones
     whose underlying stamp exists — a cancelled reaction has no model_latency), token usage,
-    dispatched commands, noop, the error on a model_error or model_timeout outcome, and the
-    OpenTelemetry trace id when an SDK is installed. See specs/instrumentation.md ("Layer 1", "Metrics")."""
+    dispatched commands, noop, the attempts and each rejection's feedback when the response guards
+    sent a response back (see specs/agent.md, "Response guards"), the error on a model_error,
+    model_timeout or rejected outcome, and the OpenTelemetry trace id when an SDK is installed. See specs/instrumentation.md ("Layer 1", "Metrics")."""
     lines = [f"reaction {trace.reaction_id} — {trace.outcome}"]
     latency = reaction_latency(trace)
     if latency is not None:
@@ -100,6 +101,8 @@ def render_reaction_trace(trace: ReactionTrace) -> str:
         lines.append(f"render time: {trace.render_time:.3f}s")
     if trace.model_latency is not None:
         lines.append(f"model latency: {trace.model_latency:.3f}s")
+    if trace.guard_duration is not None:
+        lines.append(f"guard time: {trace.guard_duration:.3f}s")
     if trace.sink_duration is not None:
         lines.append(f"sink duration: {trace.sink_duration:.3f}s")
     lines.append(f"busy time: {trace.busy_time:.3f}s")
@@ -116,6 +119,10 @@ def render_reaction_trace(trace: ReactionTrace) -> str:
         lines.append(f"commands: {', '.join(trace.command_call_ids)}")
     if trace.noop:
         lines.append("noop")
+    if trace.attempts > 1 or trace.rejections:
+        lines.append(f"attempts: {trace.attempts}")
+        for n, feedback in enumerate(trace.rejections, start=1):
+            lines.append(f"rejected attempt {n}: {feedback}")
     if trace.error is not None:
         lines.append(f"error: {trace.error}")
     if trace.trace_id is not None:

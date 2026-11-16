@@ -40,6 +40,12 @@ from wica.agent import (
 from wica.command import Command
 from wica.config import AgentConfig, ConfigError
 from wica.content import Content, TextPart
+from wica.guards import (
+    REJECTED_TOOL_RESULT,
+    ModelResponse,
+    ResponseRejection,
+    Retry,
+)
 from wica.instrumentation import (
     CommandTrace,
     ReactionTrace,
@@ -204,6 +210,7 @@ def make_agent(
     context_window: int | None = None,
     model_timeout: float | None = 10.0,
     force_tool_call: bool = True,
+    max_retries: int = 1,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
@@ -220,6 +227,7 @@ def make_agent(
         context_window=context_window,
         model_timeout=model_timeout,
         force_tool_call=force_tool_call,
+        max_retries=max_retries,
     )
     agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
     if output_sink is not None:
@@ -1849,6 +1857,9 @@ def test_forcing_follows_the_output_command_as_it_is_set_and_cleared(loop, world
     )
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    # The scripted model answers in text even while forced; this test is about the binding, not
+    # about the guard that would reject that answer.
+    agent.remove_response_guard("output_command_required")
     agent.start()
 
     def step(n: int) -> None:
@@ -2014,8 +2025,9 @@ def test_command_finishing_after_the_world_stopped_does_not_raise(loop, world, s
 
 
 def test_unknown_command_name_fails_with_a_clear_error(loop, world, sink):
-    # A model naming a tool the Agent never bound fails the entry with a readable error (not the
-    # bare KeyError repr "'ghost'"), delivered to the next step like any Command failure.
+    # Without the unknown_command guard, a model naming a tool the Agent never bound fails the
+    # entry with a readable error (not the bare KeyError repr "'ghost'"), delivered to the next step
+    # like any Command failure.
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2026,6 +2038,7 @@ def test_unknown_command_name_fails_with_a_clear_error(loop, world, sink):
         )
     )
     agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.remove_response_guard("unknown_command")
     agent.start()
 
     world.update("input", "summon")
@@ -3537,3 +3550,309 @@ def test_only_anthropic_requests_carry_the_breakpoint(
     assert all(
         _breakpoints(p) == [] for p in prompts
     )  # observers see the plain rendering
+
+
+# --- Response guards: a rejected response is retried, only the accepted one is kept ------------
+#
+# See specs/agent.md ("Response guards"). The guards' own rules are in test_guards.py.
+
+
+def _with_usage(message: AIMessage, input_tokens: int) -> AIMessage:
+    message.usage_metadata = {
+        "input_tokens": input_tokens,
+        "output_tokens": 1,
+        "total_tokens": input_tokens + 1,
+    }
+    return message
+
+
+def _rejecting(word: str, *, show: bool) -> Callable[[ModelResponse], Retry | None]:
+    """An application guard rejecting any free text containing `word`."""
+
+    def guard(response: ModelResponse) -> Retry | None:
+        return (
+            Retry(f"never say {word}", show_response=show)
+            if word in response.text
+            else None
+        )
+
+    guard.__name__ = f"no_{word}"
+    return guard
+
+
+def _texts(message: BaseMessage) -> list[str]:
+    content = message.content
+    if isinstance(content, str):
+        return [content]
+    return [b if isinstance(b, str) else str(b.get("text", "")) for b in content]
+
+
+def test_a_rejected_response_is_retried_and_only_the_accepted_one_is_kept(
+    loop, world, sink
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    answers = iter(
+        [
+            AIMessage(
+                content="", tool_calls=[{"name": "ghost", "args": {}, "id": "g1"}]
+            ),
+            AIMessage(content="fine"),
+            AIMessage(content="second"),
+        ]
+    )
+
+    async def respond(messages: list[BaseMessage]) -> AIMessage:
+        return _with_usage(next(answers), 10 * (len(messages)))
+
+    model = ProgrammableChatModel(respond=respond)
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    prompts: list[list[BaseMessage]] = []
+    issued: list[CommandIssued] = []
+    rejections: list[ResponseRejection] = []
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_prompt.subscribe(prompts.append)
+    agent.on_command.subscribe(issued.append)
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("input", "summon")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    # Two model calls, one prompt event; the sink and on_command see only the accepted response.
+    assert len(model.calls) == 2
+    assert len(prompts) == 1
+    assert sink.texts == ["fine"]
+    assert issued == []
+    # The retry showed the rejected call, answered it, then said why.
+    retry = model.calls[1]
+    assert retry[: len(model.calls[0])] == model.calls[0]
+    shown, result, correction = retry[len(model.calls[0]) :]
+    assert isinstance(shown, AIMessage) and shown.tool_calls[0]["name"] == "ghost"
+    assert isinstance(result, ToolMessage) and result.tool_call_id == "g1"
+    assert result.content == REJECTED_TOOL_RESULT
+    assert isinstance(correction, HumanMessage)
+    assert "There is no command named 'ghost'" in correction.text
+    [rejection] = rejections
+    assert (rejection.attempt, rejection.show_response, rejection.will_retry) == (
+        1,
+        True,
+        True,
+    )
+    assert rejection.response.commands[0].name == "ghost"
+    [trace] = traces
+    assert trace.outcome == "ok"
+    assert trace.attempts == 2
+    assert trace.rejections == (rejection.feedback,)
+    assert trace.guard_duration is not None
+    first, second = (10 * len(c) for c in model.calls)
+    assert trace.usage == TokenUsage(first + second, 2, None)
+
+    # The next step's prompt reads as if the model had answered right the first time.
+    world.update("input", "again")
+    wait_until(lambda: len(model.calls) == 3)
+    next_prompt = model.calls[2]
+    rendered = " ".join(t for m in next_prompt for t in _texts(m))
+    assert "ghost" not in rendered and "rejected" not in rendered
+    assert [m.text for m in next_prompt if isinstance(m, AIMessage)] == ["fine"]
+    agent.stop()
+
+
+def test_a_reminder_retry_hides_the_response_and_extends_the_newest_observation(
+    loop, world, sink
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(text_response("bad words"), text_response("kind words"))
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.add_response_guard(_rejecting("bad", show=False))
+    agent.start()
+
+    world.update("input", "hello")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert sink.texts == ["kind words"]
+    first, retry = model.calls
+    assert len(retry) == len(first)
+    assert retry[:-1] == first[:-1]
+    assert not any(isinstance(m, AIMessage) for m in retry)
+    assert _texts(retry[-1])[: len(_texts(first[-1]))] == _texts(first[-1])
+    assert "never say bad" in _texts(retry[-1])[-1]
+    assert _no_consecutive_human_messages(retry)
+    agent.stop()
+
+
+def test_several_rejections_make_one_correction_shown_if_any_asks(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(text_response("bad and ugly"), text_response("nice"))
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.add_response_guard(_rejecting("bad", show=False))
+    agent.add_response_guard(_rejecting("ugly", show=True))
+    agent.start()
+
+    world.update("input", "hello")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    retry = model.calls[1]
+    assert isinstance(retry[-2], AIMessage) and retry[-2].text == "bad and ugly"
+    assert "- never say bad\n- never say ugly" in retry[-1].text
+    agent.stop()
+
+
+def test_out_of_retries_the_reaction_ends_rejected_and_nothing_is_used(
+    loop, world, sink, caplog
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(respond=text_response("bad"))
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent.add_response_guard(_rejecting("bad", show=True))
+    rejections: list[ResponseRejection] = []
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    with caplog.at_level(logging.WARNING, logger="wica.agent"):
+        world.update("input", "first")
+        assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(model.calls) == 2  # 1 + max_retries
+    assert sink.texts == []
+    assert [r.will_retry for r in rejections] == [True, False]
+    [trace] = traces
+    assert (trace.outcome, trace.attempts, trace.error) == (
+        "rejected",
+        2,
+        "never say bad",
+    )
+    levels = [r.levelno for r in caplog.records if "rejected" in r.getMessage()]
+    assert levels == [logging.WARNING, logging.ERROR]
+
+    # The rejected step left only its Observation, merged into the next prompt.
+    model.respond = text_response("good")
+    world.update("input", "second")
+    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    last = model.calls[-1]
+    assert not any(isinstance(m, AIMessage) for m in last)
+    assert _no_consecutive_human_messages(last)
+    assert "first" in last[-1].text and "second" in last[-1].text
+    agent.stop()
+
+
+def test_with_no_retries_the_first_rejection_ends_the_reaction(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=tool_call_response([("ghost", {}, "g1"), ("noop", {}, "n1")])
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink, max_retries=0)
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("input", "go")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert len(model.calls) == 1
+    assert traces[0].outcome == "rejected"
+    assert (
+        traces[0].noop is False
+    )  # the noop beside the unknown call was not used either
+    agent.stop()
+
+
+def test_a_retry_past_its_deadline_ends_the_reaction_as_a_timeout(loop, world, sink):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def slow(messages: list[BaseMessage]) -> AIMessage:
+        await asyncio.sleep(1.0)
+        return AIMessage(content="too late")
+
+    model = ProgrammableChatModel(respond=sequence(text_response("bad"), slow))
+    agent = make_agent(
+        model, world=world, loop=loop, output_sink=sink, model_timeout=0.2
+    )
+    agent.add_response_guard(_rejecting("bad", show=True))
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+    agent.on_reaction_ended.subscribe(_recorder(traces, done))
+    agent.start()
+
+    world.update("input", "go")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+
+    assert (traces[0].outcome, traces[0].attempts) == ("model_timeout", 2)
+    assert sink.texts == []
+    agent.stop()
+
+
+def test_a_raising_guard_accepts_and_an_async_guard_is_awaited(
+    loop, world, sink, caplog
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    model = ProgrammableChatModel(
+        respond=sequence(text_response("bad"), text_response("good"))
+    )
+    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+
+    def broken(response: ModelResponse) -> Retry | None:
+        raise RuntimeError("guard bug")
+
+    async def judge(response: ModelResponse) -> Retry | None:
+        await asyncio.sleep(0)
+        return (
+            Retry("not that", show_response=False) if response.text == "bad" else None
+        )
+
+    agent.add_response_guard(broken)
+    agent.add_response_guard(judge)
+    agent.start()
+
+    with caplog.at_level(logging.ERROR, logger="wica.agent"):
+        world.update("input", "go")
+        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+
+    assert sink.texts == ["good"]
+    assert len(model.calls) == 2
+    assert any("'broken' raised" in r.getMessage() for r in caplog.records)
+    agent.stop()
+
+
+def test_guards_are_listed_added_and_removed_by_name(loop, world):
+    agent = make_agent(ProgrammableChatModel(), world=world, loop=loop)
+    assert list(agent.response_guards) == [
+        "unknown_command",
+        "invalid_args",
+        "output_command_required",
+    ]
+
+    agent.add_response_guard(lambda r: None, name="mine")
+    agent.remove_response_guard("invalid_args")
+    assert list(agent.response_guards) == [
+        "unknown_command",
+        "output_command_required",
+        "mine",
+    ]
+    with pytest.raises(ValueError, match="already added"):
+        agent.add_response_guard(lambda r: None, name="mine")
+    with pytest.raises(ValueError, match="no response guard"):
+        agent.remove_response_guard("invalid_args")

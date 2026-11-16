@@ -38,6 +38,11 @@ PROVIDER_RENAMES: dict[str, str] = {
 # later than a few seconds is already a failure. See specs/agent.md ("Model-call deadline").
 DEFAULT_MODEL_TIMEOUT = 10.0
 
+# The default number of retries after the response guards reject a response: one second chance,
+# since every retry is a full model call the user waits for. See specs/agent.md ("Response
+# guards").
+DEFAULT_MAX_RETRIES = 1
+
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -80,6 +85,9 @@ class AgentConfig:
     # Read only while an output Command is bound: every model call must then call a tool (the
     # output Command to speak, noop to do nothing). See specs/agent.md ("Forcing a tool call").
     force_tool_call: bool = True
+    # How many times one reaction may call the model again after its response guards reject a
+    # response (0 = never retry). See specs/agent.md ("Response guards").
+    max_retries: int = DEFAULT_MAX_RETRIES
 
     def __post_init__(self) -> None:
         # The structural invariants the loaders enforce, applied to direct construction too, so
@@ -112,6 +120,7 @@ class AgentConfig:
         _validate_context_window(self.context_window, block="agent")
         _validate_model_timeout(self.model_timeout, block="agent")
         _validate_force_tool_call(self.force_tool_call, block="agent")
+        _validate_max_retries(self.max_retries, block="agent")
 
     @classmethod
     def from_dict(
@@ -176,6 +185,7 @@ _AGENT_OPTIONAL_COMMON = {
     "context_window",
     "model_timeout",
     "force_tool_call",
+    "max_retries",
 }
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent"}
@@ -272,6 +282,15 @@ def _validate_force_tool_call(value: Any, *, block: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(
             f"{block}: 'force_tool_call' must be true or false, got {value!r}"
+        )
+    return value
+
+
+def _validate_max_retries(value: Any, *, block: str) -> int:
+    """A non-negative integer. See specs/config.md."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigError(
+            f"{block}: 'max_retries' must be a non-negative integer, got {value!r}"
         )
     return value
 
@@ -380,6 +399,9 @@ def _parse_agent_block(
     force_tool_call = _validate_force_tool_call(
         data.get("force_tool_call", True), block=block
     )
+    max_retries = _validate_max_retries(
+        data.get("max_retries", DEFAULT_MAX_RETRIES), block=block
+    )
 
     return {
         "provider": provider,
@@ -396,6 +418,7 @@ def _parse_agent_block(
         "context_window": context_window,
         "model_timeout": model_timeout,
         "force_tool_call": force_tool_call,
+        "max_retries": max_retries,
     }
 
 

@@ -1,8 +1,10 @@
 ---
 code:
   - src/wica/agent.py
+  - src/wica/guards.py
 tests:
   - tests/test_agent.py
+  - tests/test_guards.py
 ---
 
 # Agent
@@ -226,6 +228,67 @@ The output sink receives one complete text response per step; token streaming, `
 - **`stop()` is unaffected.** A cancellation from `stop()` still ends the reaction as `cancelled`: only the deadline's own expiry maps to `model_timeout`.
 - **Cancellation reaches the provider only as far as its client is truly async.** For a model whose async path is LangChain's thread-pool fallback, the deadline frees the Agent at once but the abandoned request may finish in its thread; its result is discarded.
 
+### Response guards
+
+**A model's response is checked before anything uses it, and a rejected response is retried within the same reaction.** Between the model call returning and the response being used — free text to history, `on_text` and the sink; Commands to history and dispatch — the Agent runs its **response guards**. Nothing reaches the outside before that point, so a rejected attempt has no effect to undo: it is never recorded, delivered nor dispatched. Each guard either accepts the response or rejects it with feedback; on a rejection the Agent calls the model again, over the **same** rendered history plus a correction, up to `AgentConfig.max_retries` times (see [config.md](config.md)). Only the accepted response enters history; the rejected attempt and the correction never do, so later prompts read as if the model had answered right the first time.
+
+This is part of the Agent's harness — the runtime around the model — and sits beside forcing a tool call: forcing constrains what the model *can* emit, a guard checks what it *did* emit.
+
+**What a guard is.** A callable taking a `ModelResponse` and returning `None` (accept) or a `Retry` (reject); it may be sync or async (an awaitable result is awaited, like a World listener's):
+
+```python
+@dataclass(frozen=True)
+class ProposedCommand:
+    name: str
+    args: dict[str, Any]
+
+@dataclass(frozen=True)
+class ModelResponse:
+    text: str                                # the free text, "" when none
+    commands: tuple[ProposedCommand, ...]    # every tool call, in order — noop and cancel_command included
+    bound: Mapping[str, Command]             # the Commands this call was bound to (= agent.commands at the step)
+    output_command_name: str | None          # the bound output Command, if any
+
+@dataclass(frozen=True)
+class Retry:
+    feedback: str                            # told to the model: what was wrong, what to do instead
+    show_response: bool = True               # retry showing the rejected response, or only a reminder
+```
+
+The view is neutral — no `AIMessage`, no provider ids, no `call_id` (none is minted before acceptance) — so guards stay LangChain-free like the command-definition surface ([commands.md](commands.md), "The `Command` object"). These types live in `wica.guards`, not in the `wica` namespace (see "Experimental" below).
+
+**Who chooses the retry mode: the guard, per rejection.** The guard knows the error, so its `Retry` says how to retry:
+
+- **`show_response=True` — show the rejected response and correct it.** For a concrete, fixable detail (a wrong argument, a missing call): the model sees what it did and fixes it. The retry prompt is the step's messages, then the rejected `AIMessage` as returned (its raw content, reasoning blocks included), then one `tool_result` per tool call it holds — a fixed "not executed: this response was rejected" — because a provider rejects a `tool_use` left without its result, then a user message carrying the feedback (in a fixed WICA frame: the previous response was rejected and nothing of it was executed; the feedback; respond again). A rejected response with neither text nor tool calls cannot be shown — providers reject an empty assistant message — and is retried as a reminder instead.
+- **`show_response=False` — a reminder, without the response.** For an error where seeing the response would pull the model back toward it (an over-long reply, forbidden content): the model writes a fresh answer. The feedback (in its own fixed frame: a previous attempt was rejected; the feedback) is appended as an extra text block to the **newest observation's user message** — not as a new user message, since two user turns in a row are what the renderer already merges for providers that reject them (see "Rendering to messages").
+
+**Several guards, one decision.** All guards run on every attempt, in order — the default guards first, then the application's in the order they were added — so the feedback is complete. If any rejects, the attempt is rejected: the feedbacks are combined into one correction (one line each), shown with the response if **any** rejecting guard asked for it. A retry is built from the step's messages plus the **latest** rejection only, never a growing chain of failed attempts.
+
+**Retries and their limits.**
+
+- **One counter per reaction.** `max_retries` (default `1`) counts retries whichever guard rejected; the reaction makes at most `1 + max_retries` model calls.
+- **Each attempt has its own deadline.** `model_timeout` bounds every model call, a retry's included (see "Model-call deadline"). A retry that fails or exceeds its deadline ends the reaction as `model_error`/`model_timeout`, exactly like a first call.
+- **Out of retries: the reaction ends `rejected`.** Nothing is recorded but the Observation, nothing delivered nor dispatched — the same ending as a model error: the Observation renders merged into the next one, the Agent is free for the next trigger. Each rejected attempt is logged at **WARNING** with its feedback; running out is logged at **ERROR**. This is stricter than having no guards: with `max_retries: 0`, a response with one unknown Command used to dispatch its other Commands; now the whole response is rejected.
+- **The busy time grows.** The single-in-flight loop holds the reaction through every attempt and every guard, and drops the triggers that arrive meanwhile (see "Concurrency and long-running Commands in v1"). A sync guard also runs on the loop thread itself and stalls everything on it (World updates, Commands, timers) while it runs: it must be a fast rule. An async guard (an LLM judging the answer) does not block the loop but holds the reaction for its whole duration; guard time is not under `model_timeout` and is recorded apart (see [instrumentation.md](instrumentation.md)).
+- **A raising guard accepts.** A guard is application code; one that raises is logged at ERROR and counts as accepting, so a buggy guard cannot silence the agent.
+- **The cache holds.** A retry adds messages only after the newest observation, so the Anthropic breakpoint before it (see "Prompt caching") is read, not rewritten.
+
+**The default guards.** Three guards catch responses that break WICA's own rules, whatever the application. Each is an ordinary guard over `ModelResponse`, installed at Agent construction under its name:
+
+| Guard | Rejects when | Retry |
+|---|---|---|
+| `unknown_command` | a tool call names a Command that is not in `bound` | shows the response; feedback names the unknown Command and lists the bound ones |
+| `invalid_args` | a tool call's arguments do not validate against its Command's argument schema (when the backing tool's `args_schema` is a pydantic model; a tool declaring a raw JSON schema is not checked) | shows the response; feedback carries the validation error |
+| `output_command_required` | an output Command is bound and the response has no tool call at all — free text only, or nothing | shows the response (a reminder when it is empty); feedback: the user did not hear free text, call `<output_command_name>` to reply or `noop` to do nothing |
+
+The first two catch, before dispatch, what used to surface only after it as a `failed` Command entry. The third is the check side of "Forcing a tool call": it rarely fires while the call is forced, and does the work where forcing is off or dropped (`force_tool_call: false`, Anthropic extended thinking). A `noop` alongside other Commands is deliberately **not** rejected: "say this, then nothing more" is a normal response, and the benchmark's checks treat it as such ([benchmark.md](benchmark.md)).
+
+**Adding and removing guards.** `agent.add_response_guard(guard, *, name=None)` adds a guard (`name` defaults to the callable's `__name__`; a name already in use raises `ValueError`); `agent.remove_response_guard(name)` removes one, a default included (an unknown name raises `ValueError`); `agent.response_guards` is a read-only mapping `name → guard`, defaults included, in run order. Both are mirrored on `Wica` (see [wica.md](wica.md)). Like `register_command`, they are intended before `start()` and permitted while running: a step reads the guards once at its start, so a change takes effect at the next step.
+
+**Experimental.** The guard mechanism is new and its right shape is still being learned. The default guards and their removal are supported; **`add_response_guard` and the `wica.guards` types are experimental** — they may change without a deprecation period, and the documentation describes them as such rather than recommending application guards yet.
+
+**Instrumentation.** `on_prompt` fires once per reaction, with the messages of the first attempt — consumers match prompts to reactions one to one ([gradio-contrib.md](gradio-contrib.md)). Each rejected attempt instead emits `on_response_rejected` with a `ResponseRejection(attempt, response, feedback, show_response, will_retry)` — the attempt number (1 = the first call), the `ModelResponse`, the combined feedback, the mode and whether a retry follows. `on_text` and `on_command` fire only for the accepted response, so a transcript never shows a rejected one. The reaction record counts attempts, keeps each rejection's feedback, sums token usage over attempts and times the guards (see [instrumentation.md](instrumentation.md)). For the history budget the Agent reads the **first** attempt's `input_tokens`: a retry's prompt is larger than the history by the correction (see "History budget").
+
 ### Instrumentation: observability Events
 
 The Agent exposes a small family of **`Event`s** (see [events.md](events.md)), all **instrumentation, not control flow**: subscribing changes nothing about what the loop does, and `Event.emit`'s per-subscriber isolation catches and logs a raising subscriber so it can neither abort a step nor starve sibling subscribers. Mutable payload data is defensively copied before emission, so a subscriber cannot rewrite the prompt sent to the model or the arguments stored/dispatched for a Command. They exist because the interesting moments of a step (what was sent, what fired it, what it decided to do) are otherwise internal to `_run_step`. The Agent **emits on them internally** at the right points — there is no separate hook-callback parameter and no `_fire_hook` guard; the Event *is* the seam, and any number of consumers subscribe.
@@ -233,10 +296,11 @@ The Agent exposes a small family of **`Event`s** (see [events.md](events.md)), a
 | Event | Type | Emitted |
 |---|---|---|
 | `on_trigger` | `Event[WorldEntry]` | **once per trigger that a run-to-completion step observes**, with the World entry whose update caused it. A burst of *N* triggers coalesced into one step (see "Trigger coalescing") emits *N* times but runs a single step; a dropped single-in-flight trigger emits nothing. Includes command-completion re-triggers; a consumer that only cares about external inputs filters out `agent:command:*` keys itself. This is the **filtered** trigger view — distinct from the World's raw `on_trigger` the Agent subscribes to (see "The shared event loop") |
-| `on_prompt` | `Event[list[BaseMessage]]` | with the exact rendered messages, immediately before each model `ainvoke`. Fresh/archival rendering keeps the deep prefix byte-stable, so a subscriber logging every prompt sees the same cacheable prefix the provider does |
+| `on_prompt` | `Event[list[BaseMessage]]` | with the exact rendered messages, immediately before the reaction's first model `ainvoke` — **once per reaction**; a retry's correction is reported by `on_response_rejected` (see "Response guards"). Fresh/archival rendering keeps the deep prefix byte-stable, so a subscriber logging every prompt sees the same cacheable prefix the provider does |
+| `on_response_rejected` | `Event[ResponseRejection]` | once per attempt the response guards reject, before the retry (or the `rejected` ending) — see "Response guards" |
 | `on_command` | `Event[CommandIssued]` | with **each** Command the model issues, when issued, as a `CommandIssued(name, args, call_id)` value (a small frozen dataclass carrying what a bare `(name, args)` tuple would, but named and evolvable). `call_id` is the WICA-owned id of this issuance — the `<call_id>` suffix of the Command's `agent:command:<call_id>` World entry and the target `cancel_command` takes (see [commands.md](commands.md), "Command execution as a World entry"). For a dispatched Command the Event fires **after** that entry is registered and **before** its initial `running` value is written, so a subscriber may `world.add_listener(f"agent:command:{call_id}", …)` from inside the handler and then observe the entry's whole `running` → terminal life — the seam a test harness or a metrics sink uses to follow a Command it did not know the id of in advance. This includes the auto-registered control Commands — `cancel_command`, the optional output Command, and **`noop`** (`CommandIssued("noop", {}, call_id)`, even though `noop` is not a World action, so no entry exists under its `call_id` — a consumer wanting only real actions filters by name) — so the signal is uniform across everything the model issues |
 | `on_text` | `Event[str]` | with the model's **complete free text for a step**, when non-empty, immediately **before** the output sink receives it (same string, same step; the sink is still awaited afterwards, and a raising sink does not affect the emission). This is the observable counterpart of the sink: the sink is a *single replaceable delivery slot* (see "Output wiring"), so anything that merely wants to *watch* the free text — a log, a panel, a test harness recording the agent's reasoning stream — subscribes here instead of wrapping or replacing the application's sink. With an output Command set, this is the agent's private reasoning stream; without one, it is the utterance itself. `str` is immutable, so no defensive copy is needed |
-| `on_reaction_ended` | `Event[ReactionTrace]` | once at the end of **every** reaction that started, whatever its outcome (ok/empty/model_error/model_timeout/cancelled) — the typed per-reaction latency/reactivity record. Emitted from the reaction's `finally`, after the Agent frees itself for the next trigger. See [instrumentation.md](instrumentation.md) ("Layer 1") for the record's fields |
+| `on_reaction_ended` | `Event[ReactionTrace]` | once at the end of **every** reaction that started, whatever its outcome (ok/empty/model_error/model_timeout/rejected/cancelled) — the typed per-reaction latency/reactivity record. Emitted from the reaction's `finally`, after the Agent frees itself for the next trigger. See [instrumentation.md](instrumentation.md) ("Layer 1") for the record's fields |
 | `on_trigger_dropped` | `Event[WorldEntry]` | once per trigger dropped because a reaction was already in flight — the counterpart of `on_trigger`, which only fires for triggers a reaction observed |
 | `on_command_ended` | `Event[CommandTrace]` | once per dispatched Command when its terminal state is written, naming the reaction that issued it — the generic "any Command finished" signal (resolves open question 5 below) |
 
@@ -246,7 +310,7 @@ The first consumer is the conversation demo (see [conversation-demo.md](conversa
 
 Alongside the reaction record, the loop opens OpenTelemetry spans for the same phases — `wica.agent.reaction` for the whole reaction, `wica.agent.model`/`wica.agent.sink`/`wica.agent.command` nested under it — with context propagated from the triggering `wica.world.update` and, for a Command, into its task. See [instrumentation.md](instrumentation.md) ("Layer 2") for the full picture; nothing here changes what the model sees.
 
-Complementing the hooks, the World and Agent **emit lifecycle logs** under the standard-library `wica.*` loggers, so the whole loop is traceable without wiring any hook. These levels describe **what the library emits**, not what is shown: WICA is a library, so it configures no handlers or levels (it installs only a `NullHandler` on the top-level `wica` logger) — the embedding application owns what surfaces, at what level, and where (see [config.md](config.md), "Logging is not framework config"). The emitted levels are: **DEBUG** for per-event detail (registrations, every World update and whether it triggered a call, trigger receipt, step start/complete, LLM output, command dispatch/start/end), **INFO** for coarse lifecycle (agent start/stop, dropped triggers), **WARNING** for command failures, and **ERROR** for a reasoning step whose model call raised or exceeded its deadline, and for an output sink that raised. Listener and Event-subscriber exceptions are caught, logged, and isolated. A model-call failure or timeout ends the step (nothing is dispatched, the Agent is free for the next trigger, and the already-recorded Observation renders merged with the next one — see "Rendering to messages"); an output-sink failure is logged and the step **continues** to dispatch the response's Commands. Neither is yet represented in World state or history as something the model can see (see Open questions). Every Agent-owned task also carries a done-callback that logs any unexpected exception at ERROR, so no step or Command can fail silently.
+Complementing the hooks, the World and Agent **emit lifecycle logs** under the standard-library `wica.*` loggers, so the whole loop is traceable without wiring any hook. These levels describe **what the library emits**, not what is shown: WICA is a library, so it configures no handlers or levels (it installs only a `NullHandler` on the top-level `wica` logger) — the embedding application owns what surfaces, at what level, and where (see [config.md](config.md), "Logging is not framework config"). The emitted levels are: **DEBUG** for per-event detail (registrations, every World update and whether it triggered a call, trigger receipt, step start/complete, LLM output, command dispatch/start/end), **INFO** for coarse lifecycle (agent start/stop, dropped triggers), **WARNING** for command failures and for each response attempt the guards reject, and **ERROR** for a reasoning step whose model call raised or exceeded its deadline, for a reaction that ran out of retries (`rejected`), for a response guard that raised, and for an output sink that raised. Listener and Event-subscriber exceptions are caught, logged, and isolated. A model-call failure or timeout ends the step (nothing is dispatched, the Agent is free for the next trigger, and the already-recorded Observation renders merged with the next one — see "Rendering to messages"); an output-sink failure is logged and the step **continues** to dispatch the response's Commands. Neither is yet represented in World state or history as something the model can see (see Open questions). Every Agent-owned task also carries a done-callback that logs any unexpected exception at ERROR, so no step or Command can fail silently.
 
 ## Open questions
 

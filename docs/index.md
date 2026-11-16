@@ -23,7 +23,7 @@ The documentation of WICA, by what you want to do. The [README](../README.md) is
 
 ## The references
 
-- [reference/api.md](reference/api.md): what you import, construction, the `Wica` surface, the World API, `Command`, the eight Events, the errors, and the contracts that hold across them (threads and the loop, lifecycle, keys and names).
+- [reference/api.md](reference/api.md): what you import, construction, the `Wica` surface, the World API, `Command`, the response guards, the nine Events, the errors, and the contracts that hold across them (threads and the loop, lifecycle, keys and names).
 - [reference/configuration.md](reference/configuration.md): the `agent` block field by field, the three loaders and direct construction, the providers and their extras.
 
 ## Beyond the user documentation
