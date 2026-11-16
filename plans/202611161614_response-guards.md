@@ -1,6 +1,6 @@
 # Response guards
 
-**Status:** In progress
+**Status:** Done
 
 Implements [specs/agent.md](../specs/agent.md) ("Response guards"), the `max_retries` field of [specs/config.md](../specs/config.md), the retry fields, `rejected` outcome, `on_response_rejected` Event and `wica.agent.guards` span of [specs/instrumentation.md](../specs/instrumentation.md), and the facade members of [specs/wica.md](../specs/wica.md).
 
@@ -46,3 +46,7 @@ Not in scope: a `response_rejected` event in the `wica.testing` Probe and a benc
 - `uv run pytest tests-e2e -k "fake or example or tester"` — the key-less e2e set.
 - The live set on every provider with a key, to see that the default guards do not reject what the gate accepts — and how often they retry.
 - On `Done`: [specs/agent.md](../specs/agent.md), [specs/config.md](../specs/config.md), [specs/instrumentation.md](../specs/instrumentation.md) and [specs/wica.md](../specs/wica.md) back to `Implemented`.
+
+## Result
+
+All of the above clean: ruff, pyright (0 errors), the fast tier (560 passed), the key-less e2e set (14 passed), and CI on every platform. The live set passed on all five providers (CI run 43896264734, dispatched on the branch). In its reports, none of the 253 reactions was retried: the default guards rejected nothing the gate accepts. Two existing tests now remove a default guard, because they exercise the paths those guards prevent (an unknown Command dispatched; a text answer while forced).
