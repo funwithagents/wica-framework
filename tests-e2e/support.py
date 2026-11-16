@@ -44,6 +44,57 @@ def missing_key(exc: MissingEnvError) -> NoReturn:
     pytest.skip(reason)
 
 
+def rate_limited(exc: BaseException) -> BaseException | None:
+    """The provider error in `exc`'s chain that reports HTTP 429 (a rate limit or an exhausted
+    quota), if any. Duck-typed over the SDKs the providers raise through — `status_code` (OpenAI,
+    Anthropic), `code` (google-genai's `ClientError`), `response.status_code` (httpx's
+    `HTTPStatusError` from Mistral, huggingface_hub's `HfHubHTTPError`) — so no SDK is imported."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        if 429 in (
+            getattr(current, "status_code", None),
+            getattr(current, "code", None),
+            getattr(response, "status_code", None),
+        ):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
+# config path -> the provider's 429 message at preflight, or None when the provider answered (or
+# failed some other way, which is the tests' business). One entry per provider per session.
+_PREFLIGHT: dict[Path, str | None] = {}
+
+
+def skip_if_rate_limited(config_path: Path) -> None:
+    """Skip the calling test when the provider rate-limits the key, checked with **one direct
+    call per provider per session**, outside any `Wica`.
+
+    The per-test 429 check (conftest.py) only sees a 429 that surfaces. Inside a `Wica` it often
+    does not: a provider's client retries a 429 with backoff for longer than `model_timeout`, so
+    the reaction ends `model_timeout` and the test fails on a missed expectation with no 429
+    anywhere. A direct call has no deadline: the client gives up and raises it. A missing key is
+    not this function's case and propagates (`MissingEnvError`). See specs/testing.md ("Live
+    tier")."""
+    if config_path not in _PREFLIGHT:
+        config = load_agent_config(config_path)
+        reason: str | None = None
+        if config.provider != "fake":
+            model = build_chat_model(config)
+            try:
+                model.invoke("Reply with OK.")
+            except Exception as exc:
+                limited = rate_limited(exc)
+                reason = str(limited)[:160] if limited is not None else None
+        _PREFLIGHT[config_path] = reason
+    reason = _PREFLIGHT[config_path]
+    if reason is not None:
+        pytest.skip(f"provider rate limit (429) at preflight: {reason}")
+
+
 def load_agent_config(config_path: Path) -> AgentConfig:
     """Load the config (inert — validates only, reads no env/files). The api key resolves later, at
     build; the skip-when-unset lives in the build helpers below."""
@@ -54,8 +105,10 @@ def real_chat_model(config_path: Path) -> BaseChatModel:
     """Build the chat model through WICA's own construction path (`build_chat_model`) — the same one
     the Agent uses at build. Going through the shared builder (rather than a separate
     `init_chat_model` call) means the e2e tier exercises the real provider-branching construction,
-    `huggingface-hub` included, instead of a divergent path that would build the wrong model."""
+    `huggingface-hub` included, instead of a divergent path that would build the wrong model. Skips
+    when the key is unset or the provider rate-limits it (`skip_if_rate_limited`)."""
     try:
+        skip_if_rate_limited(config_path)
         return build_chat_model(load_agent_config(config_path))
     except MissingEnvError as exc:
         missing_key(exc)
@@ -78,7 +131,8 @@ def real_wica(
     field is cleared so the exactly-one invariant holds); `agent_overrides` replaces other
     `AgentConfig` fields (e.g. `history_reactions`). Skips when the config's api_key_env is unset
     (fails under `FAIL_ON_MISSING`) — the key resolves at build inside `Wica.init`, so
-    `MissingEnvError -> pytest.skip` lives here."""
+    `MissingEnvError -> pytest.skip` lives here — and when the provider rate-limits the key
+    (`skip_if_rate_limited`)."""
     config = WicaConfig.from_json_file(config_path)
     overrides = dict(agent_overrides or {})
     if system_prompt is not None:
@@ -86,6 +140,7 @@ def real_wica(
     if overrides:
         config = WicaConfig(agent=dataclasses.replace(config.agent, **overrides))
     try:
+        skip_if_rate_limited(config_path)
         return Wica.init(config, **kwargs)
     except MissingEnvError as exc:
         missing_key(exc)
