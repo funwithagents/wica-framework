@@ -6,8 +6,8 @@ code:
   - tests-e2e/e2e.anthropic.config.json
   - tests-e2e/e2e.openai.config.json
   - tests-e2e/e2e.huggingface-hub.config.json
-  - tests-e2e/e2e.google-genai.config.json
-  - tests-e2e/e2e.mistralai.config.json
+  - tests-e2e/e2e.gemini.config.json
+  - tests-e2e/e2e.mistral.config.json
   - tests-e2e/robot_app.py
   - tests-e2e/scenarios
 tests:
@@ -20,7 +20,7 @@ tests:
 
 # Testing
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -72,7 +72,7 @@ There is no process-global World: each `Wica` (see [wica.md](wica.md)) owns its 
 
 The live e2e set is **parametrized over one committed config per provider**, not a single reference provider — so the live tests verify WICA's real provider-branching construction across the whole supported surface, not just one privileged backend.
 
-- **One config file per provider**, checked in and named symmetrically: `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, `huggingface-hub`, `google-genai`, and `mistralai` (the file stem is the extra name — hyphenated for `google-genai`, whose `provider` value inside is LangChain's `google_genai`). They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**.
+- **One config file per provider**, checked in and named symmetrically: `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, `huggingface-hub`, `gemini`, and `mistral` (the file stem is the `provider` value inside, which is also the extra's name). They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**.
 - **The live tests go through WICA's own entrypoint**, not a divergent `init_chat_model` call: `support.real_chat_model()` builds via `build_chat_model()` (the smoke test), and `support.real_wica()` stands up the whole system via `Wica.init(WicaConfig.from_json_file(...))` — the real production path, loop + World + Agent and all. This is what makes the tier meaningful: it exercises the actual per-provider construction (including `huggingface-hub`'s dedicated non-`init_chat_model` path — see [agent.md](agent.md), "Provider-agnostic model, from config") end-to-end, so a branch that builds the wrong model is caught here rather than slipping through a test that bypassed it.
 - **Each config uses `api_key_env`**, so it carries no secret and is safe to commit (see [config.md](config.md), "API key"). A provider whose key env var is unset makes that config **skip itself** — never fail — via `MissingEnvError → pytest.skip` (in `support.load_agent_config`). You exercise only the providers you hold keys for; the rest skip cleanly, so a contributor with one key, or CI with none, is never broken by the others' absence.
 - **A provider's rate limit skips, too.** A key that is set but rate-limited or out of quota says nothing about the code, yet it fails the call. A `pytest_runtest_call` wrapper in `tests-e2e/conftest.py` therefore turns a test failure into a skip when an HTTP 429 sits in the chain of the raised exception **or of any exception logged under the `wica` logger while the test ran** — the Agent catches a failed model call and logs it (`model call failed; step abandoned`), so in a `Wica`-driven test the 429 surfaces only as an expectation that timed out. The check is duck-typed over the providers' SDKs (`status_code`, `code`, `response.status_code` equal to 429; none is imported), as tts-engine's is; any other failure still fails, and the skip reason carries the provider's message, so `-rs` shows it. A test that failed for another reason while a 429 was also logged skips too — accepted, since the provider then failed a call of that test anyway.
@@ -130,7 +130,7 @@ Each step's run writes its own report under `--wica-report-dir`.
 
 ### What fails
 
-**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped — `KNOWN_FLAKY` in `tests-e2e/test_robot.py`, which holds today (huggingface-hub, background) and (mistralai, background): both models, woken by a background sound, sometimes check in or repeat the previous request instead of calling `noop`; and (huggingface-hub, long_answer): after writing the note, `gpt-oss-120b` sometimes chains check-in utterances long enough to miss the step's 30 s idle bound. The bound stays: a chain of five utterances after a finished task is the behaviour the gate exists to flag.
+**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped — `KNOWN_FLAKY` in `tests-e2e/test_robot.py`, which holds today (huggingface-hub, background) and (mistral, background): both models, woken by a background sound, sometimes check in or repeat the previous request instead of calling `noop`; and (huggingface-hub, long_answer): after writing the note, `gpt-oss-120b` sometimes chains check-in utterances long enough to miss the step's 30 s idle bound. The bound stays: a chain of five utterances after a finished task is the behaviour the gate exists to flag.
 
 ### Alongside the steps
 
@@ -143,8 +143,8 @@ The committed configs and their key env vars:
 | `tests-e2e/e2e.anthropic.config.json` | `anthropic` | `claude-haiku-4-5` | `WICA_ANTHROPIC_API_KEY` |
 | `tests-e2e/e2e.openai.config.json` | `openai` | `gpt-4o` | `WICA_OPENAI_API_KEY` |
 | `tests-e2e/e2e.huggingface-hub.config.json` | `huggingface-hub` | `openai/gpt-oss-120b` on `cerebras` | `WICA_HF_TOKEN` |
-| `tests-e2e/e2e.google-genai.config.json` | `google_genai` | `gemini-3.5-flash-lite` | `WICA_GEMINI_API_KEY` |
-| `tests-e2e/e2e.mistralai.config.json` | `mistralai` | `ministral-14b-latest` | `WICA_MISTRAL_API_KEY` |
+| `tests-e2e/e2e.gemini.config.json` | `gemini` | `gemini-3.5-flash-lite` | `WICA_GEMINI_API_KEY` |
+| `tests-e2e/e2e.mistral.config.json` | `mistral` | `ministral-14b-latest` | `WICA_MISTRAL_API_KEY` |
 
 **The models are chosen for the gate**, by running its steps at least three times on each candidate: a gate model must show the promised behaviours reliably, or the gate goes red on noise. `gemini-3.8-flash` was replaced by `gemini-3.5-flash-lite` (the former hit the 10 s `model_timeout` twice on long texts; the latter passed 45/45 at about 1 s a call), `ministral-8b` by `ministral-14b-latest` (the former ran away in the conversation in every run; the latter passed 44/45). Which models an application should use is the benchmark's question, not this table's.
 
