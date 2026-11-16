@@ -82,6 +82,9 @@ class ReactionTrace:
     attempts: int = 1
     rejections: tuple[str, ...] = ()
     guard_duration: float | None = None
+    # When the last attempt's first streamed chunk carrying text or a tool call arrived; None when
+    # none did. See specs/instrumentation.md ("The first content").
+    first_content_at: datetime | None = None
 
     @property
     def coalescing_wait(self) -> float:
@@ -98,6 +101,18 @@ class ReactionTrace:
         if self.model_started_at is None or self.model_ended_at is None:
             return None
         return (self.model_ended_at - self.model_started_at).total_seconds()
+
+    @property
+    def time_to_first_content(self) -> float | None:
+        if self.model_started_at is None or self.first_content_at is None:
+            return None
+        return (self.first_content_at - self.model_started_at).total_seconds()
+
+    @property
+    def generation_time(self) -> float | None:
+        if self.first_content_at is None or self.model_ended_at is None:
+            return None
+        return (self.model_ended_at - self.first_content_at).total_seconds()
 
     @property
     def busy_time(self) -> float:

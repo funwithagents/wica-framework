@@ -7,6 +7,7 @@ browser. See specs/gradio-contrib.md ("Component 2", "Testing").
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -85,6 +86,16 @@ def test_render_reaction_trace_shows_only_present_measures():
     assert "model latency" in out
     assert "render time" in out
     assert "sink duration" in out
+    # No first-content stamp on that record: neither half of the model latency is shown.
+    assert "time to first content" not in out and "generation time" not in out
+
+    assert normal.model_started_at is not None
+    streamed = make_reaction_trace(
+        first_content_at=normal.model_started_at + timedelta(seconds=0.3)
+    )
+    out = render_reaction_trace(streamed)
+    assert "time to first content: 0.300s" in out
+    assert "generation time: 0.150s" in out
 
 
 def test_render_reaction_trace_shows_usage_commands_noop_and_error():

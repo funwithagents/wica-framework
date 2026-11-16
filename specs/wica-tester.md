@@ -117,7 +117,7 @@ The Probe does not know whether a script or a model is driving.
 | **Steps per user turn** (cost) | `prompt` count between two `input_written` |
 | **Token usage** (cost) | `ReactionTrace.usage`, input and output tokens per reaction |
 
-The metric keys of the report are core's measure names (`reaction_latency`, `model_latency`, `coalescing_wait`, `busy_time`, `command_duration`, `reactions_per_input`, `input_tokens`, `output_tokens`), plus the two the Harness alone can pair with its own actions (`steps_per_turn`, `barge_in`), and the dropped count.
+The metric keys of the report are core's measure names (`reaction_latency`, `model_latency`, `time_to_first_content`, `generation_time`, `coalescing_wait`, `busy_time`, `command_duration`, `reactions_per_input`, `input_tokens`, `output_tokens`), plus the two the Harness alone can pair with its own actions (`steps_per_turn`, `barge_in`), and the dropped count.
 
 **Latency is a measure, not a threshold.** The Harness records distributions (min, median, p95 per metric) for analytics and model-to-model comparison; a scenario *may* add a threshold as an expectation (`expect_latency`), and no threshold is ever a built-in default.
 

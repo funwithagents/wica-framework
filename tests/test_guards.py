@@ -9,11 +9,13 @@ from langchain_core.tools import BaseTool
 
 from wica.command import Command
 from wica.guards import (
+    MalformedCommand,
     ModelResponse,
     ProposedCommand,
     Retry,
     combine,
     invalid_args,
+    malformed_command,
     output_command_required,
     unknown_command,
 )
@@ -61,12 +63,59 @@ def response(
     *calls: tuple[str, dict[str, Any]],
     text: str = "",
     output: str | None = None,
+    malformed: tuple[MalformedCommand, ...] = (),
 ) -> ModelResponse:
     return ModelResponse(
         text=text,
         commands=tuple(ProposedCommand(name, args) for name, args in calls),
         bound=BOUND,
         output_command_name=output,
+        malformed=malformed,
+    )
+
+
+CUT_SAY = MalformedCommand(
+    "say", '{"text": "Once upon', "arguments are not complete JSON"
+)
+
+
+# --- malformed_command -------------------------------------------------------------------------
+
+
+def test_malformed_command_rejects_a_cut_call_as_a_reminder_with_a_length_to_stay_under() -> (
+    None
+):
+    retry = malformed_command(response(("noop", {}), malformed=(CUT_SAY,)))
+    assert retry is not None
+    assert retry.show_response is False
+    # The cut call's 19 characters, and half of that as the limit to stay under.
+    assert retry.feedback == (
+        "Your call to `say` was not executed: its arguments stopped after 19 characters and are "
+        "not complete JSON, most likely because the response was too long and was cut off. Call "
+        "it again with much less in it: at most 9 characters of arguments."
+    )
+
+
+def test_malformed_command_reports_each_distinct_call_once() -> None:
+    nameless = MalformedCommand(None, "", "the call has no name")
+    retry = malformed_command(response(malformed=(CUT_SAY, CUT_SAY, nameless)))
+    assert retry is not None
+    assert retry.feedback.count("Your call to `say`") == 1
+    assert retry.feedback.count("Your call to a command") == 1
+
+
+def test_malformed_command_accepts_a_response_without_one() -> None:
+    assert malformed_command(response(("say", {"text": "hi"}))) is None
+    assert malformed_command(response(text="thinking")) is None
+
+
+def test_output_command_required_leaves_a_response_whose_only_call_is_malformed() -> (
+    None
+):
+    assert output_command_required(response(output="say", malformed=(CUT_SAY,))) is None
+    assert (
+        output_command_required(response(text="hm", output="say", malformed=(CUT_SAY,)))
+        is None
     )
 
 

@@ -136,6 +136,8 @@ def metric_samples(
     for reaction in reactions:
         add("reaction_latency", reaction_latency(reaction))
         add("model_latency", reaction.model_latency)
+        add("time_to_first_content", reaction.time_to_first_content)
+        add("generation_time", reaction.generation_time)
         add("coalescing_wait", reaction.coalescing_wait)
         add("busy_time", reaction.busy_time)
         add("guard_time", reaction.guard_duration)

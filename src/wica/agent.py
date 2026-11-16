@@ -50,6 +50,7 @@ from wica.guards import (
     REJECTED_TOOL_RESULT,
     REMINDER_FRAME,
     SHOW_FRAME,
+    MalformedCommand,
     ModelResponse,
     ProposedCommand,
     ResponseGuard,
@@ -272,6 +273,8 @@ class _ReactionBuilder:
     rejections: list[str] = field(default_factory=list)
     guard_duration: float | None = None
     first_input_tokens: int | None = None
+    # The current attempt's first chunk carrying text or a tool call (reset at each attempt).
+    first_content_at: datetime | None = None
 
 
 def _span_ids(span: otel_trace.Span) -> tuple[str | None, str | None]:
@@ -400,6 +403,37 @@ def _strict_args(raw: str) -> tuple[dict[str, Any], None] | tuple[None, str]:
     return args, None
 
 
+def _has_content(piece: AIMessage) -> bool:
+    """Whether a streamed piece carries part of the answer: text or a tool call."""
+    if isinstance(piece, AIMessageChunk):
+        return bool(piece.text or piece.tool_call_chunks)
+    return bool(piece.text or piece.tool_calls or piece.invalid_tool_calls)
+
+
+def _model_response(
+    response: AIMessage, bound: Mapping[str, Command], output_name: str | None
+) -> ModelResponse:
+    """The neutral view of a response the guards (and on_response_rejected) receive: its own
+    copies, so a guard or a subscriber cannot rewrite what gets dispatched."""
+    return ModelResponse(
+        text=response.text,
+        commands=tuple(
+            ProposedCommand(call["name"], copy.deepcopy(call["args"]))
+            for call in response.tool_calls
+        ),
+        bound=bound,
+        output_command_name=output_name,
+        malformed=tuple(
+            MalformedCommand(
+                name=call["name"],
+                raw_args=call["args"] or "",
+                error=call["error"] or "the arguments could not be read",
+            )
+            for call in response.invalid_tool_calls
+        ),
+    )
+
+
 def _assemble(summed: AIMessageChunk) -> AIMessage:
     """The summed chunks of a streamed call as one AIMessage, its tool calls parsed strictly.
 
@@ -436,14 +470,21 @@ def _assemble(summed: AIMessageChunk) -> AIMessage:
 
 
 async def _stream_response(
-    bound_model: Runnable[Any, AIMessage], messages: list[BaseMessage]
+    bound_model: Runnable[Any, AIMessage],
+    messages: list[BaseMessage],
+    on_first_content: Callable[[], None] | None = None,
 ) -> AIMessage:
     """One model call, streamed: the chunks summed and assembled into one AIMessage. A model with
-    no streaming path yields its whole AIMessage once (LangChain's fallback), used as is. See
-    specs/agent.md ("Streaming the model call")."""
+    no streaming path yields its whole AIMessage once (LangChain's fallback), used as is.
+    `on_first_content` is called once, when the first piece carrying text or a tool call arrives
+    (a chunk of reasoning or metadata alone does not count). See specs/agent.md ("Streaming the
+    model call")."""
     summed: AIMessageChunk | None = None
     whole: AIMessage | None = None
     async for piece in bound_model.astream(messages):
+        if on_first_content is not None and _has_content(piece):
+            on_first_content()
+            on_first_content = None
         if isinstance(piece, AIMessageChunk) and whole is None:
             summed = piece if summed is None else summed + piece
         elif isinstance(piece, AIMessage) and summed is None and whole is None:
@@ -902,7 +943,7 @@ class Agent:
     @property
     def response_guards(self) -> Mapping[str, ResponseGuard]:
         """Read-only view of the response guards by name, in the order they run: the defaults
-        (``unknown_command``, ``invalid_args``, ``output_command_required``) first, then the
+        (``malformed_command``, ``unknown_command``, ``invalid_args``, ``output_command_required``) first, then the
         application's. See specs/agent.md ("Response guards")."""
         return MappingProxyType(self._guards)
 
@@ -1340,6 +1381,7 @@ class Agent:
                     attempts=builder.attempts,
                     rejections=tuple(builder.rejections),
                     guard_duration=builder.guard_duration,
+                    first_content_at=builder.first_content_at,
                 )
             )
 
@@ -1396,34 +1438,23 @@ class Agent:
             )
             if response is None:
                 return
-            candidate = ModelResponse(
-                text=response.text,
-                commands=tuple(
-                    ProposedCommand(call["name"], copy.deepcopy(call["args"]))
-                    for call in response.tool_calls
-                ),
-                bound=bound,
-                output_command_name=output_name,
-            )
+            candidate = _model_response(response, bound, output_name)
             retry = await self._run_guards(guards, candidate, attempt, builder)
             if retry is None:
                 break
-            # An empty response cannot be shown (providers reject an empty assistant message).
-            show = retry.show_response and bool(response.text or response.tool_calls)
+            # An empty response cannot be shown (providers reject an empty assistant message), nor
+            # can one holding a malformed tool call (the broken call cannot be replayed).
+            show = (
+                retry.show_response
+                and bool(response.text or response.tool_calls)
+                and not response.invalid_tool_calls
+            )
             will_retry = attempt <= self._max_retries
             builder.rejections.append(retry.feedback)
             self.on_response_rejected.emit(
                 ResponseRejection(
                     attempt=attempt,
-                    response=ModelResponse(
-                        text=candidate.text,
-                        commands=tuple(
-                            ProposedCommand(c.name, copy.deepcopy(c.args))
-                            for c in candidate.commands
-                        ),
-                        bound=bound,
-                        output_command_name=output_name,
-                    ),
+                    response=_model_response(response, bound, output_name),
                     feedback=retry.feedback,
                     show_response=show,
                     will_retry=will_retry,
@@ -1516,6 +1547,8 @@ class Agent:
             builder.model_started_at = now()
         deadline = asyncio.timeout(self._model_timeout)
         usage: TokenUsage | None = None
+        # The record keeps the last attempt's first content, like model_ended_at.
+        builder.first_content_at = None
         try:
             with tracer().start_as_current_span(
                 "wica.agent.model",
@@ -1526,8 +1559,15 @@ class Agent:
                     "wica.attempt": builder.attempts,
                 },
             ) as model_span:
+
+                def first_content() -> None:
+                    builder.first_content_at = now()
+                    model_span.add_event("wica.first_content")
+
                 async with deadline:
-                    response = await _stream_response(bound_model, messages)
+                    response = await _stream_response(
+                        bound_model, messages, first_content
+                    )
                 usage = _token_usage(response)
                 if usage is not None:
                     model_span.set_attributes(
