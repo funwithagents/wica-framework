@@ -7,7 +7,9 @@ The checks for each symptom, in the order to make them, each pointing at the pag
 - **`ImportError` naming a package**: the provider's extra is not installed. `uv add "wica[<provider>] @ git+…"`; the extras are in [../reference/configuration.md](../reference/configuration.md#providers).
 - **`MissingEnvError`**: `api_key_env` names a variable that is unset in the process. The shell that runs your program must export it; a non-interactive shell does not read your `~/.zshrc`. The variable is read at `init`, not at config creation ([../reference/configuration.md](../reference/configuration.md#api-key)).
 - **`ConfigError` about an unknown key**: the loaders are strict; a typo in the JSON is rejected, and so is a key WICA does not define. Both `system_prompt` and `system_prompt_file`, or both `api_key` and `api_key_env`, are rejected too ([../reference/configuration.md](../reference/configuration.md#the-loaders)).
-- **`ConfigError` about the context window**: a `history_budget` is set and neither `context_window` nor the model's LangChain profile gives the window: Hub models, and models newer than the installed profile data. Set `context_window` ([../reference/configuration.md](../reference/configuration.md#history-bounds)).
+- **`ConfigError` about the context window**: a `history_budget` is set and neither `context_window` nor the model's LangChain profile gives the window: Hub models, local models, and models newer than the installed profile data. Set `context_window` (for a local server, its own context size) ([../reference/configuration.md](../reference/configuration.md#history-bounds)).
+- **`ConfigError` about `base_url`**: `openai-chat-completions-compatible` needs it, every other provider rejects it ([../reference/configuration.md](../reference/configuration.md#local-and-self-hosted-models)).
+- **A deprecation warning about `google_genai` or `mistralai`**: the providers are now `gemini` and `mistral`; the old names still load. Rename them, and install `wica[gemini]` or `wica[mistral]` ([../reference/configuration.md](../reference/configuration.md#providers)).
 
 ## Nothing happens after `update()`
 
@@ -28,6 +30,10 @@ The checks for each symptom, in the order to make them, each pointing at the pag
 - **It acts twice, or on stale state.** Every Command completion wakes a step by default (`reactions_per_input` above one), and a bounded history forgets older turns. See `triggers_on_completion` ([commands.md](commands.md)) and [limits.md](limits.md).
 - **It issues conflicting Commands in one response.** They run concurrently; guard the shared resource inside the Commands, and tell the model in the persona which actions exclude each other ([commands.md](commands.md#what-happens-when-the-model-calls-one)).
 - **Gemini is slow on every reaction.** It thinks by default: `model_kwargs: {"thinking_level": "low"}` ([../reference/configuration.md](../reference/configuration.md#providers)).
+- **A local model: every reaction ends `model_error` with "Connection error".** The server is not running, or `base_url` names the wrong port or misses `/v1` ([local-models.md](local-models.md#point-wica-at-it)).
+- **A local model: the first reaction ends `model_timeout`.** The server loads the model on the first request. Raise `model_timeout`, or warm the server before `start()` ([local-models.md](local-models.md#what-to-tune)).
+- **A local model: every reaction ends `model_timeout` once an output Command is set.** The model is too small to call a tool under forcing and writes text until the deadline. Use a larger model; set `model_kwargs.max_tokens` to bound it ([local-models.md](local-models.md#which-model-size-works)). If instead every call fails `model_error`, the server rejects `tool_choice`: set `force_tool_call: false`.
+- **A local model answers in text and never calls a Command.** A small model, or `llama-server` started without `--jinja` ([local-models.md](local-models.md#start-a-server)).
 - **Mistral answers 429 on every call.** On a workspace without a paid tier the Small/Medium families have a zero request quota; use the Ministral family ([../reference/configuration.md](../reference/configuration.md#providers)).
 
 ## A call raises at runtime

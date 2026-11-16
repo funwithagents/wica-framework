@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,20 @@ class MissingEnvError(ConfigError):
         super().__init__(f"environment variable {env_var!r} is not set")
         self.env_var = env_var
 
+
+_logger = logging.getLogger(__name__)
+
+# The provider for any server implementing OpenAI's Chat Completions API — the route to a local or
+# self-hosted model. Named `<origin>-<api>-compatible` after the API it implements, and the only
+# provider that takes `base_url`. See specs/config.md ("Providers").
+OPENAI_CHAT_COMPLETIONS_COMPATIBLE = "openai-chat-completions-compatible"
+
+# Old provider names → new ones, applied whenever an AgentConfig is created; an old name logs a
+# deprecation warning. See specs/config.md ("Provider names").
+PROVIDER_RENAMES: dict[str, str] = {
+    "google_genai": "gemini",
+    "mistralai": "mistral",
+}
 
 # The default deadline on one model call, in seconds: tight on purpose, a reactive agent's answer
 # later than a few seconds is already a failure. See specs/agent.md ("Model-call deadline").
@@ -44,6 +59,9 @@ class AgentConfig:
     api_key_env: str | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     hf_provider: str = "auto"  # only used by provider "huggingface-hub"
+    # The server's base URL, `/v1` included: required with "openai-chat-completions-compatible",
+    # rejected with any other provider. See specs/config.md ("Providers").
+    base_url: str | None = None
     # None = unbounded history. A positive int X keeps the last X reactions in the prompt (the
     # Agent lets history grow to 2X, then cuts back to X). See specs/agent.md ("History window").
     history_reactions: int | None = None
@@ -66,6 +84,15 @@ class AgentConfig:
     def __post_init__(self) -> None:
         # The structural invariants the loaders enforce, applied to direct construction too, so
         # every AgentConfig instance is valid. See specs/config.md.
+        renamed = PROVIDER_RENAMES.get(self.provider)
+        if renamed is not None:
+            _logger.warning(
+                "agent: provider %r is deprecated, use %r", self.provider, renamed
+            )
+            object.__setattr__(self, "provider", renamed)
+        _validate_base_url(
+            self.provider, self.base_url, self.model_kwargs, block="agent"
+        )
         has_inline = self.system_prompt is not None
         has_file = self.system_prompt_file is not None
         if has_inline and has_file:
@@ -143,6 +170,7 @@ _AGENT_OPTIONAL_COMMON = {
     "api_key_env",
     "model_kwargs",
     "hf_provider",
+    "base_url",
     "history_reactions",
     "history_budget",
     "context_window",
@@ -158,6 +186,35 @@ def _as_base_dir(base_dir: str | Path | None) -> Path | None:
     `Path | None` the `_parse_*` locate plumbing expects — the same base-dir context `from_json_file`
     derives from the config file's own directory. See specs/config.md ("System prompt")."""
     return Path(base_dir) if base_dir is not None else None
+
+
+def _validate_base_url(
+    provider: str, base_url: Any, model_kwargs: Any, *, block: str
+) -> None:
+    """`base_url` is required with openai-chat-completions-compatible and rejected with any other
+    provider (silently ignored, it would send the requests to the vendor instead of the intended
+    server); with that provider `model_kwargs.base_url` is rejected too, so the address has one
+    home. See specs/config.md ("Providers")."""
+    if provider != OPENAI_CHAT_COMPLETIONS_COMPATIBLE:
+        if base_url is not None:
+            raise ConfigError(
+                f"{block}: 'base_url' is only for provider "
+                f"{OPENAI_CHAT_COMPLETIONS_COMPATIBLE!r}, not {provider!r}"
+            )
+        return
+    if base_url is None:
+        raise ConfigError(
+            f"{block}: provider {OPENAI_CHAT_COMPLETIONS_COMPATIBLE!r} needs 'base_url', "
+            "the server's address with its /v1 path (e.g. 'http://127.0.0.1:8080/v1')"
+        )
+    if not isinstance(base_url, str) or not base_url:
+        raise ConfigError(
+            f"{block}: 'base_url' must be a non-empty string, got {base_url!r}"
+        )
+    if isinstance(model_kwargs, dict) and "base_url" in model_kwargs:
+        raise ConfigError(
+            f"{block}: set the server's address in 'base_url', not in 'model_kwargs'"
+        )
 
 
 def _validate_history_reactions(value: Any, *, block: str) -> int | None:
@@ -306,6 +363,12 @@ def _parse_agent_block(
             f"{block}: 'hf_provider' must be a string, got {type(hf_provider).__name__}"
         )
 
+    base_url = data.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        raise ConfigError(
+            f"{block}: 'base_url' must be a string, got {type(base_url).__name__}"
+        )
+
     history_reactions = _validate_history_reactions(
         data.get("history_reactions"), block=block
     )
@@ -327,6 +390,7 @@ def _parse_agent_block(
         "api_key_env": api_key_env,
         "model_kwargs": model_kwargs,
         "hf_provider": hf_provider,
+        "base_url": base_url,
         "history_reactions": history_reactions,
         "history_budget": history_budget,
         "context_window": context_window,

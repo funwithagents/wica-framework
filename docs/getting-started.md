@@ -10,7 +10,7 @@ Python 3.12+, in a Python project of your own (`uv init my-agent && cd my-agent`
 uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
 ```
 
-The extras are `anthropic`, `openai`, `google-genai`, `mistralai` and `huggingface-hub` ([reference/configuration.md](reference/configuration.md#providers)); several can be combined (`wica[anthropic,openai]`), and `wica[gradio]` adds the browser panels of [guides/gradio-panels.md](guides/gradio-panels.md). The API changes between commits without a deprecation period while WICA is at 0.1: pin a commit (`@<sha>`) and lock your project's own resolved graph.
+The extras are `anthropic`, `openai`, `gemini`, `mistral`, `huggingface-hub` and `openai-compatible` (a model you host) ([reference/configuration.md](reference/configuration.md#providers)); several can be combined (`wica[anthropic,openai]`), and `wica[gradio]` adds the browser panels of [guides/gradio-panels.md](guides/gradio-panels.md). The API changes between commits without a deprecation period while WICA is at 0.1: pin a commit (`@<sha>`) and lock your project's own resolved graph.
 
 ## Your first agent
 

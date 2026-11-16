@@ -101,9 +101,9 @@ jobs:
             select: openai
           - provider: huggingface-hub
             select: huggingface
-          - provider: google-genai
-            select: google
-          - provider: mistralai
+          - provider: gemini
+            select: gemini
+          - provider: mistral
             select: mistral
     steps:
       - uses: actions/checkout@v7

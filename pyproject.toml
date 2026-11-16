@@ -20,12 +20,15 @@ dependencies = [
 anthropic = ["langchain-anthropic>=1.0"]
 openai = ["langchain-openai>=1.0"]
 huggingface-hub = ["langchain-huggingface>=1.2"]
-# Gemini via the Gemini Developer API (`provider: "google_genai"`, a plain init_chat_model
-# pass-through). PEP 685 normalizes extras, so `wica[google_genai]` selects it too.
-google-genai = ["langchain-google-genai>=4.4"]
-# Mistral via La Plateforme (`provider: "mistralai"`, LangChain's own provider id, a plain
-# init_chat_model pass-through).
-mistralai = ["langchain-mistralai>=1.1"]
+# Gemini via the Gemini Developer API and Mistral via La Plateforme (`provider: "gemini"` /
+# `"mistral"`, plain init_chat_model pass-throughs under LangChain's ids). Old extras
+# `google-genai`/`mistralai` were removed with no alias (specs/config.md, "Provider names").
+gemini = ["langchain-google-genai>=4.4"]
+mistral = ["langchain-mistralai>=1.1"]
+# Every provider speaking an OpenAI protocol (today `openai-chat-completions-compatible`, any
+# server implementing Chat Completions: llama-server, mlx_lm.server, Ollama, vLLM, ...). Named
+# after the protocol family, shared by all such providers; the vendor extra `openai` stays apart.
+openai-compatible = ["langchain-openai>=1.0"]
 # Not a provider: the opt-in Gradio observability panels in `wica.contrib.gradio`
 # (specs/gradio-contrib.md, "Packaging"). Core never imports Gradio.
 gradio = ["gradio>=5.0.0"]

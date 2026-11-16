@@ -49,7 +49,7 @@ KNOWN_FLAKY: dict[tuple[str, str], str] = {
         "gpt-oss-120b speaks when a background sound wakes it (3 of 6 attempts, 2026-11-10): "
         "it checks in or follows up the previous turn instead of calling noop"
     ),
-    ("e2e.mistralai.config", "background"): (
+    ("e2e.mistral.config", "background"): (
         "ministral-14b, woken by a background sound right after the dance step, dances again "
         "(1 of 6 attempts, 2026-11-10): it takes the wake as a cue to repeat the last request"
     ),

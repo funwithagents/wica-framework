@@ -296,9 +296,9 @@
       "notes": "Current flagship line (gpt-5.6-sol also answers); tools need the Responses API here. Reasoning at the provider's floor (use_responses_api=True, reasoning_effort=none)."
     },
     {
-      "id": "google-genai/gemini-3.8-flash",
+      "id": "gemini/gemini-3.8-flash",
       "agent": {
-        "provider": "google_genai",
+        "provider": "gemini",
         "model": "gemini-3.8-flash",
         "context_window": 1048576,
         "api_key_env": "WICA_GEMINI_API_KEY",
@@ -311,12 +311,12 @@
         "default",
         "mid"
       ],
-      "notes": "agent.google-genai.config.json; thinking_level low as the demo sets it."
+      "notes": "agent.gemini.config.json; thinking_level low as the demo sets it."
     },
     {
-      "id": "google-genai/gemini-3.5-flash-lite",
+      "id": "gemini/gemini-3.5-flash-lite",
       "agent": {
-        "provider": "google_genai",
+        "provider": "gemini",
         "model": "gemini-3.5-flash-lite",
         "context_window": 1048576,
         "api_key_env": "WICA_GEMINI_API_KEY",
@@ -331,9 +331,9 @@
       "notes": "The cheap Flash-Lite."
     },
     {
-      "id": "google-genai/gemini-4-argon",
+      "id": "gemini/gemini-4-argon",
       "agent": {
-        "provider": "google_genai",
+        "provider": "gemini",
         "model": "gemini-4-argon",
         "context_window": 1048576,
         "api_key_env": "WICA_GEMINI_API_KEY",
@@ -348,9 +348,9 @@
       "notes": "Gemini 4 line, as listed by the models endpoint."
     },
     {
-      "id": "mistralai/ministral-3b-latest",
+      "id": "mistral/ministral-3b-latest",
       "agent": {
-        "provider": "mistralai",
+        "provider": "mistral",
         "model": "ministral-3b-latest",
         "api_key_env": "WICA_MISTRAL_API_KEY"
       },
@@ -359,12 +359,12 @@
         "default",
         "small"
       ],
-      "notes": "agent.mistralai.config.json; alias of ministral-3b-2512."
+      "notes": "agent.mistral.config.json; alias of ministral-3b-2512."
     },
     {
-      "id": "mistralai/ministral-8b-latest",
+      "id": "mistral/ministral-8b-latest",
       "agent": {
-        "provider": "mistralai",
+        "provider": "mistral",
         "model": "ministral-8b-latest",
         "api_key_env": "WICA_MISTRAL_API_KEY"
       },
@@ -375,9 +375,9 @@
       "notes": "Alias of ministral-8b-2512."
     },
     {
-      "id": "mistralai/ministral-14b-latest",
+      "id": "mistral/ministral-14b-latest",
       "agent": {
-        "provider": "mistralai",
+        "provider": "mistral",
         "model": "ministral-14b-latest",
         "api_key_env": "WICA_MISTRAL_API_KEY"
       },
@@ -388,9 +388,9 @@
       "notes": "Alias of ministral-14b-2512, the largest Ministral."
     },
     {
-      "id": "mistralai/mistral-small-latest",
+      "id": "mistral/mistral-small-latest",
       "agent": {
-        "provider": "mistralai",
+        "provider": "mistral",
         "model": "mistral-small-latest",
         "api_key_env": "WICA_MISTRAL_API_KEY"
       },
@@ -401,9 +401,9 @@
       "notes": "Alias of mistral-small-2603."
     },
     {
-      "id": "mistralai/mistral-medium-latest",
+      "id": "mistral/mistral-medium-latest",
       "agent": {
-        "provider": "mistralai",
+        "provider": "mistral",
         "model": "mistral-medium-latest",
         "api_key_env": "WICA_MISTRAL_API_KEY"
       },
@@ -414,9 +414,9 @@
       "notes": "Alias of mistral-medium-3.5."
     },
     {
-      "id": "mistralai/mistral-large-4",
+      "id": "mistral/mistral-large-4",
       "agent": {
-        "provider": "mistralai",
+        "provider": "mistral",
         "model": "mistral-large-4",
         "api_key_env": "WICA_MISTRAL_API_KEY"
       },

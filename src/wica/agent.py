@@ -32,6 +32,7 @@ from opentelemetry import trace as otel_trace
 from wica.command import Command
 from wica.config import (
     AgentConfig,
+    OPENAI_CHAT_COMPLETIONS_COMPATIBLE,
     ConfigError,
     resolve_api_key,
     resolve_system_prompt,
@@ -432,6 +433,15 @@ _HUGGINGFACE_HUB_PROVIDER = "huggingface-hub"
 # specs/fake-provider.md and src/wica/fake_model.py.
 _FAKE_PROVIDER = "fake"
 
+# WICA's provider names whose LangChain `model_provider` id differs: a mapping, not a construction
+# branch — these still pass through init_chat_model. See specs/config.md ("Provider names").
+_LANGCHAIN_PROVIDER_IDS = {"gemini": "google_genai", "mistral": "mistralai"}
+
+# The key sent to an openai-chat-completions-compatible server when none is configured: the OpenAI
+# client refuses to start without one, and most local servers check none. Never OPENAI_API_KEY,
+# which holds a key for OpenAI. See specs/config.md ("Providers").
+_PLACEHOLDER_API_KEY = "not-needed"
+
 
 def _resolve_history_budget(
     config: AgentConfig, model: BaseChatModel
@@ -448,9 +458,15 @@ def _resolve_history_budget(
         profile = model.profile
         window = profile.get("max_input_tokens") if profile is not None else None
     if window is None:
+        hint = (
+            " to the server's own context size (e.g. llama-server's -c)"
+            if config.provider == OPENAI_CHAT_COMPLETIONS_COMPATIBLE
+            else ""
+        )
         raise ConfigError(
             "agent: 'history_budget' needs a known context window, and the model profile for "
             f"{config.provider}/{config.model} has no max_input_tokens — set 'context_window'"
+            + hint
         )
     high = int(window * config.history_budget)
     return high, high // 2
@@ -462,7 +478,8 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
     the exact model production builds).
 
     Most providers pass straight through to init_chat_model (switching between them is a config
-    edit). `huggingface-hub` is the exception: it targets the Hugging Face Hub's serverless
+    edit), `gemini`/`mistral` under LangChain's own ids. `openai-chat-completions-compatible` is
+    built as a ChatOpenAI pointed at the config's base_url. `huggingface-hub` is the other exception: it targets the Hugging Face Hub's serverless
     Inference Providers and is built directly as ChatHuggingFace(llm=HuggingFaceEndpoint(...)) —
     *not* via init_chat_model, whose builtin `huggingface` provider builds a local transformers
     pipeline, a blocking generation call the Agent's task.cancel() can't stop. See specs/agent.md
@@ -509,10 +526,30 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
             chat.max_tokens = None
         return chat
 
+    if config.provider == OPENAI_CHAT_COMPLETIONS_COMPATIBLE:
+        from langchain_openai import ChatOpenAI
+        from pydantic import SecretStr
+
+        # Built directly, not via init_chat_model, so this branch owns three things: the address
+        # is the config's base_url, the key is never read from OPENAI_API_KEY (a placeholder
+        # instead), and usage is reported on streamed calls (the client turns it off with a
+        # base_url). See specs/agent.md ("Provider-agnostic model, from config").
+        return ChatOpenAI(
+            model=config.model,
+            base_url=config.base_url,
+            api_key=SecretStr(api_key if api_key is not None else _PLACEHOLDER_API_KEY),
+            stream_usage=True,
+            **config.model_kwargs,
+        )
+
     model_kwargs = dict(config.model_kwargs)
     if api_key is not None:
         model_kwargs["api_key"] = api_key
-    return init_chat_model(config.model, model_provider=config.provider, **model_kwargs)
+    return init_chat_model(
+        config.model,
+        model_provider=_LANGCHAIN_PROVIDER_IDS.get(config.provider, config.provider),
+        **model_kwargs,
+    )
 
 
 def _bind_tools_forced(

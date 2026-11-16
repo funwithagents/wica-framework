@@ -59,9 +59,10 @@ uv add "wica[anthropic] @ git+https://github.com/funwithagents/wica-framework"
 | *(none)* | `langchain`, `langchain-core`, `opentelemetry-api` | The framework and the scripted `fake` provider |
 | `anthropic` | `langchain-anthropic` | `provider: "anthropic"` |
 | `openai` | `langchain-openai` | `provider: "openai"` |
-| `google-genai` | `langchain-google-genai` | `provider: "google_genai"`, Gemini through the Gemini Developer API |
-| `mistralai` | `langchain-mistralai` | `provider: "mistralai"`, Mistral through La Plateforme |
+| `gemini` | `langchain-google-genai` | `provider: "gemini"`, Gemini through the Gemini Developer API |
+| `mistral` | `langchain-mistralai` | `provider: "mistral"`, Mistral through La Plateforme |
 | `huggingface-hub` | `langchain-huggingface` | `provider: "huggingface-hub"`, the Hub's serverless Inference Providers |
+| `openai-compatible` | `langchain-openai` | `provider: "openai-chat-completions-compatible"`, a model you host behind any server speaking OpenAI's Chat Completions API: llama.cpp, Ollama, LM Studio, vLLM ([docs/guides/local-models.md](docs/guides/local-models.md)) |
 | `gradio` | `gradio` | The three observability panels of `wica.contrib.gradio` |
 
 Selecting a provider whose extra is not installed fails at `Wica.init` with an `ImportError` naming it. **Platforms:** macOS on Apple silicon, Linux (x86_64, arm64) and Windows; WICA is pure Python and CI runs the fast tier on all four.

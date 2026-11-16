@@ -629,16 +629,16 @@ def test_build_chat_model_resolves_api_key_env(monkeypatch: pytest.MonkeyPatch):
     assert captured["kwargs"]["api_key"] == "sk-resolved"
 
 
-def test_build_chat_model_google_genai_is_a_pass_through():
-    """google_genai (Gemini via the Gemini Developer API) takes no WICA branch: build_chat_model
-    hands it to init_chat_model verbatim, and the two things that must land on the real model
+def test_build_chat_model_gemini_is_a_pass_through():
+    """gemini (Gemini via the Gemini Developer API) takes no WICA branch: build_chat_model hands it
+    to init_chat_model under LangChain's id `google_genai`, and the two things that must land on the real model
     do — the resolved api_key on its Google key field, and model_kwargs (thinking_level, the
     knob the committed configs use to minimize Gemini 3's default thinking). Constructing the
     model makes no request — see specs/config.md "Providers"."""
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     config = AgentConfig(
-        provider="google_genai",
+        provider="gemini",
         model="gemini-3.8-flash",
         system_prompt="hi",
         api_key="test-key",
@@ -653,15 +653,15 @@ def test_build_chat_model_google_genai_is_a_pass_through():
     assert model.thinking_level == "low"
 
 
-def test_build_chat_model_mistralai_is_a_pass_through():
-    """mistralai (Mistral via La Plateforme) takes no WICA branch: build_chat_model hands it to
-    init_chat_model verbatim, and the two things that must land on the real model do — the
+def test_build_chat_model_mistral_is_a_pass_through():
+    """mistral (Mistral via La Plateforme) takes no WICA branch: build_chat_model hands it to
+    init_chat_model under LangChain's id `mistralai`, and the two things that must land on the real model do — the
     resolved api_key on its mistral_api_key field, and model_kwargs (temperature). Constructing
     the model makes no request — see specs/config.md "Providers"."""
     from langchain_mistralai import ChatMistralAI
 
     config = AgentConfig(
-        provider="mistralai",
+        provider="mistral",
         model="mistral-small-latest",
         system_prompt="hi",
         api_key="test-key",
@@ -818,3 +818,100 @@ def test_configs_are_frozen():
         cfg.agent = cfg.agent  # type: ignore[misc]
     variant = dataclasses.replace(cfg.agent, system_prompt="b")
     assert variant.system_prompt == "b" and cfg.agent.system_prompt == "a"
+
+
+# --- provider names and base_url --------------------------------------------------------
+
+_COMPATIBLE = "openai-chat-completions-compatible"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"), [("google_genai", "gemini"), ("mistralai", "mistral")]
+)
+def test_an_old_provider_name_loads_as_the_new_one_with_a_warning(
+    old: str, new: str, caplog: pytest.LogCaptureFixture
+):
+    """Old names keep working: the stored provider is the new name, whichever way the config was
+    created, and each read logs a deprecation warning naming the new one — see specs/config.md
+    ("Provider names")."""
+    with caplog.at_level("WARNING", logger="wica.config"):
+        loaded = WicaConfig.from_dict(_wica_dict(provider=old))
+        direct = AgentConfig(provider=old, model="m", system_prompt="hi")
+
+    assert loaded.agent.provider == new
+    assert direct.provider == new
+    warnings = [r.getMessage() for r in caplog.records if r.name == "wica.config"]
+    assert len(warnings) == 2
+    assert all(old in w and new in w and "deprecated" in w for w in warnings)
+
+
+def test_a_current_provider_name_logs_nothing(caplog: pytest.LogCaptureFixture):
+    with caplog.at_level("WARNING", logger="wica.config"):
+        cfg = WicaConfig.from_dict(_wica_dict(provider="gemini"))
+        dataclasses.replace(cfg.agent, model="other")
+    assert cfg.agent.provider == "gemini"
+    assert [r for r in caplog.records if r.name == "wica.config"] == []
+
+
+def test_base_url_is_loaded_for_the_compatible_provider():
+    cfg = WicaConfig.from_json(
+        json.dumps(
+            _wica_dict(
+                provider=_COMPATIBLE, model="local", base_url="http://127.0.0.1:8080/v1"
+            )
+        )
+    )
+    assert cfg.agent.provider == _COMPATIBLE
+    assert cfg.agent.base_url == "http://127.0.0.1:8080/v1"
+
+
+def test_the_compatible_provider_needs_a_base_url():
+    with pytest.raises(ConfigError, match="needs 'base_url'"):
+        WicaConfig.from_dict(_wica_dict(provider=_COMPATIBLE, model="local"))
+    with pytest.raises(ConfigError, match="needs 'base_url'"):
+        AgentConfig(provider=_COMPATIBLE, model="local", system_prompt="hi")
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "fake", "huggingface-hub"])
+def test_base_url_is_rejected_with_any_other_provider(provider: str):
+    """Silently ignored, a base_url would send the requests to the vendor instead of the intended
+    server — see specs/config.md ("Providers")."""
+    with pytest.raises(ConfigError, match="only for provider"):
+        WicaConfig.from_dict(
+            _wica_dict(provider=provider, base_url="http://localhost/v1")
+        )
+    with pytest.raises(ConfigError, match="only for provider"):
+        AgentConfig(
+            provider=provider,
+            model="m",
+            system_prompt="hi",
+            base_url="http://localhost/v1",
+        )
+
+
+@pytest.mark.parametrize("bad", ["", 8080, ["http://x/v1"]])
+def test_base_url_must_be_a_non_empty_string(bad: Any):
+    with pytest.raises(ConfigError, match="base_url"):
+        WicaConfig.from_dict(
+            _wica_dict(provider=_COMPATIBLE, model="local", base_url=bad)
+        )
+
+
+def test_the_compatible_provider_rejects_base_url_in_model_kwargs():
+    with pytest.raises(ConfigError, match="not in 'model_kwargs'"):
+        WicaConfig.from_dict(
+            _wica_dict(
+                provider=_COMPATIBLE,
+                model="local",
+                base_url="http://127.0.0.1:8080/v1",
+                model_kwargs={"base_url": "http://elsewhere/v1"},
+            )
+        )
+
+
+def test_openai_keeps_base_url_in_model_kwargs():
+    """The vendor provider stays a pass-through: a proxy address in its model_kwargs still loads."""
+    cfg = WicaConfig.from_dict(
+        _wica_dict(provider="openai", model_kwargs={"base_url": "http://proxy/v1"})
+    )
+    assert cfg.agent.model_kwargs == {"base_url": "http://proxy/v1"}
