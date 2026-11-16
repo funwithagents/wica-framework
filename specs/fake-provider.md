@@ -9,7 +9,7 @@ tests:
 
 # Fake provider (deterministic fake model)
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 

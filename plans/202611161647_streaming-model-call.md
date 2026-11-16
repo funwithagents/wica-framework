@@ -1,6 +1,6 @@
 # Streaming the model call
 
-**Status:** In progress
+**Status:** Done
 
 Implements [specs/agent.md](../specs/agent.md) ("Streaming the model call") and the "Streaming" section of [specs/fake-provider.md](../specs/fake-provider.md). Comes out of the analysis in [analysis/_streaming-model-call.md](../analysis/_streaming-model-call.md), option C (always `astream`, no knob).
 
@@ -45,3 +45,7 @@ Not in scope (follow-ups, in [specs/agent.md](../specs/agent.md) "Future improve
 - `uv run pytest tests-e2e -k "fake or example or tester"` — the key-less e2e set.
 - The live set on all five providers, dispatched on the branch on CI (`gh workflow run CI --ref streaming-model-call`), since tool-call assembly is where providers differ.
 - On `Done`: [specs/agent.md](../specs/agent.md) and [specs/fake-provider.md](../specs/fake-provider.md) back to `Implemented`.
+
+## Result
+
+All of the above clean: ruff, pyright (0 errors), the fast tier (573 passed), the key-less e2e set (14 passed), and CI on every platform. The live set passed on all five providers (CI run 43901421559, dispatched on the branch). In its reports, all 238 reactions ended `ok`, none was retried, and every one carries token usage from the stream. A probe through `_stream_response` on the five providers, with a 25-token cap on a forced `say`, gives the same result as `ainvoke`: OpenAI and Mistral's cut calls are now malformed instead of valid with truncated text, and a guard retry showing a streamed response is still accepted, Anthropic with extended thinking included.
