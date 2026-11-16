@@ -28,7 +28,7 @@ tests:
 - the **workload**: scenarios written as **sessions** of several turns, the same for every model, with few expects and many checks;
 - the **runner**: a config matrix × a scenario set × *k* repetitions, one report per run, one summary with **one row per model** pooled over every run (pass^k, rule compliance, turns answered, latency, tokens and words per turn) and then the same per scenario.
 
-It also ships the framework's own **reference benchmark**: the conversation demo ([conversation-demo.md](conversation-demo.md)) as the system under test, a matrix of models, and a workload of two session scenarios written against the demo's `speech_input` + `say` shape, run *k* times per model. That benchmark answers "how well does model X drive a WICA agent at all"; an application built on WICA (the first is `wica-interaction`, `wica-interaction/specs/benchmark.md`) reuses the runner, the scenario format and the built-in checks for its own target, and adds the checks its persona and body demand. The generic layer lives in the package (`wica.testing` for scenarios and checks, `wica.benchmark` for the comparison) so that no application re-implements a runner, and so that two applications' numbers are produced the same way; the reference benchmark — target, matrix, scenarios, results — lives in a root `benchmarks/` folder outside the package, as nothing imports it (the layout `tts-engine` uses for its own benchmark).
+It also ships the framework's own **reference benchmark**: the conversation demo ([conversation-demo.md](conversation-demo.md)) as the system under test, a matrix of models, and a workload of two session scenarios written against the demo's `speech_input` + `say` shape, run *k* times per model. That benchmark answers "how well does model X drive a WICA agent at all"; an application built on WICA reuses the runner, the scenario format and the built-in checks for its own target, and adds the checks its persona and body demand. The generic layer lives in the package (`wica.testing` for scenarios and checks, `wica.benchmark` for the comparison) so that no application re-implements a runner, and so that two applications' numbers are produced the same way; the reference benchmark — target, matrix, scenarios, results — lives in a root `benchmarks/` folder outside the package, as nothing imports it.
 
 This spec absorbs phases 3 and 4 of [wica-tester.md](wica-tester.md) ("Phases"): the runner and the demo scenario. Trace export (`report.to_scenario()`) stays with the live-LLM tester (phase 2), since it is the live tester's calls it exports.
 
@@ -62,7 +62,7 @@ The format, the four step kinds, the built-in checks and their windows are the t
 
 ### The matrix
 
-`src/wica/benchmark/matrix.py` — `Entry`, `Matrix`, `load_matrix(path)`, `select_entries(entries, *, only, exclude, tags, exclude_tags)`, `MatrixError`. One JSON file lists every configuration, the way `tts-engine`'s `benchmarks/matrix.json` does, because a benchmark that compares many models wants one place to add a row, tag it and select on it — not a file per model:
+`src/wica/benchmark/matrix.py` — `Entry`, `Matrix`, `load_matrix(path)`, `select_entries(entries, *, only, exclude, tags, exclude_tags)`, `MatrixError`. One JSON file lists every configuration, because a benchmark that compares many models wants one place to add a row, tag it and select on it — not a file per model:
 
 ```json
 {
@@ -114,7 +114,7 @@ TargetFactory = Callable[[Entry], Target]  # one matrix entry → one Target
        [--scenarios DIR|FILE] [--scenario NAME ...] [--out DIR] [--k N] [--result NAME]
 ```
 
-The selection flags are `select_entries`' (`tts-engine`'s vocabulary); an entry marked `enabled: false` is listed as skipped unless `--include-disabled`, and an empty selection is an argument error. `--out` is the batch folder, by default `<default_runs>/<YYYYMMDD-HHMM>/`. `--result NAME` keeps the batch as a result (below). Exit code 0 whatever the results: a benchmark compares, it does not gate.
+The selection flags are `select_entries`'; an entry marked `enabled: false` is listed as skipped unless `--include-disabled`, and an empty selection is an argument error. `--out` is the batch folder, by default `<default_runs>/<YYYYMMDD-HHMM>/`. `--result NAME` keeps the batch as a result (below). Exit code 0 whatever the results: a benchmark compares, it does not gate.
 
 ### The summary
 
@@ -213,5 +213,5 @@ Deferrals, not blockers.
 2. **Comparing two summaries.** Where summaries accumulate and how two runs of the matrix are diffed (a model upgrade, a primer change) is the tester spec's open question 4, unchanged.
 3. **A judge pass** over the saved reports for relevance and tone — the tester spec's open question 2; the runner leaves room for it (one JSON per run) and adds nothing.
 4. **Cost ceilings.** A matrix of five models × two sessions × five runs is a few hundred model calls and about an hour; the CLI has filters but no budget flag. Add one when a batch first surprises someone.
-5. **Raw data in results.** A result keeps the summary, not the per-run reports; re-deriving a new measure over an old result is therefore impossible. `tts-engine` keeps its raw records compressed in the result folder for that reason. Add `reports.jsonl.gz` to `write_result` when a measure is first added after a result exists. Merging batches into one result and resuming an interrupted batch (also `tts-engine`'s) are left out for the same reason: a WICA batch is minutes to an hour, re-running is cheaper.
+5. **Raw data in results.** A result keeps the summary, not the per-run reports; re-deriving a new measure over an old result is therefore impossible. Keeping the raw records compressed in the result folder would allow it: add `reports.jsonl.gz` to `write_result` when a measure is first added after a result exists. Merging batches into one result and resuming an interrupted batch are left out for the same reason: a WICA batch is minutes to an hour, re-running is cheaper.
 6. **Cost per model.** The per-configuration row has tokens per turn but no money column; that needs a price per entry in the matrix (`price_in`, `price_out` per million tokens, in `Entry.extra` or as defined keys). Add it with the first result whose reading turns on cost.
