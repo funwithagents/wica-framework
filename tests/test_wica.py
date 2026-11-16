@@ -203,7 +203,7 @@ def test_response_guards_are_delegated_to_the_agent(wica_factory):
     wica.add_response_guard(lambda response: None, name="mine")
     assert list(wica.response_guards) == list(wica.agent.response_guards)
     assert list(wica.response_guards) == [
-        "malformed_command",
+        "incomplete_response",
         "unknown_command",
         "invalid_args",
         "mine",

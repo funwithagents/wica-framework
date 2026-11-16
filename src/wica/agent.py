@@ -431,7 +431,22 @@ def _model_response(
             )
             for call in response.invalid_tool_calls
         ),
+        truncated=_was_truncated(response),
+        output_tokens=(response.usage_metadata or {}).get("output_tokens"),
     )
+
+
+# What providers report when they stop a response at its output cap, lower-cased: Anthropic's
+# `stop_reason`, and the `finish_reason` of OpenAI, Mistral and the Hub (`length`) and of Gemini
+# (`MAX_TOKENS`).
+_CAP_STOP_REASONS = frozenset({"max_tokens", "length"})
+
+
+def _was_truncated(response: AIMessage) -> bool:
+    """Whether the provider stopped the response at its output cap, from its stop reason."""
+    metadata = response.response_metadata
+    reason = metadata.get("stop_reason") or metadata.get("finish_reason")
+    return isinstance(reason, str) and reason.lower() in _CAP_STOP_REASONS
 
 
 def _assemble(summed: AIMessageChunk) -> AIMessage:
@@ -943,7 +958,7 @@ class Agent:
     @property
     def response_guards(self) -> Mapping[str, ResponseGuard]:
         """Read-only view of the response guards by name, in the order they run: the defaults
-        (``malformed_command``, ``unknown_command``, ``invalid_args``, ``output_command_required``) first, then the
+        (``incomplete_response``, ``unknown_command``, ``invalid_args``, ``output_command_required``) first, then the
         application's. See specs/agent.md ("Response guards")."""
         return MappingProxyType(self._guards)
 
@@ -1443,11 +1458,13 @@ class Agent:
             if retry is None:
                 break
             # An empty response cannot be shown (providers reject an empty assistant message), nor
-            # can one holding a malformed tool call (the broken call cannot be replayed).
+            # can one holding a malformed tool call or cut at the output cap (a broken or cut
+            # response cannot be replayed).
             show = (
                 retry.show_response
                 and bool(response.text or response.tool_calls)
-                and not response.invalid_tool_calls
+                and not candidate.malformed
+                and not candidate.truncated
             )
             will_retry = attempt <= self._max_retries
             builder.rejections.append(retry.feedback)

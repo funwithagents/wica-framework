@@ -99,7 +99,7 @@ Four guards are on by default:
 
 | Guard | Rejects a response that |
 |---|---|
-| `malformed_command` | holds a Command call whose arguments could not be read, typically because the output cap cut it; without this guard the call is dropped and the rest of the response used |
+| `incomplete_response` | was cut at the output cap (`max_tokens` and the like) in the middle of a Command call, or before the call an output Command requires; the model is asked again with a length to stay under. Without this guard a cut call is dropped, or dispatched with the arguments that survived |
 | `unknown_command` | calls a Command that is not registered |
 | `invalid_args` | calls a Command with arguments that do not fit its signature |
 | `output_command_required` | has no Command call at all while an output Command is set (its text would reach nobody) |

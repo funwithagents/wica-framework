@@ -37,6 +37,7 @@ from wica.agent import (
     _NOOP_ACK,
     _NOOP_COMMAND_NAME,
     _assemble,
+    _was_truncated,
     build_chat_model,
     mark_cache_breakpoint,
 )
@@ -3840,7 +3841,7 @@ def test_a_raising_guard_accepts_and_an_async_guard_is_awaited(
 def test_guards_are_listed_added_and_removed_by_name(loop, world):
     agent = make_agent(ProgrammableChatModel(), world=world, loop=loop)
     assert list(agent.response_guards) == [
-        "malformed_command",
+        "incomplete_response",
         "unknown_command",
         "invalid_args",
         "output_command_required",
@@ -3849,7 +3850,7 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
     agent.add_response_guard(lambda r: None, name="mine")
     agent.remove_response_guard("invalid_args")
     assert list(agent.response_guards) == [
-        "malformed_command",
+        "incomplete_response",
         "unknown_command",
         "output_command_required",
         "mine",
@@ -4058,7 +4059,7 @@ def test_a_streamed_response_is_used_once_whole(loop, world, sink):
 def test_a_streamed_call_cut_by_the_cap_is_not_dispatched_and_is_retried(
     loop, world, sink
 ):
-    """A `say` whose arguments were cut is malformed: not spoken, and the malformed_command guard
+    """A `say` whose arguments were cut is malformed: not spoken, and the incomplete_response guard
     asks for it again — as a reminder, since the broken call cannot be replayed."""
     spoken: list[str] = []
     agent, model, traces, done = _streaming_agent(
@@ -4096,7 +4097,7 @@ def test_a_streamed_call_cut_by_the_cap_is_not_dispatched_and_is_retried(
     [malformed] = rejection.response.malformed
     assert (malformed.name, malformed.raw_args) == ("say", '{"text": "Once upon a ti')
     assert "not complete JSON" in malformed.error
-    # One correction, from malformed_command alone: output_command_required leaves it the case.
+    # One correction, from incomplete_response alone: output_command_required leaves it the case.
     assert rejection.feedback.startswith("Your call to `say` was not executed")
     retry_prompt = model.calls[1]
     assert not any(isinstance(m, AIMessage) for m in retry_prompt)
@@ -4180,7 +4181,7 @@ def test_without_the_malformed_guard_a_cut_call_is_dropped_and_the_rest_used(
         return "ok"
 
     agent.register_command(set_light)
-    agent.remove_response_guard("malformed_command")
+    agent.remove_response_guard("incomplete_response")
     agent.start()
 
     world.update("input", "make it red")
@@ -4210,7 +4211,7 @@ def test_a_response_with_a_malformed_call_is_never_shown_in_a_retry(loop, world,
         world,
         sink,
     )
-    agent.remove_response_guard("malformed_command")
+    agent.remove_response_guard("incomplete_response")
     agent.add_response_guard(
         lambda r: Retry("Say it differently.") if r.malformed else None,
         name="shows",
@@ -4359,3 +4360,99 @@ def test_a_model_without_a_streaming_path_stamps_first_content_at_its_whole_mess
     assert trace.time_to_first_content is not None and trace.generation_time is not None
     assert trace.time_to_first_content >= 0.05
     assert trace.generation_time < trace.time_to_first_content / 2
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"stop_reason": "max_tokens"}, True),  # Anthropic
+        ({"finish_reason": "length"}, True),  # OpenAI, Mistral, the Hub
+        ({"finish_reason": "MAX_TOKENS"}, True),  # Gemini
+        ({"finish_reason": "stop"}, False),
+        ({"stop_reason": "tool_use"}, False),
+        ({"finish_reason": "tool_calls"}, False),
+        ({}, False),
+    ],
+)
+def test_a_response_is_truncated_when_its_stop_reason_is_the_output_cap(
+    metadata, expected
+):
+    assert (
+        _was_truncated(AIMessage(content="x", response_metadata=metadata)) is expected
+    )
+
+
+def _cut_at_the_cap(tokens: int) -> AIMessageChunk:
+    """The closing chunk of a response the provider stopped at its output cap."""
+    return AIMessageChunk(
+        content="",
+        response_metadata={"finish_reason": "length"},
+        usage_metadata={
+            "input_tokens": 10,
+            "output_tokens": tokens,
+            "total_tokens": 10 + tokens,
+        },
+    )
+
+
+def test_a_well_formed_call_in_a_response_cut_at_the_cap_is_retried(loop, world, sink):
+    """A provider may return a cut call well-formed, with empty arguments. The stop reason marks
+    the response truncated: incomplete_response alone corrects it (invalid_args stays silent
+    about the cut call), as a reminder, with the cap as the length to stay under."""
+    spoken: list[str] = []
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                _tool_chunk(0, "", name="say", call_id="s1"), _cut_at_the_cap(60)
+            ),
+            chunks_stream(
+                _tool_chunk(0, '{"text": "A robot woke up."}', name="say", call_id="s2")
+            ),
+            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+        ],
+        loop,
+        world,
+        sink,
+        output_command=_say_command(spoken),
+    )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    agent.stop()
+
+    assert spoken == ["A robot woke up."]
+    assert traces[0].attempts == 2
+    [rejection] = rejections
+    assert rejection.response.truncated is True
+    assert rejection.response.output_tokens == 60
+    assert rejection.show_response is False
+    assert rejection.feedback.startswith(
+        "Your response was cut off at the output length limit while you were writing the call "
+        "to `say`"
+    )
+    assert "keep it under 60 characters" in rejection.feedback
+    assert "invalid" not in rejection.feedback
+    assert not any(isinstance(m, AIMessage) for m in model.calls[1])
+
+
+def test_free_text_cut_at_the_cap_is_still_the_reply_without_an_output_command(
+    loop, world, sink
+):
+    agent, model, traces, done = _streaming_agent(
+        [chunks_stream(AIMessageChunk(content="Once upon a"), _cut_at_the_cap(4))],
+        loop,
+        world,
+        sink,
+    )
+    agent.start()
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert sink.texts == ["Once upon a"]
+    assert traces[0].outcome == "ok"
+    assert traces[0].attempts == 1
