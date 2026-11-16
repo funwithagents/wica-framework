@@ -1,6 +1,6 @@
 # First-content stamp and the incomplete-response guard
 
-**Status:** In progress
+**Status:** Done
 
 Two follow-ups to [streaming the model call](202611161647_streaming-model-call.md). Implements the `first_content_at` stamp and its two measures in [specs/instrumentation.md](../specs/instrumentation.md) and [specs/agent.md](../specs/agent.md) ("Streaming the model call"), and `ModelResponse.malformed` / `truncated` with the `incomplete_response` default guard in [specs/agent.md](../specs/agent.md) ("Response guards").
 
@@ -46,3 +46,9 @@ Not in scope: the idle deadline (see above); streaming output; a benchmark summa
 - `uv run pytest tests-e2e -k "fake or example or tester"` — the key-less e2e set.
 - The live set on every provider with a working key, dispatched on the branch on CI.
 - On `Done`: [specs/agent.md](../specs/agent.md) and [specs/instrumentation.md](../specs/instrumentation.md) back to `Implemented`.
+
+## Result
+
+All of the above clean: ruff, pyright (0 errors), the fast tier (598 passed), the key-less e2e set (14 passed), and CI on the pull request on every platform. The live set, dispatched on the branch (CI run 43909159062), passed on Anthropic, OpenAI, Mistral and the Hugging Face Hub. Gemini was not verified: its key was over its monthly spending cap, so its job could not complete; the stop-reason value it reports (`MAX_TOKENS`) is covered by a unit test only. On an earlier commit of the branch Mistral failed its `long_answer` step once (a long `say` outlasting the 30 s wait, no output cap involved) and passed on the rerun.
+
+Through a real `Wica`, a `say` cut by a 60-token cap was retried and spoken whole on OpenAI, Mistral and Anthropic (3 of 3 each with the final feedback); the Hub's reasoning model spends such a cap before any call and ends `rejected`.
