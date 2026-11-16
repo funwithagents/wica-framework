@@ -16,7 +16,7 @@ tests:
 
 # Instrumentation
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -92,14 +92,17 @@ class ReactionTrace:
     window_closed_at: datetime                # = reaction start
     prompt_ready_at: datetime | None          # None when cancelled before rendering completed
     model_started_at: datetime | None         # None when cancelled before the model call started
-    model_ended_at: datetime | None           # None when cancelled before the response
-    outcome: Literal["ok", "empty", "model_error", "model_timeout", "cancelled"]
+    model_ended_at: datetime | None           # None when cancelled before the response; the LAST attempt's end
+    outcome: Literal["ok", "empty", "model_error", "model_timeout", "rejected", "cancelled"]
     error: str | None
     text_length: int
     sink_duration: float | None               # seconds; None when no text
     command_call_ids: tuple[str, ...]         # dispatched Commands, in response order (noop excluded)
     noop: bool
-    usage: TokenUsage | None                  # from AIMessage.usage_metadata; None when absent
+    usage: TokenUsage | None                  # from AIMessage.usage_metadata, summed over attempts; None when absent
+    attempts: int                             # model calls made: 1, or more after rejected responses
+    rejections: tuple[str, ...]               # the combined guard feedback of each rejected attempt, in order
+    guard_duration: float | None              # seconds spent in response guards over all attempts; None when none ran
     ended_at: datetime
     trace_id: str | None                      # OpenTelemetry ids when an SDK is installed, else None
     span_id: str | None
@@ -116,11 +119,14 @@ class CommandTrace:
 
 Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `busy_time`, `duration` on `CommandTrace`) are read-only properties over the stamps, so a record stays raw and a consumer never recomputes a subtraction differently.
 
+**A reaction with retries.** When the response guards reject a response and the Agent calls the model again ([agent.md](agent.md), "Response guards"), the reaction stays **one** record: `model_started_at` is the first attempt's start and `model_ended_at` the last attempt's end, so `model_latency` covers the whole model phase — every attempt and the guards between them, which is what the user waits for; `guard_duration` separates the guards' share. `attempts` and `rejections` say what happened, `usage` adds up what it cost (`cache_read_tokens` summed when every attempt reported it, else `None`). A reaction that ran out of retries ends `rejected`, with `error` holding the last rejection's feedback.
+
 The Agent gains three `Event`s, surfaced on the facade like the existing ones ([wica.md](wica.md), "`Event`s are surfaced, not adapted"):
 
 | Event | Type | Emitted |
 |---|---|---|
-| `on_reaction_ended` / `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | **once at the end of every reaction that started**, whatever its outcome — a normal one, an empty response, a model error, a model call past its deadline (`model_timeout`, see [agent.md](agent.md), "Model-call deadline"), a cancellation by `stop()`. Emitted from `_run_batch`'s `finally`, after `_busy` is cleared, so a subscriber sees "the Agent is free again" and the record at the same moment |
+| `on_reaction_ended` / `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | **once at the end of every reaction that started**, whatever its outcome — a normal one, an empty response, a model error, a model call past its deadline (`model_timeout`, see [agent.md](agent.md), "Model-call deadline"), a response the guards still rejected after the last retry (`rejected`, see [agent.md](agent.md), "Response guards"), a cancellation by `stop()`. Emitted from `_run_batch`'s `finally`, after `_busy` is cleared, so a subscriber sees "the Agent is free again" and the record at the same moment |
+| `on_response_rejected` / `wica.on_agent_response_rejected` | `Event[ResponseRejection]` | once per response attempt the response guards reject, with the attempt number, the response, the combined feedback and whether a retry follows — see [agent.md](agent.md), "Response guards". Each reaction's prompt still arrives once, on `on_prompt` |
 | `on_trigger_dropped` / `wica.on_agent_trigger_dropped` | `Event[WorldEntry]` | once per trigger dropped because a reaction was in flight — the counterpart of `on_trigger`, which only fires for triggers a reaction observed. Replaces inference (pairing raw against observed triggers with a timeout) with a signal |
 | `on_command_ended` / `wica.on_agent_command_ended` | `Event[CommandTrace]` | once per dispatched Command when its terminal state is written, with the reaction that issued it. This is the generic "any Command finished" signal that [agent.md](agent.md) open question #5 asks for, without a broadcast World entry: a consumer no longer needs a per-`call_id` listener just to learn when and how a Command ended |
 
@@ -137,8 +143,9 @@ The spans, all under the tracer named `wica`:
 | Span | Parent | Attributes |
 |---|---|---|
 | `wica.world.update` | the **caller's** current context — a speech recognizer writing from inside its own span makes that span the ancestor of the whole reaction | `wica.key`, `wica.version_id`. Opened only for an update that **triggers** (qualifies to wake the Agent), so a 30 fps non-triggering sensor entry costs no span; every update still propagates context (below) |
-| `wica.agent.reaction` | the context captured with the reaction's **parent trigger** (rule below); the other coalesced triggers are span **links** | `wica.reaction_id`, `wica.trigger_count`, `wica.outcome`, `wica.text_length`, `wica.command_count`, `wica.noop` |
+| `wica.agent.reaction` | the context captured with the reaction's **parent trigger** (rule below); the other coalesced triggers are span **links** | `wica.reaction_id`, `wica.trigger_count`, `wica.outcome`, `wica.text_length`, `wica.command_count`, `wica.noop`, `wica.attempts` |
 | `wica.agent.model` | the reaction | GenAI semantic conventions: `gen_ai.operation.name = chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| `wica.agent.guards` | the reaction; one per attempt | `wica.attempt`, `wica.rejected` |
 | `wica.agent.sink` | the reaction | — (its duration is the point) |
 | `wica.agent.command` | the reaction; **current inside the Command's task** from dispatch to terminal write | `wica.command.name`, `wica.call_id`, `wica.command.state` |
 
@@ -165,7 +172,8 @@ There is no enable/disable API. The cost per reaction is a handful of `datetime.
 | `coalescing_wait` | `window_opened_at` → `window_closed_at` |
 | `hop` | per trigger, `written_at` → `arrived_at` (the cross-thread hop; a sanity number) |
 | `render_time` | `window_closed_at` → `prompt_ready_at` |
-| `model_latency` | `model_started_at` → `model_ended_at` |
+| `model_latency` | `model_started_at` → `model_ended_at` (every attempt and the guards between them) |
+| `guard_time` | `guard_duration` |
 | `sink_time` | `sink_duration` |
 | `busy_time` | `window_closed_at` → `ended_at` — the interval during which a new input is dropped |
 | `command_duration` | `CommandTrace.started_at` → `ended_at` |
