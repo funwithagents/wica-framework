@@ -14,7 +14,7 @@
 }
 ```
 
-On this page: [The loaders](#the-loaders) · [The `agent` block](#the-agent-block) · [API key](#api-key) · [System prompt](#system-prompt) · [History bounds](#history-bounds) · [Providers](#providers) · [What is not configuration](#what-is-not-configuration).
+On this page: [The loaders](#the-loaders) · [The `agent` block](#the-agent-block) · [API key](#api-key) · [System prompt](#system-prompt) · [History bounds](#history-bounds) · [Providers](#providers) · [Local and self-hosted models](#local-and-self-hosted-models) · [What is not configuration](#what-is-not-configuration).
 
 ## The loaders
 
@@ -51,10 +51,11 @@ config = WicaConfig.from_json_file("agent.config.json")
 | Field | Required | Notes |
 |---|---|---|
 | `agent.provider` | yes | One of the [providers](#providers) below, or any other value LangChain's `init_chat_model` accepts as a provider |
-| `agent.model` | yes | The model id, or the Hub `repo_id` for `huggingface-hub`; a free label for `fake` |
+| `agent.model` | yes | The model id, or the Hub `repo_id` for `huggingface-hub`; for `openai-chat-completions-compatible`, the name the server expects (any label for `llama-server`, the repo id for `mlx_lm.server`); a free label for `fake` |
+| `agent.base_url` | with `openai-chat-completions-compatible` only | The server's address, `/v1` included: `http://127.0.0.1:8080/v1`. Required with that provider and rejected with any other, so a typo'd provider cannot send your requests to a vendor instead. See [Local and self-hosted models](#local-and-self-hosted-models) |
 | `agent.system_prompt` / `agent.system_prompt_file` | exactly one | The persona, inline or in a file; see [System prompt](#system-prompt) |
 | `agent.api_key` / `agent.api_key_env` | at most one | A literal key, or the name of the environment variable to read at Agent build; neither uses the provider's own default variable. See [API key](#api-key) |
-| `agent.model_kwargs` | no | Forwarded to the provider's model constructor as given: `temperature`, Gemini's `thinking_level`, the `fake` provider's `script`. Default empty |
+| `agent.model_kwargs` | no | Forwarded to the provider's model constructor as given: `temperature`, Gemini's `thinking_level`, an output cap (`max_tokens`), the `fake` provider's `script`. Default empty |
 | `agent.hf_provider` | no | `huggingface-hub` only: the Hub backend that serves the model (`auto`, `fireworks-ai`, …). Default `auto` |
 | `agent.history_reactions` | no | A positive integer: keep the last N reactions in the prompt. Default unbounded. See [History bounds](#history-bounds) |
 | `agent.history_budget` | no | A number in `(0, 1]`: keep the prompt under this fraction of the model's context window. Default off. See [History bounds](#history-bounds) |
@@ -66,7 +67,7 @@ Runtime values that are callables or runtime objects are not configuration and s
 
 ## API key
 
-Give a literal `api_key`, or an `api_key_env` naming the environment variable to read, at most one. With neither, the provider's own package reads its standard variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY` then `GEMINI_API_KEY`, `MISTRAL_API_KEY`, the Hub token). Prefer `api_key_env`: the config then carries no secret and can be committed, which is what the repo's own configs do (`WICA_<PROVIDER>_API_KEY`). A config with a literal key belongs in a git-ignored file. The variable is read by `Wica.init`, which raises `MissingEnvError` when it is unset; the `fake` provider ignores both fields.
+Give a literal `api_key`, or an `api_key_env` naming the environment variable to read, at most one. With neither, the provider's own package reads its standard variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY` then `GEMINI_API_KEY`, `MISTRAL_API_KEY`, the Hub token); `openai-chat-completions-compatible` reads none and sends a placeholder, so a key meant for OpenAI never reaches another server. Prefer `api_key_env`: the config then carries no secret and can be committed, which is what the repo's own configs do (`WICA_<PROVIDER>_API_KEY`). A config with a literal key belongs in a git-ignored file. The variable is read by `Wica.init`, which raises `MissingEnvError` when it is unset; the `fake` provider ignores both fields.
 
 ## System prompt
 
@@ -89,12 +90,42 @@ Core `wica` bundles no provider; install the extra for the one you use. Selectin
 |---|---|---|---|
 | `anthropic` | `wica[anthropic]` | `langchain-anthropic` | |
 | `openai` | `wica[openai]` | `langchain-openai` | |
-| `google_genai` | `wica[google-genai]` | `langchain-google-genai` | Gemini through the Gemini Developer API (an AI Studio key, not Vertex). Gemini thinks by default, which adds latency to every reaction: set `model_kwargs: {"thinking_level": "low"}` on Gemini 3+ (`{"thinking_budget": 0}` on 2.5) for reactive use |
-| `mistralai` | `wica[mistralai]` | `langchain-mistralai` | Mistral through La Plateforme. On a workspace without a paid tier the Small/Medium families answer every call with a 429; the Ministral family (the committed `ministral-3b-latest`) is served with full quota |
+| `gemini` | `wica[gemini]` | `langchain-google-genai` | Gemini through the Gemini Developer API (an AI Studio key, not Vertex). Gemini thinks by default, which adds latency to every reaction: set `model_kwargs: {"thinking_level": "low"}` on Gemini 3+ (`{"thinking_budget": 0}` on 2.5) for reactive use |
+| `mistral` | `wica[mistral]` | `langchain-mistralai` | Mistral through La Plateforme. On a workspace without a paid tier the Small/Medium families answer every call with a 429; the Ministral family (the committed `ministral-3b-latest`) is served with full quota |
 | `huggingface-hub` | `wica[huggingface-hub]` | `langchain-huggingface` | The Hub's serverless Inference Providers; `model` is the `repo_id`, `hf_provider` the backend. No model profile, so `history_budget` needs `context_window`. No output-token cap is sent unless `model_kwargs` sets `max_new_tokens` |
+| `openai-chat-completions-compatible` | `wica[openai-compatible]` | `langchain-openai` | Any server implementing OpenAI's Chat Completions API: a local or self-hosted model (`llama-server`, `mlx_lm.server`, Ollama, LM Studio, vLLM). Needs `base_url`; the key is optional. See [below](#local-and-self-hosted-models) |
 | `fake` | none | built in | A deterministic scripted model for tests and demos: no key, no network. `model_kwargs` carries `script`, `default`, `loop`, `delay_s` ([guides/testing.md](../guides/testing.md)) |
 
-Switching provider is a config edit. The four hosted providers above are plain `init_chat_model` pass-throughs, so another LangChain-supported provider value works the same way once its package is installed; `huggingface-hub` is built on WICA's own path ([specs/config.md](../../specs/config.md), "Providers").
+Switching provider is a config edit. The four hosted providers above are plain `init_chat_model` pass-throughs (`gemini` and `mistral` under LangChain's ids `google_genai` and `mistralai`), so another LangChain-supported provider value works the same way once its package is installed; `huggingface-hub` and `openai-chat-completions-compatible` are built on WICA's own path ([specs/config.md](../../specs/config.md), "Providers").
+
+**Old names.** `google_genai` and `mistralai` still load, as `gemini` and `mistral`, and log a deprecation warning on the `wica.config` logger; rename them in your config. Their extras are gone: install `wica[gemini]` or `wica[mistral]`.
+
+### Local and self-hosted models
+
+WICA runs no model itself. Any server that implements OpenAI's Chat Completions API serves one: start the server, then point `openai-chat-completions-compatible` at it.
+
+```json
+{
+  "agent": {
+    "provider": "openai-chat-completions-compatible",
+    "model": "local",
+    "base_url": "http://127.0.0.1:8080/v1",
+    "system_prompt": "You are a friendly social robot.",
+    "context_window": 8192,
+    "model_timeout": 30,
+    "model_kwargs": { "max_tokens": 512 }
+  }
+}
+```
+
+- **`base_url`** includes the `/v1` path. The server must be running before the first reaction; a wrong port ends every reaction `model_error`.
+- **No key is needed** for a server that checks none; give `api_key`/`api_key_env` for one that does.
+- **`context_window`** is needed with `history_budget`: a local model has no LangChain profile. Set it to the server's own context size (`-c` on `llama-server`).
+- **`model_timeout`**: the default 10 s is tight for a first request that loads the model, or for a long prompt on a small machine.
+- **`force_tool_call`** sends `tool_choice: "required"`, which servers honour, ignore or reject differently; set it `false` for a server that rejects it.
+- **An output cap** (`model_kwargs.max_tokens`) bounds a model that writes text without end.
+
+Which servers were tried, which model sizes work and how cancellation behaves: [guides/local-models.md](../guides/local-models.md). `provider: "openai"` stays OpenAI's own API; a `base_url` in its `model_kwargs` still reaches a proxy in front of OpenAI.
 
 ## What is not configuration
 

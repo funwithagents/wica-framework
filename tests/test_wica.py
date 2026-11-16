@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import threading
 import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import httpx
 import pytest
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from wica import Command, CommandIssued, Wica
-from wica.config import AgentConfig, WicaConfig
+from wica.config import AgentConfig, ConfigError, WicaConfig
 from wica.content import Content, TextPart
 from wica.instrumentation import CommandTrace, ReactionTrace
 from wica.world import WorldEntry
@@ -607,3 +609,122 @@ def test_model_timeout_from_config_bounds_the_model_call(wica_factory):
     assert done.wait(timeout=WAIT_TIMEOUT)
     assert traces[0].outcome == "model_timeout"
     assert sink.texts == []
+
+
+# --- openai-chat-completions-compatible: a local server, played by an httpx MockTransport --------
+
+
+class ChatCompletionsServer:
+    """An in-process stand-in for a server implementing OpenAI's Chat Completions API: records each
+    request and answers with one assistant text and a usage block. No socket is opened."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "cmpl-1",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "local",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": self.text},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 4,
+                    "total_tokens": 124,
+                    "prompt_tokens_details": {"cached_tokens": 100},
+                },
+            },
+        )
+
+
+def compatible_config(server: ChatCompletionsServer, **agent: Any) -> WicaConfig:
+    return WicaConfig(
+        agent=AgentConfig(
+            provider="openai-chat-completions-compatible",
+            model="qwen2.5-7b-instruct",
+            base_url="http://127.0.0.1:8080/v1",
+            system_prompt="You are terse.",
+            model_kwargs={
+                "http_async_client": httpx.AsyncClient(
+                    transport=httpx.MockTransport(server.handler)
+                )
+            },
+            **agent,
+        )
+    )
+
+
+def run_one_reaction(wica: Wica) -> ReactionTrace:
+    traces: list[ReactionTrace] = []
+    done = threading.Event()
+
+    def on_reaction(trace: ReactionTrace) -> None:
+        traces.append(trace)
+        done.set()
+
+    wica.on_agent_reaction_ended.subscribe(on_reaction)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+    wica.world.update("speech", "Hello robot!")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    return traces[0]
+
+
+def test_a_compatible_server_is_reached_at_its_base_url_with_a_placeholder_key(
+    wica_factory, monkeypatch: pytest.MonkeyPatch
+):
+    """The provider talks to the configured server, reports its usage, and with no key configured
+    sends a placeholder — never the OPENAI_API_KEY meant for OpenAI. See specs/config.md
+    ("Providers")."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-meant-for-openai")
+    server = ChatCompletionsServer("Hello there!")
+    sink = RecordingSink()
+    wica = wica_factory(compatible_config(server), output_sink=sink, coalesce_window=0)
+
+    trace = run_one_reaction(wica)
+
+    assert sink.texts == ["Hello there!"]
+    assert trace.outcome == "ok"
+    assert trace.usage is not None
+    assert (trace.usage.input_tokens, trace.usage.output_tokens) == (120, 4)
+    assert trace.usage.cache_read_tokens == 100
+    request = server.requests[0]
+    assert str(request.url) == "http://127.0.0.1:8080/v1/chat/completions"
+    body = json.loads(request.content)
+    assert body["model"] == "qwen2.5-7b-instruct"
+    assert body["messages"][-1]["role"] == "user"
+    authorization = request.headers["authorization"]
+    assert "sk-meant-for-openai" not in authorization
+    assert authorization.startswith("Bearer ") and authorization != "Bearer "
+
+
+def test_a_compatible_server_gets_the_configured_key(wica_factory):
+    server = ChatCompletionsServer("Hi.")
+    wica = wica_factory(
+        compatible_config(server, api_key="local-secret"), coalesce_window=0
+    )
+
+    run_one_reaction(wica)
+
+    assert server.requests[0].headers["authorization"] == "Bearer local-secret"
+
+
+def test_a_history_budget_on_a_compatible_server_needs_the_server_context_size():
+    """A local model has no LangChain profile: the error names context_window and the server's own
+    context size — see specs/agent.md ("Provider-agnostic model, from config")."""
+    server = ChatCompletionsServer("unused")
+    with pytest.raises(ConfigError, match="context_window.*server's own context size"):
+        Wica.init(compatible_config(server, history_budget=0.5)).close()

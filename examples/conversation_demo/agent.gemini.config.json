@@ -1,6 +1,6 @@
 {
   "agent": {
-    "provider": "google_genai",
+    "provider": "gemini",
     "model": "gemini-3.8-flash",
     "context_window": 1048576,
     "api_key_env": "WICA_GEMINI_API_KEY",

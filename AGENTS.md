@@ -12,7 +12,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 |---|---|
 | `README.md` | The landing page: what WICA is, its status, install, the quick start (executed by `tests/test_docs.py` with a scripted model standing in for the provider it names), the demo, the links into `docs/`, how it is developed |
 | `CONTRIBUTING.md` | How the project is run: one maintainer, no external pull requests for now, feedback through issues |
-| `docs/` | The consumer documentation, entered through [docs/index.md](docs/index.md) (by task): [getting-started.md](docs/getting-started.md); `reference/` — the API ([api.md](docs/reference/api.md): imports, the `Wica` surface, the World API, `Command`, the eight Events, errors, contracts) and the configuration ([configuration.md](docs/reference/configuration.md): every field, the loaders, the providers); `guides/` — one page per task (the World and its Inputs, Commands, the Gradio panels, testing, latency and traces, benchmarking, limits, troubleshooting). One home per fact: a reference page owns it, every other page links there; the specs stay the normative design, and this file the operating manual ([specs/project.md](specs/project.md) "Repo shape") |
+| `docs/` | The consumer documentation, entered through [docs/index.md](docs/index.md) (by task): [getting-started.md](docs/getting-started.md); `reference/` — the API ([api.md](docs/reference/api.md): imports, the `Wica` surface, the World API, `Command`, the eight Events, errors, contracts) and the configuration ([configuration.md](docs/reference/configuration.md): every field, the loaders, the providers); `guides/` — one page per task (the World and its Inputs, Commands, the Gradio panels, testing, latency and traces, benchmarking, local and self-hosted models, limits, troubleshooting). One home per fact: a reference page owns it, every other page links there; the specs stay the normative design, and this file the operating manual ([specs/project.md](specs/project.md) "Repo shape") |
 | `src/wica/` | The library itself — one module per core concept (see below) |
 | `specs/` | Pre-implementation design docs, one per concept, each with a `**Status:**` — indexed by [specs/_index.md](specs/_index.md) |
 | `plans/` | Implementation plans turning settled specs into buildable steps — indexed by [plans/_index.md](plans/_index.md) |
@@ -29,7 +29,7 @@ Where things live. This is a coarse, module-level map — for the full file inve
 | [content.py](src/wica/content.py) | Provider-agnostic multimodal content model (`TextPart`/`ImagePart`/`Content`), shared everywhere | [content.md](specs/content.md) |
 | [events.py](src/wica/events.py) | Generic, project-agnostic `Event[T]` pub/sub primitive (subscribe/unsubscribe/emit); a standalone leaf with zero project imports, re-exported as public API | [events.md](specs/events.md) |
 | [world.py](src/wica/world.py) | The World state registry: typed entries, register/update/get API, `start`/`stop`/`is_running` lifecycle, sync/async listener + `on_trigger` Event dispatch on the shared loop, rendering to `Content` (constructed per `Wica`, no singleton) | [world.md](specs/world.md), [inputs.md](specs/inputs.md) |
-| [config.py](src/wica/config.py) | Framework config: `AgentConfig`/`WicaConfig` dataclasses, strict JSON loading (`from_dict`/`from_json`), `system_prompt_file`, `api_key`/`api_key_env` resolution | [config.md](specs/config.md) |
+| [config.py](src/wica/config.py) | Framework config: `AgentConfig`/`WicaConfig` dataclasses, strict JSON loading (`from_dict`/`from_json`), `system_prompt_file`, `api_key`/`api_key_env` resolution, the provider rename table and the `base_url` rule | [config.md](specs/config.md) |
 | [command.py](src/wica/command.py) | The `Command` definition object — wraps a `Callable` or an off-the-shelf `BaseTool` and holds the backing tool internally, keeping LangChain off the command-definition surface | [commands.md](specs/commands.md) |
 | [agent.py](src/wica/agent.py) | The Agent reasoning loop and Commands: built from `AgentConfig` on the injected loop, LangChain-backed inference over the World, snapshot history with optional hysteretic cuts (`history_reactions` by count, `history_budget` by reported token usage against the model's context window), async cancellable Commands, output sink + optional output Command, auto-registered `cancel_command`/`noop`, system-prompt runtime primer, `on_trigger`/`on_prompt`/`on_command`/`on_text` Events | [agent.md](specs/agent.md), [commands.md](specs/commands.md) |
 | [wica.py](src/wica/wica.py) | The `Wica` facade — single entry point owning the shared loop + a `World`+`Agent` pair, restartable `init`/`start`/`stop` lifecycle plus terminal `close`, `register_command`, `set_output_sink`/`set_output_command` (output wiring after `init`), and the surfaced instrumentation `Event`s | [wica.md](specs/wica.md) |
@@ -91,8 +91,8 @@ Some tests call a real LLM provider over the network. They live in `tests-e2e/`,
 | `tests-e2e/e2e.anthropic.config.json` | `WICA_ANTHROPIC_API_KEY` |
 | `tests-e2e/e2e.openai.config.json` | `WICA_OPENAI_API_KEY` |
 | `tests-e2e/e2e.huggingface-hub.config.json` | `WICA_HF_TOKEN` |
-| `tests-e2e/e2e.google-genai.config.json` | `WICA_GEMINI_API_KEY` |
-| `tests-e2e/e2e.mistralai.config.json` | `WICA_MISTRAL_API_KEY` |
+| `tests-e2e/e2e.gemini.config.json` | `WICA_GEMINI_API_KEY` |
+| `tests-e2e/e2e.mistral.config.json` | `WICA_MISTRAL_API_KEY` |
 
 **The keys live in `~/.zshrc`**, but the shell tool runs non-interactive `bash`/`zsh`, which doesn't source it — a plain `uv run pytest tests-e2e` in that shell sees no keys and every case skips. Source it explicitly in an interactive `zsh` invocation. Run **all providers** (each whose key is set runs; the rest skip):
 
@@ -106,7 +106,7 @@ Run **one provider** by filtering on its config-filename stem with `-k` (the con
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k openai'
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k huggingface'
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k anthropic'
-zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k google'
+zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k gemini'
 zsh -ic 'source ~/.zshrc >/dev/null 2>&1; uv run pytest tests-e2e -k mistral'
 ```
 

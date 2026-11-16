@@ -1,6 +1,6 @@
 # Provider names and the `openai-chat-completions-compatible` provider
 
-**Status:** Todo
+**Status:** Done
 
 Implements "Provider names" and the `openai-chat-completions-compatible` paragraph of [specs/config.md](../specs/config.md) ("Providers"), the construction branch and LangChain-id mapping of [specs/agent.md](../specs/agent.md) ("Provider-agnostic model, from config"), and the renames they carry into [specs/project.md](../specs/project.md), [specs/testing.md](../specs/testing.md) and [specs/conversation-demo.md](../specs/conversation-demo.md).
 

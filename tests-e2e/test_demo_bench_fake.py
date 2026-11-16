@@ -27,9 +27,9 @@ def test_the_committed_matrix_has_one_default_per_provider_and_the_fake_fixture(
     defaults = [e for e in matrix.entries if "default" in e.tags]
     assert sorted(e.agent["provider"] for e in defaults) == [
         "anthropic",
-        "google_genai",
+        "gemini",
         "huggingface-hub",
-        "mistralai",
+        "mistral",
         "openai",
     ]
     assert all(e.enabled and e.agent.get("api_key_env") for e in defaults)
