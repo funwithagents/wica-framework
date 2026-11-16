@@ -151,6 +151,58 @@ def test_facade_surfaces_the_instrumentation_events(wica_factory):
     assert wica.on_agent_reaction_ended is wica.agent.on_reaction_ended
     assert wica.on_agent_trigger_dropped is wica.agent.on_trigger_dropped
     assert wica.on_agent_command_ended is wica.agent.on_command_ended
+    assert wica.on_agent_response_rejected is wica.agent.on_response_rejected
+
+
+def test_a_free_text_reply_while_unforced_is_retried_into_the_output_command(
+    wica_factory,
+):
+    """With an output Command bound but the call unforced, a plain-text answer reaches no one: the
+    default output_command_required guard sends it back, and the retry speaks — through the config
+    path end to end. See specs/agent.md ("Response guards")."""
+    config = fake_config(
+        [
+            {"text": "Hello!"},
+            {"tool_calls": [{"name": "say", "args": {"text": "Hello!"}}]},
+            {"tool_calls": [{"name": "noop", "args": {}}]},
+        ]
+    )
+    wica = wica_factory(
+        dataclasses.replace(
+            config, agent=dataclasses.replace(config.agent, force_tool_call=False)
+        ),
+        coalesce_window=0,
+    )
+    spoken: list[str] = []
+    spoken_event = threading.Event()
+
+    async def say(text: str) -> str:
+        """Say something to the user."""
+        spoken.append(text)
+        spoken_event.set()
+        return "spoken"
+
+    wica.set_output_command(say)
+    rejected: list[Any] = []
+    wica.on_agent_response_rejected.subscribe(rejected.append)
+    wica.world.register(
+        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    wica.start()
+
+    wica.world.update("speech", "hi")
+    assert spoken_event.wait(timeout=WAIT_TIMEOUT)
+
+    assert spoken == ["Hello!"]
+    assert len(rejected) == 1 and rejected[0].response.text == "Hello!"
+
+
+def test_response_guards_are_delegated_to_the_agent(wica_factory):
+    wica = wica_factory(fake_config())
+    wica.remove_response_guard("output_command_required")
+    wica.add_response_guard(lambda response: None, name="mine")
+    assert list(wica.response_guards) == list(wica.agent.response_guards)
+    assert list(wica.response_guards) == ["unknown_command", "invalid_args", "mine"]
 
 
 def test_fake_flow_yields_reaction_and_command_traces(wica_factory):

@@ -553,6 +553,28 @@ def test_model_timeout_rejects_non_positive_numbers(value: Any):
         AgentConfig(provider="fake", model="x", system_prompt="p", model_timeout=value)
 
 
+# --- max_retries field --------------------------------------------------------------------
+
+
+def test_max_retries_defaults_to_one():
+    assert AgentConfig.from_dict(_agent_dict()).max_retries == 1
+    assert AgentConfig(provider="fake", model="x", system_prompt="p").max_retries == 1
+
+
+def test_max_retries_parsed_and_zero_accepted():
+    cfg = WicaConfig.from_json(json.dumps(_wica_dict(max_retries=3))).agent
+    assert cfg.max_retries == 3
+    assert AgentConfig.from_dict(_agent_dict(max_retries=0)).max_retries == 0
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "1", None])
+def test_max_retries_rejects_anything_but_a_non_negative_integer(value: Any):
+    with pytest.raises(ConfigError, match="max_retries"):
+        AgentConfig.from_dict(_agent_dict(max_retries=value))
+    with pytest.raises(ConfigError, match="max_retries"):
+        AgentConfig(provider="fake", model="x", system_prompt="p", max_retries=value)
+
+
 # --- force_tool_call field ---------------------------------------------------------------
 
 

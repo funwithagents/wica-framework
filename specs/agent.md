@@ -1,8 +1,10 @@
 ---
 code:
   - src/wica/agent.py
+  - src/wica/guards.py
 tests:
   - tests/test_agent.py
+  - tests/test_guards.py
 ---
 
 # Agent

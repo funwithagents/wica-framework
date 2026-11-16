@@ -27,11 +27,12 @@ wica.on_agent_reaction_ended.subscribe(on_reaction)
 |---|---|
 | `triggers` | The `TriggerTrace`s that joined the window: `key`, `version_id`, `written_at` (the `update()` call), `arrived_at` (the loop), `is_command_completion` |
 | `window_opened_at`, `window_closed_at`, `prompt_ready_at`, `model_started_at`, `model_ended_at`, `ended_at` | The phase stamps, wall clock |
-| `outcome` | `ok`, `empty` (no text and no Command), `model_error`, `model_timeout` (the call passed `model_timeout`), `cancelled`; `error` carries the text |
+| `outcome` | `ok`, `empty` (no text and no Command), `model_error`, `model_timeout` (the call passed `model_timeout`), `rejected` (the [response guards](../reference/api.md#response-guards) still rejected the response after the last retry), `cancelled`; `error` carries the text |
+| `attempts`, `rejections`, `guard_duration` | Model calls made (more than one after a rejected response), each rejection's feedback, the seconds spent in the guards |
 | `text_length`, `sink_duration`, `command_call_ids`, `noop` | What the step produced |
-| `usage` | `TokenUsage(input_tokens, output_tokens, cache_read_tokens)` as the provider reported it |
+| `usage` | `TokenUsage(input_tokens, output_tokens, cache_read_tokens)` as the provider reported it, summed over the attempts |
 | `reaction_latency(trace)` | Earliest external trigger's `written_at` → `ended_at`: how long the person waited for the agent to act. `None` when the reaction only followed a Command completion |
-| `trace.model_latency` | `model_started_at` → `model_ended_at`: the model's share |
+| `trace.model_latency` | `model_started_at` → `model_ended_at`: the model's share, every attempt and the guards between them included |
 | `trace.coalescing_wait`, `trace.render_time` | The window, the rendering |
 | `trace.busy_time` | `window_closed_at` → `ended_at`: the interval during which a new input is dropped |
 | `reactions_per_input(reactions)` | How many reactions each external input cost (the completion chain) |

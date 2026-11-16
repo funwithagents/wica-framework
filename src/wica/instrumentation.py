@@ -50,7 +50,9 @@ class TokenUsage:
     cache_read_tokens: int | None
 
 
-ReactionOutcome = Literal["ok", "empty", "model_error", "model_timeout", "cancelled"]
+ReactionOutcome = Literal[
+    "ok", "empty", "model_error", "model_timeout", "rejected", "cancelled"
+]
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,14 @@ class ReactionTrace:
     ended_at: datetime
     trace_id: str | None
     span_id: str | None
+    # The response guards' share (see specs/agent.md, "Response guards"): model calls made (1, or
+    # more after rejected responses), the combined feedback of each rejected attempt, and the
+    # seconds spent in the guards over all attempts (None when none ran). With retries,
+    # model_started_at is the first attempt's start and model_ended_at the last attempt's end, and
+    # usage is summed over attempts. Defaulted so a record built by hand stays valid.
+    attempts: int = 1
+    rejections: tuple[str, ...] = ()
+    guard_duration: float | None = None
 
     @property
     def coalescing_wait(self) -> float:

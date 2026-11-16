@@ -1,6 +1,6 @@
 # Response guards
 
-**Status:** Todo
+**Status:** In progress
 
 Implements [specs/agent.md](../specs/agent.md) ("Response guards"), the `max_retries` field of [specs/config.md](../specs/config.md), the retry fields, `rejected` outcome, `on_response_rejected` Event and `wica.agent.guards` span of [specs/instrumentation.md](../specs/instrumentation.md), and the facade members of [specs/wica.md](../specs/wica.md).
 

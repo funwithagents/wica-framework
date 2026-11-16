@@ -332,7 +332,9 @@ the package layout — [testing.md](testing.md)). They import the contrib (hence
   than raising.
 - **`render_reaction_trace`** over a hand-built `ReactionTrace`: every derived measure shown only
   when its stamp is present (a cancelled reaction with no `model_latency`), token usage, dispatched
-  command ids, `noop`, `error` on a `model_error` or `model_timeout` outcome, and the `trace_id` line.
+  command ids, `noop`, the attempts and each rejection's feedback (plus the guard time) when the
+  response guards sent a response back ([agent.md](agent.md), "Response guards"), `error` on a
+  `model_error`, `model_timeout` or `rejected` outcome, and the `trace_id` line.
 - **`render_messages`** over AI/Human/Tool messages: role headers, block flattening without extra
   newlines, image markers, explicit tool calls and tool results.
 - **`world_rows`/`world_html`** over a real `World`: register ordinary entries and one whose

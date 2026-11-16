@@ -138,6 +138,7 @@ def metric_samples(
         add("model_latency", reaction.model_latency)
         add("coalescing_wait", reaction.coalescing_wait)
         add("busy_time", reaction.busy_time)
+        add("guard_time", reaction.guard_duration)
         if reaction.usage is not None:
             add("input_tokens", reaction.usage.input_tokens)
             add("output_tokens", reaction.usage.output_tokens)

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextvars
 import copy
+import inspect
 import math
 import logging
 import uuid
@@ -39,6 +40,18 @@ from wica.config import (
 )
 from wica.content import Content, ImagePart, TextPart
 from wica.events import Event
+from wica.guards import (
+    DEFAULT_GUARDS,
+    REJECTED_TOOL_RESULT,
+    REMINDER_FRAME,
+    SHOW_FRAME,
+    ModelResponse,
+    ProposedCommand,
+    ResponseGuard,
+    ResponseRejection,
+    Retry,
+    combine,
+)
 from wica.instrumentation import (
     CommandTrace,
     ReactionOutcome,
@@ -245,7 +258,15 @@ class _ReactionBuilder:
     sink_duration: float | None = None
     command_call_ids: list[str] = field(default_factory=list)
     noop: bool = False
-    usage: TokenUsage | None = None
+    usage: TokenUsage | None = None  # summed over attempts
+    # Response guards (see specs/agent.md, "Response guards"): model calls made so far, the
+    # combined feedback of each rejected attempt, the seconds spent in guards, and the first
+    # attempt's reported input tokens — the history budget's signal, since a retry's prompt is
+    # larger than the history by its correction.
+    attempts: int = 0
+    rejections: list[str] = field(default_factory=list)
+    guard_duration: float | None = None
+    first_input_tokens: int | None = None
 
 
 def _span_ids(span: otel_trace.Span) -> tuple[str | None, str | None]:
@@ -294,6 +315,70 @@ def mark_cache_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
     blocks[-1] = {**last, "cache_control": dict(_CACHE_BREAKPOINT)}
     marked = target.model_copy(update={"content": blocks})
     return [*messages[: newest - 1], marked, *messages[newest:]]
+
+
+def _add_usage(total: TokenUsage | None, usage: TokenUsage | None) -> TokenUsage | None:
+    """A reaction's usage over its attempts: summed; cache reads summed only when both report
+    them."""
+    if usage is None:
+        return total
+    if total is None:
+        return usage
+    cache_read = (
+        None
+        if total.cache_read_tokens is None or usage.cache_read_tokens is None
+        else total.cache_read_tokens + usage.cache_read_tokens
+    )
+    return TokenUsage(
+        input_tokens=total.input_tokens + usage.input_tokens,
+        output_tokens=total.output_tokens + usage.output_tokens,
+        cache_read_tokens=cache_read,
+    )
+
+
+def _retry_messages(
+    messages: list[BaseMessage], response: AIMessage, feedback: str, *, show: bool
+) -> list[BaseMessage]:
+    """The prompt of a retry: the step's own messages plus the latest rejection's correction — never
+    stored in history. Shown: the rejected response as returned, one fixed tool_result per tool call
+    it holds (a tool_use must not be left without its result), then the feedback as a user message.
+    A reminder: the feedback appended as a text block to the newest observation's user message (two
+    user turns in a row are what the renderer merges for providers that reject them). The messages
+    before the newest observation are untouched, so a cache breakpoint there still reads. See
+    specs/agent.md ("Response guards")."""
+    if show:
+        calls = [
+            {**call, "id": call["id"] or uuid.uuid4().hex}
+            for call in response.tool_calls
+        ]
+        shown = (
+            response
+            if all(call["id"] for call in response.tool_calls)
+            else response.model_copy(update={"tool_calls": calls})
+        )
+        return [
+            *messages,
+            shown,
+            *(
+                ToolMessage(content=REJECTED_TOOL_RESULT, tool_call_id=call["id"])
+                for call in calls
+            ),
+            HumanMessage(content=SHOW_FRAME.format(feedback=feedback)),
+        ]
+    reminder: dict[str, Any] = {
+        "type": "text",
+        "text": REMINDER_FRAME.format(feedback=feedback),
+    }
+    last = messages[-1] if messages else None
+    if isinstance(last, HumanMessage):
+        content = (
+            list(last.content) if isinstance(last.content, list) else [last.content]
+        )
+        return [
+            *messages[:-1],
+            last.model_copy(update={"content": [*content, reminder]}),
+        ]
+    return [*messages, HumanMessage(content=[reminder])]
 
 
 def _token_usage(response: AIMessage) -> TokenUsage | None:
@@ -649,6 +734,11 @@ class Agent:
         # Whether a bound output Command forces a tool call on every model call; see specs/agent.md
         # ("Forcing a tool call").
         self._force_tool_call = config.force_tool_call
+        # Response guards, by name in run order: the defaults first, then the application's. A step
+        # reads them once at its start, and retries a rejected response up to max_retries times.
+        # See specs/agent.md ("Response guards").
+        self._guards: dict[str, ResponseGuard] = dict(DEFAULT_GUARDS)
+        self._max_retries = config.max_retries
         self._world = world
         # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
         # here. The Agent runs its tasks/timers/cancellation on it but never starts or stops it. See
@@ -665,7 +755,10 @@ class Agent:
         # per-subscriber isolation catches+logs a raising subscriber so it can neither abort a step
         # nor starve siblings (no _fire_hook guard needed). See specs/agent.md "Instrumentation".
         #  - on_trigger(entry):    once per trigger a run-to-completion step observes (filtered).
-        #  - on_prompt(messages):  the exact rendered messages just before each model call.
+        #  - on_prompt(messages):  the exact rendered messages just before the reaction's first
+        #                           model call (once per reaction; a retry's correction is
+        #                           reported by on_response_rejected).
+        #  - on_response_rejected(rejection): once per response attempt the guards reject.
         #  - on_command(command):  each Command the model issues, when issued — including noop
         #                           (which is observable but not a World action; filter by name).
         #  - on_text(text):        the step's complete free text, right before the sink receives
@@ -676,6 +769,7 @@ class Agent:
         #  - on_command_ended(trace):   once per dispatched Command when its terminal state lands.
         self.on_trigger: Event[WorldEntry] = Event()
         self.on_prompt: Event[list[BaseMessage]] = Event()
+        self.on_response_rejected: Event[ResponseRejection] = Event()
         self.on_command: Event[CommandIssued] = Event()
         self.on_text: Event[str] = Event()
         self.on_reaction_ended: Event[ReactionTrace] = Event()
@@ -725,6 +819,37 @@ class Agent:
     def output_command_name(self) -> str | None:
         """The output Command's name, or None when no output Command is set."""
         return self._output_command_name
+
+    @property
+    def response_guards(self) -> Mapping[str, ResponseGuard]:
+        """Read-only view of the response guards by name, in the order they run: the defaults
+        (``unknown_command``, ``invalid_args``, ``output_command_required``) first, then the
+        application's. See specs/agent.md ("Response guards")."""
+        return MappingProxyType(self._guards)
+
+    def add_response_guard(
+        self, guard: ResponseGuard, *, name: str | None = None
+    ) -> None:
+        """**Experimental** — the shape may change without a deprecation period. Add a guard that
+        checks every model response before it is used: it returns None to accept, or a
+        ``wica.guards.Retry`` to reject (the model is called again, up to ``max_retries`` times).
+        Sync or async; an async guard holds the reaction (triggers arriving meanwhile are
+        dropped), and a sync one also blocks the loop while it runs, so keep it a fast rule.
+        ``name`` defaults to the callable's ``__name__``; a name in use raises ``ValueError``.
+        Takes effect at the next step. See specs/agent.md ("Response guards")."""
+        key = name if name is not None else getattr(guard, "__name__", None)
+        if not key:
+            raise ValueError("a response guard needs a name: pass name=…")
+        if key in self._guards:
+            raise ValueError(f"response guard {key!r} is already added")
+        self._guards[key] = guard
+
+    def remove_response_guard(self, name: str) -> None:
+        """Remove a response guard by name — a default one included. An unknown name raises
+        ``ValueError``. Takes effect at the next step."""
+        if name not in self._guards:
+            raise ValueError(f"no response guard named {name!r}")
+        del self._guards[name]
 
     def _compose_system_prompt(self) -> str:
         """The persona followed by the WICA runtime primer: perception + acting, then the
@@ -1105,13 +1230,15 @@ class Agent:
                     "wica.text_length": builder.text_length,
                     "wica.command_count": len(builder.command_call_ids),
                     "wica.noop": builder.noop,
+                    "wica.attempts": builder.attempts,
                 }
             )
             builder.span.end()
             trace_id, span_id = _span_ids(builder.span)
             # Emitted after _busy is cleared, so a subscriber sees "the Agent is free again" and
             # the record at the same moment. Fires for every reaction that started, whatever its
-            # outcome (ok/empty/model_error/model_timeout/cancelled) — see specs/instrumentation.md ("Layer 1").
+            # outcome (ok/empty/model_error/model_timeout/rejected/cancelled) — see
+            # specs/instrumentation.md ("Layer 1").
             self.on_reaction_ended.emit(
                 ReactionTrace(
                     reaction_id=builder.reaction_id,
@@ -1131,6 +1258,9 @@ class Agent:
                     ended_at=ended_at,
                     trace_id=trace_id,
                     span_id=span_id,
+                    attempts=builder.attempts,
+                    rejections=tuple(builder.rejections),
+                    guard_duration=builder.guard_duration,
                 )
             )
 
@@ -1165,56 +1295,80 @@ class Agent:
             messages = mark_cache_breakpoint(messages)
         builder.prompt_ready_at = now()
 
-        builder.model_started_at = now()
-        deadline = asyncio.timeout(self._model_timeout)
-        try:
-            with tracer().start_as_current_span(
-                "wica.agent.model",
-                attributes={
-                    "gen_ai.operation.name": "chat",
-                    "gen_ai.provider.name": self._provider,
-                    "gen_ai.request.model": self._model_name,
-                },
-            ) as model_span:
-                async with deadline:
-                    response = await self._bound_model.ainvoke(messages)
-                builder.usage = _token_usage(response)
-                if builder.usage is not None:
-                    model_span.set_attributes(
-                        {
-                            "gen_ai.usage.input_tokens": builder.usage.input_tokens,
-                            "gen_ai.usage.output_tokens": builder.usage.output_tokens,
-                        }
-                    )
-        except Exception as exc:
-            # The observation is already in history (and terminal command entries are retired),
-            # so the model never saw it this step; the renderer merges it into the next
-            # observation's user message (see _render_messages). Nothing is dispatched. Ending the
-            # step here frees the single-in-flight loop for the next trigger. CancelledError is a
-            # BaseException and keeps propagating. See specs/agent.md ("Instrumentation").
-            builder.model_ended_at = now()
-            if isinstance(exc, TimeoutError) and deadline.expired():
-                # Our deadline, not a provider's own TimeoutError: asyncio.timeout cancelled the
-                # call. Same ending, its own outcome. A stop() cancellation is not caught here. See
-                # specs/agent.md ("Model-call deadline").
-                builder.outcome = "model_timeout"
-                builder.error = (
-                    f"model call exceeded its {self._model_timeout:g} s deadline"
+        # The step's binding and guards, read once: every attempt runs against the same binding, and
+        # a guard added or removed meanwhile applies from the next step. A rejected response is
+        # retried over the same messages plus a correction, never stored in history; only the
+        # accepted response goes on below. See specs/agent.md ("Response guards").
+        bound_model = self._bound_model
+        guards = list(self._guards.items())
+        bound: Mapping[str, Command] = MappingProxyType(dict(self._commands))
+        output = self._output_command
+        output_name = (
+            output.name
+            if output is not None and self._commands.get(output.name) is output
+            else None
+        )
+        prompt = messages
+        while True:
+            builder.attempts += 1
+            attempt = builder.attempts
+            response = await self._call_model(
+                bound_model, prompt, builder, representative
+            )
+            if response is None:
+                return
+            candidate = ModelResponse(
+                text=response.text,
+                commands=tuple(
+                    ProposedCommand(call["name"], copy.deepcopy(call["args"]))
+                    for call in response.tool_calls
+                ),
+                bound=bound,
+                output_command_name=output_name,
+            )
+            retry = await self._run_guards(guards, candidate, attempt, builder)
+            if retry is None:
+                break
+            # An empty response cannot be shown (providers reject an empty assistant message).
+            show = retry.show_response and bool(response.text or response.tool_calls)
+            will_retry = attempt <= self._max_retries
+            builder.rejections.append(retry.feedback)
+            self.on_response_rejected.emit(
+                ResponseRejection(
+                    attempt=attempt,
+                    response=ModelResponse(
+                        text=candidate.text,
+                        commands=tuple(
+                            ProposedCommand(c.name, copy.deepcopy(c.args))
+                            for c in candidate.commands
+                        ),
+                        bound=bound,
+                        output_command_name=output_name,
+                    ),
+                    feedback=retry.feedback,
+                    show_response=show,
+                    will_retry=will_retry,
                 )
+            )
+            if not will_retry:
+                # Out of retries: nothing recorded but the Observation (it renders merged into the
+                # next one), nothing delivered or dispatched — a model error's ending.
+                builder.outcome = "rejected"
+                builder.error = retry.feedback
                 _logger.error(
-                    "%s; step abandoned (trigger: %s)",
-                    builder.error,
+                    "response rejected after %d attempt(s); step abandoned (trigger: %s): %s",
+                    attempt,
                     _describe_entry(representative),
+                    retry.feedback,
                 )
                 return
-            builder.outcome = "model_error"
-            builder.error = str(exc)
-            _logger.exception(
-                "model call failed; step abandoned (trigger: %s)",
-                _describe_entry(representative),
+            _logger.warning(
+                "response rejected (attempt %d), retrying with %s: %s",
+                attempt,
+                "the response shown" if show else "a reminder",
+                retry.feedback,
             )
-            return
-        builder.model_ended_at = now()
+            prompt = _retry_messages(messages, response, retry.feedback, show=show)
 
         text = response.text
         _logger.debug(
@@ -1265,9 +1419,120 @@ class Agent:
             )
             self._dispatch_command(call_id, call["name"], args)
             builder.command_call_ids.append(call_id)
-        if builder.usage is not None:
-            self._apply_history_budget(builder.usage.input_tokens)
+        if builder.first_input_tokens is not None:
+            self._apply_history_budget(builder.first_input_tokens)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
+
+    async def _call_model(
+        self,
+        bound_model: Runnable[Any, AIMessage],
+        messages: list[BaseMessage],
+        builder: _ReactionBuilder,
+        representative: WorldEntry,
+    ) -> AIMessage | None:
+        """One attempt's model call, under its own deadline. None when the call raised or exceeded
+        its deadline: the outcome is set and logged, and the step ends. See specs/agent.md
+        ("Model-call deadline")."""
+        if builder.model_started_at is None:
+            builder.model_started_at = now()
+        deadline = asyncio.timeout(self._model_timeout)
+        usage: TokenUsage | None = None
+        try:
+            with tracer().start_as_current_span(
+                "wica.agent.model",
+                attributes={
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.provider.name": self._provider,
+                    "gen_ai.request.model": self._model_name,
+                    "wica.attempt": builder.attempts,
+                },
+            ) as model_span:
+                async with deadline:
+                    response = await bound_model.ainvoke(messages)
+                usage = _token_usage(response)
+                if usage is not None:
+                    model_span.set_attributes(
+                        {
+                            "gen_ai.usage.input_tokens": usage.input_tokens,
+                            "gen_ai.usage.output_tokens": usage.output_tokens,
+                        }
+                    )
+        except Exception as exc:
+            # The observation is already in history (and terminal command entries are retired),
+            # so the model never saw it this step; the renderer merges it into the next
+            # observation's user message (see _render_messages). Nothing is dispatched. Ending the
+            # step here frees the single-in-flight loop for the next trigger. CancelledError is a
+            # BaseException and keeps propagating. See specs/agent.md ("Instrumentation").
+            builder.model_ended_at = now()
+            if isinstance(exc, TimeoutError) and deadline.expired():
+                # Our deadline, not a provider's own TimeoutError: asyncio.timeout cancelled the
+                # call. Same ending, its own outcome. A stop() cancellation is not caught here. See
+                # specs/agent.md ("Model-call deadline").
+                builder.outcome = "model_timeout"
+                builder.error = (
+                    f"model call exceeded its {self._model_timeout:g} s deadline"
+                )
+                _logger.error(
+                    "%s; step abandoned (trigger: %s)",
+                    builder.error,
+                    _describe_entry(representative),
+                )
+                return None
+            builder.outcome = "model_error"
+            builder.error = str(exc)
+            _logger.exception(
+                "model call failed; step abandoned (trigger: %s)",
+                _describe_entry(representative),
+            )
+            return None
+        builder.model_ended_at = now()
+        if usage is not None and builder.attempts == 1:
+            builder.first_input_tokens = usage.input_tokens
+        builder.usage = _add_usage(builder.usage, usage)
+        return response
+
+    async def _run_guards(
+        self,
+        guards: list[tuple[str, ResponseGuard]],
+        response: ModelResponse,
+        attempt: int,
+        builder: _ReactionBuilder,
+    ) -> Retry | None:
+        """Run every guard on one attempt (so the feedback is complete) and combine the rejections;
+        None when all accept. A guard that raises, or returns something other than a Retry or None,
+        is logged at ERROR and counts as accepting: a buggy guard must not silence the agent. See
+        specs/agent.md ("Response guards")."""
+        if not guards:
+            return None
+        retries: list[Retry] = []
+        started = now()
+        with tracer().start_as_current_span(
+            "wica.agent.guards", attributes={"wica.attempt": attempt}
+        ) as span:
+            for name, guard in guards:
+                try:
+                    result = guard(response)
+                    if inspect.isawaitable(result):
+                        result = await result
+                except Exception:
+                    _logger.exception(
+                        "response guard %r raised; counted as accepting", name
+                    )
+                    continue
+                if result is None:
+                    continue
+                if not isinstance(result, Retry):
+                    _logger.error(
+                        "response guard %r returned %r, not a Retry or None; counted as accepting",
+                        name,
+                        result,
+                    )
+                    continue
+                retries.append(result)
+            span.set_attribute("wica.rejected", bool(retries))
+        elapsed = (now() - started).total_seconds()
+        builder.guard_duration = (builder.guard_duration or 0.0) + elapsed
+        return combine(retries) if retries else None
 
     def _mint_call_id(self) -> str:
         """The `<call_id>` for a new tool call: `c1`, `c2`, … over the Agent's lifetime, skipping a

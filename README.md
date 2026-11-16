@@ -128,7 +128,7 @@ Start at [docs/index.md](docs/index.md), the documentation by task. The pages a 
 | | |
 |---|---|
 | [docs/getting-started.md](docs/getting-started.md) | Your first agent on the scripted provider, then on a real model; the lifecycle in a host of your own |
-| [docs/reference/api.md](docs/reference/api.md) | What you import, the `Wica` surface, the World API, `Command`, the eight Events, the errors, the contracts |
+| [docs/reference/api.md](docs/reference/api.md) | What you import, the `Wica` surface, the World API, `Command`, the response guards, the nine Events, the errors, the contracts |
 | [docs/reference/configuration.md](docs/reference/configuration.md) | Every config field, the loaders, the API key and prompt rules, the history bounds, the providers |
 | [docs/guides/](docs/index.md#by-task) | The World and its Inputs, Commands, the Gradio panels, testing, latency and traces, benchmarking, limits, troubleshooting |
 
