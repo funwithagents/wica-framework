@@ -4,9 +4,9 @@
 
 Implements "Provider names" and the `openai-chat-completions-compatible` paragraph of [specs/config.md](../specs/config.md) ("Providers"), the construction branch and LangChain-id mapping of [specs/agent.md](../specs/agent.md) ("Provider-agnostic model, from config"), and the renames they carry into [specs/project.md](../specs/project.md), [specs/testing.md](../specs/testing.md) and [specs/conversation-demo.md](../specs/conversation-demo.md).
 
-**Why.** Two things, agreed on 2026-11-16 together with tts-engine and asr-engine, so the three repos share one vocabulary:
+**Why.** Two things, agreed on 2026-11-16:
 
-- **Names.** WICA's `google_genai` and `mistralai` are LangChain package ids, with an underscore, while the sibling repos name hosted providers after what users call them, with hyphens. They become `gemini` and `mistral`; the old names keep working with a deprecation warning.
+- **Names.** WICA's `google_genai` and `mistralai` are LangChain package ids, written with an underscore, where a provider name should be what users call it, written with hyphens. They become `gemini` and `mistral`; the old names keep working with a deprecation warning.
 - **Local and self-hosted models.** A model served by `llama-server`, `mlx_lm.server`, Ollama, LM Studio or vLLM already works through `provider: "openai"` with `model_kwargs.base_url`, but only for a user who knows LangChain: the address is hidden in `model_kwargs`, the OpenAI client refuses to start without a key (so `api_key: "none"`), it reads `OPENAI_API_KEY` otherwise (a real OpenAI key sent to an arbitrary server), streamed usage is off with a `base_url`, and traces read `openai`. A dedicated provider, named after the API it implements, removes all five.
 
 ## Scope
@@ -36,7 +36,7 @@ Implements "Provider names" and the `openai-chat-completions-compatible` paragra
 - New [docs/guides/local-models.md](../docs/guides/local-models.md): start a server (`llama-server`, tried and recommended; `mlx_lm.server`, works with two limits), point WICA at it, what to tune (`context_window`, `model_timeout`, `force_tool_call`, an output cap through `model_kwargs.max_tokens`), the model size to expect to work (7B did, 1.5B did not), cancellation, cloud shapes.
 - [docs/index.md](../docs/index.md), [docs/getting-started.md](../docs/getting-started.md), [README.md](../README.md) install table, [docs/guides/troubleshooting.md](../docs/guides/troubleshooting.md), [docs/guides/limits.md](../docs/guides/limits.md).
 
-**Out of scope.** A local entry in the benchmark matrix (decision 3 of the study, not taken); WICA sending an output cap by default while a tool call is forced (documented instead); streaming the model call; `openai-responses-compatible`; the mirrors in wica-interaction.
+**Out of scope.** A local entry in the benchmark matrix (decision 3 of the study, not taken); WICA sending an output cap by default while a tool call is forced (documented instead); streaming the model call; `openai-responses-compatible`.
 
 ## Tests
 

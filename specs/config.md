@@ -64,12 +64,12 @@ WICA recognizes a small set of `provider` values, each backed by an optional int
 
 Core `wica` bundles **no** provider; selecting one whose extra isn't installed fails at runtime with a clear `ImportError`, never silently.
 
-**Provider names.** One naming rule holds across WICA and its sibling repos (tts-engine, asr-engine):
+**Provider names.** Provider values and extras follow one naming rule:
 
 - **Hyphens:** a provider name is written with `-`, never `_`.
 - **A hosted provider is named after what users call it** — `gemini`, `mistral` — not after a package id. `gemini` rather than `google`, which would be ambiguous with Vertex AI, a different LangChain provider.
 - **A protocol provider is named `<origin>-<api>-compatible`,** after the API it implements: `openai-chat-completions-compatible`. "OpenAI-compatible" alone does not say which of OpenAI's APIs a server implements (Chat Completions, Responses, Realtime, Speech, Transcriptions); a later `openai-responses-compatible` would sit beside it.
-- **One extra per protocol family, `openai-compatible`,** holding the dependencies of every OpenAI-protocol provider (today `langchain-openai`); the vendor extra `openai` stays separate. A module name names a behaviour and appears only in a config file; an extra names a set of dependencies and is typed on a command line and mirrored by dependants (`wica-<extra>`), so it stays short.
+- **One extra per protocol family, `openai-compatible`,** holding the dependencies of every OpenAI-protocol provider (today `langchain-openai`); the vendor extra `openai` stays separate. A module name names a behaviour and appears only in a config file; an extra names a set of dependencies and is typed on a command line, so it stays short.
 - **Old names keep working.** A table of old → new names is applied when an `AgentConfig` is created, whichever way (directly or through a loader), and reading an old name logs a **deprecation warning** at WARNING on the `wica.config` logger naming the new one. The stored `provider` is the new name, so traces (`gen_ai.provider.name`) and benchmark rows read it whatever spelling the config used:
 
   | Old name | New name |
