@@ -50,8 +50,8 @@ KNOWN_FLAKY: dict[tuple[str, str], str] = {
         "it checks in or follows up the previous turn instead of doing nothing"
     ),
     ("e2e.mistral.config", "background"): (
-        "ministral-14b, woken by a background sound right after the dance step, dances again "
-        "(1 of 6 attempts, 2026-11-10): it takes the wake as a cue to repeat the last request"
+        "ministral-14b speaks when a background sound wakes it, offering to chat or to dance "
+        "again (11 of 12 attempts, 2026-11-17, speech as a tag in the text)"
     ),
     ("e2e.huggingface-hub.config", "long_answer"): (
         "gpt-oss-120b, after writing the note, chains check-in says instead of doing nothing; "
@@ -59,13 +59,13 @@ KNOWN_FLAKY: dict[tuple[str, str], str] = {
         "2026-11-12: five says, still speaking at 30 s)"
     ),
     ("e2e.mistral.config", "act_on_request"): (
-        "ministral-14b answers 'Can you dance for me?' by saying it will and writing the action "
-        "as a tag in its text (`<dance>`) instead of calling the tool, so nothing dances "
-        "(6 of 6 attempts, 2026-11-17, speech as a tag in the text)"
+        "ministral-14b answers 'Can you dance for me?' by saying it will and never calls the "
+        "tool: it writes `<dance>` in its text, or speaks again as if it had danced "
+        "(12 of 12 attempts, 2026-11-17, speech as a tag in the text)"
     ),
     ("e2e.mistral.config", "long_answer"): (
-        "ministral-14b writes the note as a tag in its text (`<write_note>{…}`) instead of "
-        "calling the tool (2 of 6 attempts, 2026-11-17, speech as a tag in the text)"
+        "ministral-14b says the note is saved without calling write_note, or writes it as a "
+        "tag in its text (6 of 12 attempts, 2026-11-17, speech as a tag in the text)"
     ),
     ("e2e.openai.config", "background"): (
         "gpt-4o speaks when a background sound wakes a fresh robot (1 of 3 attempts, "

@@ -306,7 +306,9 @@ class Rig:
 
     def observations(self) -> list[str]:
         return [
-            str(m.content)
+            m.content
+            if isinstance(m.content, str)
+            else "".join(b.get("text", "") for b in m.content if isinstance(b, dict))
             for m in self.wica.agent._render_messages()
             if m.type == "human"
         ]
@@ -549,3 +551,23 @@ def test_the_output_command_is_validated_when_set() -> None:
         assert wica.agent.output_command_name is None
     finally:
         wica.close()
+
+
+def test_an_output_entry_reads_as_speech_not_as_a_call(rig: Callable[..., Rig]) -> None:
+    r = rig(
+        [
+            {"text": '<say emotion="happy">Once upon a time.</say>'},
+            {"text": "<say>Okay.</say>"},
+            {"text": "<noop/>"},
+        ]
+    )
+    r.delay = 5.0
+    r.hear("story", 1)
+    r.delay = 0.0
+    r.hear("stop", 2)
+    running = r.observations()[1]
+    assert "Saying (emotion='happy') \"Once upon a time.\"… (still speaking" in running
+    assert "Calling say(" not in running
+    r.hear("thanks", 3)
+    assert "Said (emotion='happy') \"Once \" → cut off there" in r.observations()[2]
+    assert 'Said "Okay." → finished: Said it.' in r.observations()[2]

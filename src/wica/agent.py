@@ -193,6 +193,35 @@ def _serialize_command_execution(
     return [TextPart(text)]
 
 
+def _serialize_output_execution(
+    value: CommandExecution | None, previous: CommandExecution | None
+) -> Content:
+    """An output's World entry: what is being said, in the words of speech, never as a call —
+    the model is told its output Command is not a tool. See specs/agent.md ("Output: tags in the
+    model's text")."""
+    if value is None:
+        return [TextPart("(nothing said)")]
+    text = str(value.args.get("text", ""))
+    attributes = {k: v for k, v in value.args.items() if k != "text"}
+    how = f" ({_format_args(attributes)})" if attributes else ""
+    words = f' "{text}"' if text else ""
+    if value.state == "running":
+        body = f"Saying{how}{words}… (still speaking — not finished)"
+    elif value.state == "complete":
+        # The output Command's own result, when it returned one ("Done." is the default).
+        result = f": {value.result}" if value.result and value.result != "Done." else ""
+        body = f"Said{how}{words} → finished{result}."
+    elif value.state == "failed":
+        body = f"Tried to say{how}{words} → failed: {value.error}"
+    else:
+        body = (
+            f"Said{how}{words} → cut off there, the rest was not heard."
+            if text
+            else "Cut off before saying anything."
+        )
+    return [TextPart(body)]
+
+
 def _content_to_message_blocks(content: Content) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     for part in content:
@@ -1766,7 +1795,7 @@ class Agent:
         self._world.register(
             key,
             CommandExecution,
-            serialize_fn=_serialize_command_execution,
+            serialize_fn=_serialize_output_execution,
             include_in_prompt=True,
             triggers_llm_call=True,
             trigger_condition_fn=lambda old, new: (
