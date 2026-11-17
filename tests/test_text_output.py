@@ -575,3 +575,15 @@ def test_an_output_entry_shows_its_tag_and_its_delivery_never_a_call(
     r.hear("thanks", 3)
     assert '<say emotion="happy"> "Once " — cut off there' in r.observations()[2]
     assert '<say> "Okay." — delivered: Said it.' in r.observations()[2]
+
+
+def test_an_outputs_records_go_with_its_entry(rig: Callable[..., Rig]) -> None:
+    r = rig([{"text": "<say>One.</say>"}, {"text": "<say>Two.</say>"}])
+    r.hear("hi", 1)
+    first = r.reactions[0].command_call_ids[0]
+    wait_until(lambda: r.said == [("One.", "neutral")])
+    time.sleep(0.1)  # the terminal state lands once the issuing step is over
+    assert r.wica.agent.output_wakes(first) is False  # finished, not yet observed
+    r.hear("again", 2)  # the next step observes the finished output and removes it
+    assert r.wica.agent.output_wakes(first) is None
+    assert not r.wica.world.is_registered(f"agent:command:{first}")

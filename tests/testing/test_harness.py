@@ -446,8 +446,13 @@ def test_wait_for_idle_waits_for_the_step_a_noted_output_wakes(
         first, second = (
             e.call_id for e in run.timeline() if e.kind == "command_issued"
         )
-        assert sut.agent.output_wakes(first or "") is True
-        assert sut.agent.output_wakes(second or "") is False  # no note: the chain ends
+        # The answers the Harness took as each output ended; the Agent's own records go with
+        # the entry, once a later step has observed it.
+        assert run._output_wakes == {
+            first: True,
+            second: False,
+        }  # no note: the chain ends
+        assert sut.agent.output_wakes(first or "") is None  # observed by the woken step
     finally:
         run.close()
         sut.close()

@@ -1718,9 +1718,10 @@ class Agent:
     # See specs/agent.md ("Output: tags in the model's text", "Continuing after an output").
 
     def output_wakes(self, call_id: str) -> bool | None:
-        """Whether the end of this output wakes a step; None for a call that is not an output.
-        A harness waiting for the Agent to settle reads it: an output's completion is followed
-        by a step only when it was granted one."""
+        """Whether the end of this output wakes a step; None for a call that is not an output,
+        or an output whose entry the next step has already observed and removed. A harness
+        waiting for the Agent to settle reads it as the output's terminal state arrives: an
+        output's completion is followed by a step only when it was granted one."""
         return self._output_calls.get(f"{_COMMAND_KEY_PREFIX}{call_id}")
 
     def _new_output_session(self, builder: _ReactionBuilder) -> _OutputSession:
@@ -2288,8 +2289,12 @@ class Agent:
         )
 
     def _cleanup_command_entry(self, key: str) -> None:
+        # An output's records go with its entry: they are read only while the entry exists (its
+        # trigger, output_wakes as its terminal state arrives), so nothing grows with every
+        # utterance over a long-running Agent.
         self._command_keys.discard(key)
         self._output_wake.pop(key, None)
+        self._output_calls.pop(key, None)
         try:
             self._world.unregister(key)
         except KeyError:

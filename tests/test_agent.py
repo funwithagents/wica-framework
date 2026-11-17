@@ -2387,15 +2387,28 @@ def test_output_wakes_tells_which_calls_are_followed_by_a_step(loop, world, priv
         coalesce_window=0,
     )
     agent.register_command(_named("wave"))
+    # Read as each terminal state lands, the way a harness reads it.
+    at_end: dict[str, bool | None] = {}
+    agent.on_command_ended.subscribe(
+        lambda trace: at_end.__setitem__(
+            trace.call_id, agent.output_wakes(trace.call_id)
+        )
+    )
     agent.start()
     world.update("input", "wave, then tell me")
     wait_until(lambda: spoken == ["One moment.", "Done."])
-    wait_until(lambda: not agent._busy)
+    wait_until(lambda: not agent._busy and len(at_end) == 3)
 
-    assert agent.output_wakes("c1") is None  # wave: a Command, not an output
-    assert agent.output_wakes("c2") is True
-    assert agent.output_wakes("c3") is False
+    assert at_end == {
+        "c1": None,
+        "c2": True,
+        "c3": False,
+    }  # wave: a Command, not an output
     assert agent.output_wakes("c9") is None
+    # The records go with the entry: c2 was observed (and removed) by the step it woke; c3,
+    # finished but not yet observed, is still known.
+    assert agent.output_wakes("c2") is None
+    assert agent.output_wakes("c3") is False
     time.sleep(0.2)
     assert len(model.calls) == 3  # the last output carried no note
     agent.stop()
