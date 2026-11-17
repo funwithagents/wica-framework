@@ -60,6 +60,7 @@ class Wica:
             agent.on_response_rejected
         )
         self.on_agent_command: Event[CommandIssued] = agent.on_command
+        self.on_agent_command_started: Event[CommandIssued] = agent.on_command_started
         self.on_agent_private_text: Event[str] = agent.on_private_text
         self.on_agent_reaction_ended: Event[ReactionTrace] = agent.on_reaction_ended
         self.on_agent_trigger_dropped: Event[WorldEntry] = agent.on_trigger_dropped

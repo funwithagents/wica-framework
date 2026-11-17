@@ -1383,7 +1383,7 @@ def test_an_output_is_a_command_execution_and_text_outside_its_tag_is_private(
     # its whole text; the text outside the tag went to on_private_text.
     key = "agent:command:c1"
     assert private.event.wait(timeout=WAIT_TIMEOUT)
-    assert issued == [CommandIssued("speak", {"text": "hello"}, "c1")]
+    assert issued == [CommandIssued("speak", {"text": "hello"}, "c1", is_output=True)]
     running = world.get_entry(key).current.value
     assert (running.name, running.args, running.state) == (
         "speak",
@@ -1489,7 +1489,8 @@ def test_noop_issues_no_command_and_stays_in_history_as_text(loop, world, privat
     assert [m.text for m in second_prompt if isinstance(m, AIMessage)] == ["<noop/>"]
     assert not any(m.tool_calls for m in second_prompt if isinstance(m, AIMessage))
     assert not any(isinstance(m, ToolMessage) for m in second_prompt)
-    assert traces[1].noop is False
+    # Private text alone, with no output Command: nothing reached anyone, nothing was done.
+    assert traces[1].noop is True
 
     agent.stop()
 
@@ -2362,13 +2363,15 @@ def test_the_end_of_an_output_wakes_no_step_whatever_its_completion_flag(
     wait_until(lambda: [t.state for t in ended] == ["complete"])
     time.sleep(0.2)  # give any (erroneous) wake a chance to fire
     assert len(model.calls) == 1
-    assert agent.output_wakes("c1") is False
+    assert [(t.is_output, t.triggers_step) for t in ended] == [(True, False)]
     agent.stop()
 
 
-def test_output_wakes_tells_which_calls_are_followed_by_a_step(loop, world, private):
-    """What a harness waiting for the Agent to settle reads: None for a tool-call Command, True
-    for an output whose response carried a note, False for one that did not."""
+def test_the_record_of_a_commands_end_says_whether_it_is_an_output_and_wakes_a_step(
+    loop, world, private
+):
+    """What a harness waiting for the Agent to settle reads, from the Event alone: a tool-call
+    Command triggers a step by its flag, an output only when its response carried a note."""
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2389,30 +2392,27 @@ def test_output_wakes_tells_which_calls_are_followed_by_a_step(loop, world, priv
         coalesce_window=0,
     )
     agent.register_command(_named("wave"))
-    # Read as each terminal state lands, the way a harness reads it.
-    at_end: dict[str, bool | None] = {}
-    agent.on_command_ended.subscribe(
-        lambda trace: at_end.__setitem__(
-            trace.call_id, agent.output_wakes(trace.call_id)
-        )
-    )
+    ended: list[CommandTrace] = []
+    issued: list[CommandIssued] = []
+    agent.on_command_ended.subscribe(ended.append)
+    agent.on_command.subscribe(issued.append)
     agent.start()
     world.update("input", "wave, then tell me")
     wait_until(lambda: spoken == ["One moment.", "Done."])
-    wait_until(lambda: not agent._busy and len(at_end) == 3)
+    wait_until(lambda: not agent._busy and len(ended) == 3)
 
-    assert at_end == {
-        "c1": None,
-        "c2": True,
-        "c3": False,
-    }  # wave: a Command, not an output
-    assert agent.output_wakes("c9") is None
-    # The records go with the entry: c2 was observed (and removed) by the step it woke; c3,
-    # finished but not yet observed, is still known.
-    assert agent.output_wakes("c2") is None
-    assert agent.output_wakes("c3") is False
+    assert {t.call_id: (t.is_output, t.triggers_step) for t in ended} == {
+        "c1": (False, True),  # wave: a tool call, triggers_on_completion
+        "c2": (True, True),  # its response carried a note
+        "c3": (True, False),  # no note: the chain ends
+    }
+    assert [(c.call_id, c.is_output) for c in issued] == [
+        ("c1", False),
+        ("c2", True),
+        ("c3", True),
+    ]
     time.sleep(0.2)
-    assert len(model.calls) == 3  # the last output carried no note
+    assert len(model.calls) == 3
     agent.stop()
 
 
@@ -2479,7 +2479,7 @@ def test_reaction_ended_carries_the_phase_stamps_and_usage(loop, world, private)
     assert trace.outcome == "ok"
     assert trace.text_length == 2
     assert trace.usage == TokenUsage(3, 2, None)
-    assert trace.noop is False
+    assert trace.noop is True  # private text only, no output Command: a decline
     assert trace.command_call_ids == ()
     assert len(trace.triggers) == 1
     assert trace.triggers[0].key == "prompt"
@@ -4249,7 +4249,9 @@ def test_an_output_is_delivered_while_the_response_is_still_streaming(
     assert "".join(heard) == "Once upon a time."
     assert heard[0] == "Once"
     assert text_at_first_piece == [""]
-    assert issued == [CommandIssued("say", {"text": "Once upon a time."}, "c1")]
+    assert issued == [
+        CommandIssued("say", {"text": "Once upon a time."}, "c1", is_output=True)
+    ]
     assert private.texts == ["hm"]
     assert trace.command_call_ids == ("c1",)
     assert trace.first_content_at is not None and trace.model_ended_at is not None

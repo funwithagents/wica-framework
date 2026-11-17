@@ -135,6 +135,11 @@ class CommandTrace:
     started_at: datetime
     ended_at: datetime
     state: Literal["complete", "failed", "cancelled"]
+    # An output (a tag of the output Command), not a tool call; and whether this terminal write
+    # triggers a step — the Agent's own decision, so no consumer has to reproduce it. See
+    # specs/instrumentation.md ("Whether a Command's end triggers a step").
+    is_output: bool = False
+    triggers_step: bool = False
 
     @property
     def duration(self) -> float:

@@ -8,10 +8,12 @@ generic: they hold for any WICA agent because the runtime primer states them (sp
 "System prompt") or because any assistant persona promises them. The registry is open: an
 application adds its own through `build_registry(extra_checks)`.
 
-An **output** is a `command_issued` record named after the SUT's output Command (one per tag of
-the model's text, reported once its body is complete); a reaction that **declined** is one whose
-record has the `noop` flag set (`<noop/>` issues no Command). That is how the checks tell speech
-from action and from silence.
+An **output** is a `command_issued` record whose `is_output` is set (one per tag of the model's
+text, reported once its body is complete), and the outputs of one reaction are listed in its
+record's `command_call_ids`; a reaction that **declined** is one whose record has the `noop` flag
+set (it delivered no output and issued no tool call). These are fields the framework reports
+(specs/instrumentation.md): the checks tell speech from action and from silence by reading them,
+never by a Command's name or a position in a list.
 
 The per-run `measures` live here too: numbers taken from a whole run, never thresholded.
 """
@@ -142,11 +144,28 @@ def turns(timeline: list[SutEvent], keys: Iterable[str]) -> list[Turn]:
     return result
 
 
-def output_issued(timeline: list[SutEvent], output_name: str | None) -> list[SutEvent]:
-    """The outputs reported in *timeline*, in order."""
-    if output_name is None:
-        return []
-    return [e for e in timeline if e.kind == "command_issued" and e.name == output_name]
+def output_issued(timeline: list[SutEvent]) -> list[SutEvent]:
+    """The outputs reported in *timeline*, in order: the `command_issued` records whose
+    `is_output` is set."""
+    return [e for e in timeline if e.kind == "command_issued" and e.is_output]
+
+
+def reply_of(timeline: list[SutEvent]) -> dict[str, int]:
+    """`call_id → reaction_id` for every Command a reaction record in *timeline* lists in its
+    `command_call_ids` (outputs included): the outputs of one reaction are one reply."""
+    return {c: r.reaction_id for r in reactions(timeline) for c in r.command_call_ids}
+
+
+def replies(outputs: list[SutEvent], reply: Mapping[str, int]) -> int:
+    """How many replies *outputs* make: one per reaction that issued some of them (through
+    *reply*, see `reply_of`); an output with no reaction record in the timeline counts alone."""
+    groups: set[tuple[str, object]] = set()
+    for e in outputs:
+        reaction_id = reply.get(e.call_id or "")
+        groups.add(
+            ("call", e.call_id) if reaction_id is None else ("reaction", reaction_id)
+        )
+    return len(groups)
 
 
 def input_windows(timeline: list[SutEvent]) -> list[tuple[int, int]]:
@@ -187,8 +206,7 @@ def answers_each_input(window: list[SutEvent], context: CheckContext) -> Finding
     output = context.output_command_name
     all_turns = turns(window, context.turn_inputs)
     for turn in all_turns:
-        span = window[turn.start : turn.end]
-        if not any(e.kind == "command_issued" and e.name == output for e in span):
+        if not output_issued(window[turn.start : turn.end]):
             opening = window[turn.start]
             return _finding(
                 name,
@@ -208,8 +226,9 @@ def answers_each_input(window: list[SutEvent], context: CheckContext) -> Finding
 
 def no_noop_on_input(window: list[SutEvent], context: CheckContext) -> Finding:
     """Primer: "never use `<noop/>` to skip an expected response" — no reaction triggered by a write
-    to one of the scenario's Inputs declines: its record's `noop` flag is set (the response was
-    `<noop/>`, or empty)."""
+    to one of the scenario's Inputs declines: its record's `noop` flag is set — it delivered no
+    output and issued no tool call (`<noop/>`, private text then `<noop/>`, or an empty
+    response)."""
     name = "no_noop_on_input"
     wanted = set(context.scenario_inputs)
     for event in window:
@@ -229,12 +248,23 @@ def no_noop_on_input(window: list[SutEvent], context: CheckContext) -> Finding:
     return _finding(name, window, True, "no input declined (noop)")
 
 
+_NOT_FAILED = ("ok", "empty")
+
+
+def failed(reaction: ReactionTrace) -> bool:
+    """The reaction failed: a model error, a deadline, a response still rejected, a cancellation.
+    An empty response is not a failure: it is a decline (`noop`), judged by the checks on
+    declining."""
+    return reaction.outcome not in _NOT_FAILED
+
+
 def no_failed_reactions(window: list[SutEvent], context: CheckContext) -> Finding:
-    """Every reaction ended `ok` — no model error, no empty response."""
+    """Every reaction ended `ok` or `empty` — no model error, no timeout, no rejected response, no
+    cancellation. An empty response is the model declining, not failing."""
     name = "no_failed_reactions"
     for event in window:
         reaction = event.reaction
-        if reaction is not None and reaction.outcome != "ok":
+        if reaction is not None and failed(reaction):
             detail = (
                 f"reaction {reaction.reaction_id} ended {reaction.outcome!r} at "
                 f"{_at(event, context)}"
@@ -242,7 +272,9 @@ def no_failed_reactions(window: list[SutEvent], context: CheckContext) -> Findin
             if reaction.error:
                 detail += f": {reaction.error}"
             return _finding(name, window, False, detail, event)
-    return _finding(name, window, True, f"{len(reactions(window))} reaction(s), all ok")
+    return _finding(
+        name, window, True, f"{len(reactions(window))} reaction(s), none failed"
+    )
 
 
 def no_colliding_cancel(window: list[SutEvent], context: CheckContext) -> Finding:
@@ -258,16 +290,18 @@ def no_colliding_cancel(window: list[SutEvent], context: CheckContext) -> Findin
     names_by_call = {
         e.call_id: e.name
         for e in window
-        if e.kind in ("command_issued", "command_state") and e.call_id and e.name
+        if e.kind in ("command_issued", "command_state")
+        and e.call_id
+        and e.name
+        and not e.is_output
     }
-    output = context.output_command_name
     for reaction_id, calls in commands_by_reaction(window).items():
-        issued = [e for e in calls if e.name != output]  # tool calls only
+        issued = [e for e in calls if not e.is_output]  # tool calls only
         for cancel in (e for e in issued if e.name == CANCEL):
             target_id = str((cancel.args or {}).get("call_id", ""))
             target = names_by_call.get(target_id.removeprefix(_COMMAND_KEY_PREFIX))
-            if target is None or target in (CANCEL, output):
-                continue
+            if target is None or target == CANCEL:
+                continue  # unnamed in the window, a cancel, or an output
             if any(e.name == target and e is not cancel for e in issued):
                 return _finding(
                     name,
@@ -286,27 +320,33 @@ def cancels_when_asked(window: list[SutEvent], context: CheckContext) -> Finding
     """The input it follows asks the SUT to stop: something is stopped in its window —
     `cancel_command` is issued, or an output that was running when the window opened reaches
     `cancelled` in it (speaking again cuts off the running output with no `cancel_command`, and
-    that is a correct way to stop talking). For any other Command only `cancel_command` counts."""
+    that is a correct way to stop talking). For any other Command only `cancel_command` counts.
+    Under the one-voice rule any new output cuts the running one off, so for speech this
+    confirms the speech stopped: it holds as soon as the model says anything, and breaks only
+    when it stays silent or only acts."""
     name = "cancels_when_asked"
-    output = context.output_command_name
     for e in window:
-        if e.kind == "command_issued" and e.name == CANCEL:
+        if e.kind == "command_issued" and e.name == CANCEL and not e.is_output:
             return _finding(name, window, True, f"{CANCEL} at {_at(e, context)}", e)
-    # An output reported inside the window started in it: it was not running when it opened.
-    said_in_window = {e.call_id for e in output_issued(window, output)}
+    # An output whose opening (its first `running` state) is inside the window started in it: it
+    # was not running when the window opened.
+    opened_in_window = {
+        e.call_id
+        for e in window
+        if e.kind == "command_state" and e.is_output and e.state == "running"
+    }
     for e in window:
         if (
             e.kind == "command_state"
+            and e.is_output
             and e.state == "cancelled"
-            and output is not None
-            and e.name == output
-            and e.call_id not in said_in_window
+            and e.call_id not in opened_in_window
         ):
             return _finding(
                 name,
                 window,
                 True,
-                f"the running {output} ({e.call_id}) cut off at {_at(e, context)}",
+                f"the running {e.name} ({e.call_id}) cut off at {_at(e, context)}",
                 e,
             )
     return _finding(
@@ -355,11 +395,10 @@ def quiet_on_background_change(
     issued as tool calls do not break it."""
     name = "quiet_on_background_change"
     output = context.output_command_name
-    for e in window:
-        if e.kind == "command_issued" and e.name == output:
-            return _finding(
-                name, window, False, f"{output} output at {_at(e, context)}", e
-            )
+    said = output_issued(window)
+    if said:
+        e = said[0]
+        return _finding(name, window, False, f"{e.name} output at {_at(e, context)}", e)
     return _finding(name, window, True, f"no {output} output after the change")
 
 
@@ -410,19 +449,19 @@ def run_check(
 
 
 def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float]:
-    """The per-run numbers next to the framework's metrics: `output_calls` (outputs reported),
-    `extra_output` (outputs beyond a turn's first one — a second utterance in the same turn,
-    however many steps the first took), `noop_steps` (reactions that declined: the record's `noop`
-    flag), `failed_reactions`, `output_words` (words in the outputs' `text`), and the turn numbers
-    a session is read by — `turns` (opened by the scenario's triggering Inputs, see `turns`),
-    `turns_answered` (an output reported within the turn), `noops_on_input` (reactions that
-    declined a write to a scenario Input)."""
-    outputs = output_issued(timeline, context.output_command_name)
+    """The per-run numbers next to the framework's metrics: `output_calls` (outputs reported, one
+    per tag), `extra_output` (replies beyond a turn's first one — a second reply in the same turn,
+    however many steps the first took; the outputs one reaction delivered, several tags
+    included, are one reply), `noop_steps` (reactions that declined: the record's `noop` flag),
+    `failed_reactions` (an empty response is a decline, not a failure), `output_words` (words in
+    the outputs' `text`), and the turn numbers a session is read by — `turns` (opened by the
+    scenario's triggering Inputs, see `turns`), `turns_answered` (an output reported within the
+    turn), `noops_on_input` (reactions that declined a write to a scenario Input)."""
+    outputs = output_issued(timeline)
+    reply = reply_of(timeline)
     all_turns = turns(timeline, context.turn_inputs)
     answered = sum(
-        1
-        for turn in all_turns
-        if output_issued(timeline[turn.start : turn.end], context.output_command_name)
+        1 for turn in all_turns if output_issued(timeline[turn.start : turn.end])
     )
     wanted = set(context.scenario_inputs)
     all_reactions = reactions(timeline)
@@ -434,9 +473,9 @@ def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float
     words = sum(len(str((e.args or {}).get("text", "")).split()) for e in outputs)
     return {
         "output_calls": float(len(outputs)),
-        "extra_output": float(len(outputs) - answered),
+        "extra_output": float(max(replies(outputs, reply) - answered, 0)),
         "noop_steps": float(sum(1 for r in all_reactions if r.noop)),
-        "failed_reactions": float(sum(1 for r in all_reactions if r.outcome != "ok")),
+        "failed_reactions": float(sum(1 for r in all_reactions if failed(r))),
         "output_words": float(words),
         "turns": float(len(all_turns)),
         "turns_answered": float(answered),
@@ -446,20 +485,18 @@ def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float
 
 def answer_latencies(timeline: list[SutEvent], context: CheckContext) -> list[float]:
     """One sample per answered turn: from the write that opened it to the first words of its first
-    output — the `first_output_at` of the reaction that issued it, whether the model spoke on its
-    first step or after a side Command (an emotion change) whose completion woke the step that
-    spoke. When that reaction's record is not in the timeline, or the output was not its first,
-    the time the output was reported stands in. Unanswered turns give none."""
+    output — the output's own start (`CommandTrace.started_at`, when it opened), whether the model
+    spoke on its first step or after a side Command (an emotion change) whose completion woke the
+    step that spoke. When the output's end record is not in the timeline, the time the output was
+    reported stands in. Unanswered turns give none."""
     first_of = {
-        r.command_call_ids[0]: r.first_output_at
-        for r in reactions(timeline)
-        if r.command_call_ids and r.first_output_at is not None
+        e.command.call_id: e.command.started_at
+        for e in timeline
+        if e.kind == "command_ended" and e.command is not None and e.command.is_output
     }
     samples: list[float] = []
     for turn in turns(timeline, context.turn_inputs):
-        answers = output_issued(
-            timeline[turn.start : turn.end], context.output_command_name
-        )
+        answers = output_issued(timeline[turn.start : turn.end])
         if not answers:
             continue
         first = answers[0]

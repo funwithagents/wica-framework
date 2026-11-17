@@ -115,11 +115,14 @@ def test_a_declined_reaction_is_reported_by_its_noop_flag_alone(
     assert reaction is not None and reaction.noop and reaction.outcome == "ok"
 
 
-def test_an_output_is_picked_up_running_and_followed_to_its_end(
+def test_an_output_is_followed_from_its_start_to_its_end(
     sut_factory: Callable[..., Wica],
 ):
-    """An output is reported once its body is complete, when its entry is already `running`: the
-    Probe records the running state it missed before `command_issued`, then the terminal one."""
+    """An output is followed from `on_agent_command_started`, at its first words: the Probe's
+    listener records each state its entry goes through — `running` from the opening, with no
+    text yet, then its outcome — each marked `is_output`, and `command_issued` comes once its
+    body is complete, with the whole text. Nothing is reconstructed from an entry's earlier
+    version."""
     sut = sut_factory(
         [{"text": 'thinking <say emotion="happy">Hello there.</say>'}], commands=()
     )
@@ -137,26 +140,27 @@ def test_an_output_is_picked_up_running_and_followed_to_its_end(
     )
 
     issued = collector.of("command_issued")
-    assert [(e.name, e.args) for e in issued] == [
-        ("say", {"emotion": "happy", "text": "Hello there."})
+    assert [(e.name, e.args, e.is_output) for e in issued] == [
+        ("say", {"emotion": "happy", "text": "Hello there."}, True)
     ]
     states = collector.of("command_state")
-    assert [(s.state, s.call_id) for s in states] == [
-        ("running", issued[0].call_id),
-        ("complete", issued[0].call_id),
+    assert [(s.state, s.call_id, s.args) for s in states] == [
+        ("running", issued[0].call_id, {"emotion": "happy", "text": ""}),
+        ("complete", issued[0].call_id, {"emotion": "happy", "text": "Hello there."}),
     ]
-    assert states[0].args == {"emotion": "happy", "text": "Hello there."}
-    assert states[1].result == "Said it."
-    # The order of any Command — running, then issued … then terminal after the step ended —
-    # with the missed state stamped by its World version, not by its late arrival.
     kinds = collector.kinds()
-    running_at = kinds.index("command_state")
-    assert running_at < kinds.index("command_issued") < kinds.index("reaction_ended")
+    assert all(s.is_output for s in states)
+    assert states[-1].result == "Said it."
+    # Its terminal state is written once the step that issued it is over.
     assert kinds.index("reaction_ended") < len(kinds) - 1 - kinds[::-1].index(
         "command_state"
     )
-    assert before <= states[0].t <= issued[0].t
-    assert states[1].t - states[0].t >= 0.2 - 0.016  # the delivery, not an instant
+    assert before <= states[0].t <= states[-1].t
+    assert states[-1].t - states[0].t >= 0.2 - 0.016  # the delivery, not an instant
+    ended = collector.of("command_ended")
+    assert [(e.call_id, e.command.is_output) for e in ended if e.command] == [
+        (issued[0].call_id, True)
+    ]
     # Text outside the tag is private; the tag's body is not.
     assert [e.text for e in collector.of("private_text")] == ["thinking"]
     reaction = collector.of("reaction_ended")[0].reaction
@@ -166,11 +170,54 @@ def test_an_output_is_picked_up_running_and_followed_to_its_end(
     assert voice.said == ["Hello there."]
 
 
+def test_an_output_whose_opening_the_probe_missed_is_followed_from_its_report(
+    sut_factory: Callable[..., Wica],
+):
+    """A Probe attached while an output is already open (here, from inside that output's own
+    `on_agent_command_started`, which it is too late to receive) follows it from its
+    `command_issued` report: the state the entry is in then, and every later one — so `"idle"`
+    never waits on an output whose end it could not see."""
+    sut = sut_factory([{"text": "<say>Hello there.</say>"}], commands=())
+    sut.set_output_command(Voice(delay=0.2).say)
+    probe = Probe(sut)
+    collector = Collector()
+    probe.subscribe(collector)
+    sut.on_agent_command_started.subscribe(lambda issued: probe.attach())
+    sut.start()
+    sut.world.update("prompt", "Greet me.")
+    wait_until(
+        lambda: [s.state for s in collector.of("command_state")][-1:] == ["complete"]
+    )
+    followed = [
+        e for e in collector.events if e.kind in ("command_issued", "command_state")
+    ]
+    assert [(e.kind, e.state) for e in followed] == [
+        ("command_issued", None),
+        ("command_state", "running"),  # the state it was in when reported
+        ("command_state", "complete"),
+    ]
+    assert all(e.is_output for e in followed)
+
+
+def test_a_tool_call_is_not_marked_as_an_output(sut_factory: Callable[..., Wica]):
+    sut = sut_factory(ADD_THEN_TEXT)
+    probe = Probe(sut)
+    collector = Collector()
+    probe.subscribe(collector)
+    probe.attach()
+    sut.start()
+    probe.set("prompt", "Add 2 and 2.")
+    wait_until(lambda: len(collector.of("command_state")) == 2)
+    followed = collector.of("command_issued") + collector.of("command_state")
+    assert [e.name for e in followed] == ["add", "add", "add"]
+    assert not any(e.is_output for e in followed)
+
+
 def test_an_output_that_failed_before_its_response_ended_is_still_followed(
     sut_factory: Callable[..., Wica],
 ):
-    """An output Command that raises at the first words leaves its entry `failed` before the
-    output is reported: the Probe still records running → issued → failed, each state once."""
+    """An output Command that raises at the first words: the Probe, following the output since
+    it opened, records each state its entry went through and the `command_issued` report."""
     sut = sut_factory(
         [{"text": "<say>One two three four five.</say> and a private tail"}],
         commands=(),
@@ -188,19 +235,16 @@ def test_an_output_that_failed_before_its_response_ended_is_still_followed(
     sut.start()
     probe.set("prompt", "Greet me.")
     wait_until(lambda: collector.of("reaction_ended") != [])
+    wait_until(lambda: any(e.state == "failed" for e in collector.of("command_state")))
     time.sleep(0.2)  # nothing more may follow
-    followed = [
-        (e.kind, e.state)
-        for e in collector.events
-        if e.kind in ("command_state", "command_issued")
+    # Each state the entry went through, once: opened, then failed.
+    assert [(e.state, e.args) for e in collector.of("command_state")] == [
+        ("running", {"text": ""}),
+        ("failed", {"text": "One two three four five."}),
     ]
-    assert followed == [
-        ("command_state", "running"),
-        ("command_issued", None),
-        ("command_state", "failed"),
-    ]
-    failed = collector.of("command_state")[1]
-    assert failed.error == "speaker unplugged"
+    assert len(collector.of("command_issued")) == 1
+    failed = collector.of("command_state")[-1]
+    assert failed.error == "speaker unplugged" and failed.is_output
     assert failed.call_id == collector.of("command_issued")[0].call_id
     assert collector.of("command_issued")[0].args == {
         "text": "One two three four five."

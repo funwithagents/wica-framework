@@ -1,7 +1,9 @@
 """The checks and measures (specs/wica-tester.md, "Scenarios") over hand-built timelines with real
 `ReactionTrace` / `TriggerTrace` records: each built-in kept and broken, the windows they judge,
-and the registry. In these timelines an output is a `command_issued` named `say` (the output
-Command) and a declined reaction a record whose `noop` flag is set — there is no `noop` Command."""
+and the registry. In these timelines an output is a `command_issued` whose `is_output` is set (named
+`say`, the output Command, unless a test says otherwise), listed in its reaction's
+`command_call_ids`, and a declined reaction a record whose `noop` flag is set — there is no `noop`
+Command."""
 
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from wica.instrumentation import ReactionTrace, TokenUsage, TriggerTrace
+from wica.instrumentation import CommandTrace, ReactionTrace, TokenUsage, TriggerTrace
 from wica.testing import (
     answer_latencies,
     CHECKS,
@@ -98,8 +100,17 @@ def _issued(t: float, name: str, cid: str, /, **args: Any) -> SutEvent:
     return _ev("command_issued", t, name=name, call_id=cid, args=args)
 
 
-def _state(t: float, name: str, cid: str, state: str) -> SutEvent:
-    return _ev("command_state", t, name=name, call_id=cid, state=state)
+def _said(t: float, cid: str, /, **args: Any) -> SutEvent:
+    """An output: a `command_issued` the framework reports with `is_output` set."""
+    return _ev("command_issued", t, name="say", call_id=cid, args=args, is_output=True)
+
+
+def _state(
+    t: float, name: str, cid: str, state: str, *, output: bool = False
+) -> SutEvent:
+    return _ev(
+        "command_state", t, name=name, call_id=cid, state=state, is_output=output
+    )
 
 
 def _answered_turn(version: int, t: float, reaction_id: int) -> list[SutEvent]:
@@ -109,12 +120,14 @@ def _answered_turn(version: int, t: float, reaction_id: int) -> list[SutEvent]:
         _set(t, "speech_input", f"utterance {version}"),
         _ev("input_written", t, key="speech_input", version_id=version),
         _ev("trigger_observed", t + 0.01, key="speech_input", version_id=version),
-        _issued(t + 0.5, "say", call, text="hi"),
+        _said(t + 0.5, call, text="hi"),
         _ev(
             "reaction_ended",
             t + 0.6,
             reaction=_reaction(
-                reaction_id, [_trigger("speech_input", version)], call_ids=(call,)
+                reaction_id,
+                [_trigger("speech_input", version)],
+                call_ids=(call,),
             ),
         ),
     ]
@@ -184,7 +197,7 @@ def test_a_dropped_write_opens_no_turn_and_coalesced_writes_open_one():
     coalesced = [
         _ev("input_written", 0.0, key="speech_input", version_id=1),
         _ev("input_written", 0.05, key="speech_input", version_id=2),
-        _issued(0.5, "say", "c1", text="hi"),
+        _said(0.5, "c1", text="hi"),
         _ev(
             "reaction_ended",
             0.6,
@@ -234,7 +247,7 @@ def test_no_noop_on_input_reads_the_noop_flag_of_a_reaction_to_a_scenario_input(
             2.0,
             reaction=_reaction(3, [_trigger("emotion", 1)], noop=True),
         ),
-        _issued(2.9, "say", "c4", text="hi"),
+        _said(2.9, "c4", text="hi"),
         _ev(
             "reaction_ended",
             3.0,
@@ -258,24 +271,81 @@ def test_no_failed_reactions_cites_the_outcome_and_error():
     assert _check("no_failed_reactions", _answered_turn(1, 0.0, 1)).ok
 
 
+def test_no_failed_reactions_passes_an_empty_response_a_decline_not_a_failure():
+    empty = _ev(
+        "reaction_ended",
+        0.6,
+        reaction=_reaction(
+            1, [_trigger("speech_input", 1)], outcome="empty", noop=True
+        ),
+    )
+    kept = _check("no_failed_reactions", [empty])
+    assert kept.ok and "none failed" in kept.detail
+    for outcome in ("model_timeout", "rejected", "cancelled"):
+        broken = _ev("reaction_ended", 1.0, reaction=_reaction(2, [], outcome=outcome))
+        finding = _check("no_failed_reactions", [empty, broken])
+        assert not finding.ok and finding.event is broken
+
+
+def test_no_noop_on_input_catches_a_decline_with_private_text():
+    """`reasoning… <noop/>`: the model wrote private notes and declined. Its record's `noop` flag
+    is set, so the check catches it whatever text came with it."""
+    window = [
+        _set(0.0, "speech_input", "Hello?"),
+        _ev("input_written", 0.0, key="speech_input", version_id=1),
+        _ev("private_text", 0.5, text="The user is probably not talking to me."),
+        _ev(
+            "reaction_ended",
+            0.6,
+            reaction=_reaction(1, [_trigger("speech_input", 1)], noop=True),
+        ),
+    ]
+    finding = _check("no_noop_on_input", window)
+    assert not finding.ok and finding.event is window[-1]
+    assert measures(window, CONTEXT)["noops_on_input"] == 1.0
+
+
+def test_an_output_is_read_from_is_output_not_from_its_name():
+    """The checks read the field the framework reports: an output whose Command is named unlike
+    the context's is still an answer, and a tool call that happens to share the name is not."""
+    talk = dataclasses.replace(_said(0.5, "c1", text="hi"), name="talk")
+    answered = _answered_turn(1, 0.0, 1)
+    answered[3] = talk
+    assert _check("answers_each_input", answered).ok
+    assert not _check("quiet_on_background_change", answered[:1] + [talk]).ok
+    tool_named_say = _answered_turn(1, 0.0, 1)
+    tool_named_say[3] = _issued(0.5, "say", "c1", text="hi")
+    assert not _check("answers_each_input", tool_named_say).ok
+    assert _check("quiet_on_background_change", tool_named_say[3:4]).ok
+
+
 # --- no_colliding_cancel ----------------------------------------------------------------------
 
 
 def _cancel_reaction(
     target: str, *others: str, target_id: str = "d1"
 ) -> list[SutEvent]:
-    """`target` running as d1, then one reaction cancelling *target_id* beside *others*."""
+    """`target` running as d1, then one reaction cancelling *target_id* beside *others* (a `say`
+    is an output)."""
     calls = ["k1"] + [f"o{i}" for i, _ in enumerate(others)]
     events = [
-        _ev("command_state", 0.1, name=target, call_id="d1", state="running"),
+        _state(0.1, target, "d1", "running", output=target == "say"),
         _issued(0.5, "cancel_command", "k1", call_id=target_id),
     ]
-    events += [_issued(0.5, other, f"o{i}") for i, other in enumerate(others)]
+    events += [
+        _said(0.5, f"o{i}") if other == "say" else _issued(0.5, other, f"o{i}")
+        for i, other in enumerate(others)
+    ]
+    outputs = tuple(f"o{i}" for i, other in enumerate(others) if other == "say")
     events.append(
         _ev(
             "reaction_ended",
             0.6,
-            reaction=_reaction(1, [_trigger("speech_input", 1)], call_ids=tuple(calls)),
+            reaction=_reaction(
+                1,
+                [_trigger("speech_input", 1)],
+                call_ids=(*outputs, *(c for c in calls if c not in outputs)),
+            ),
         )
     )
     return events
@@ -319,14 +389,16 @@ def test_cancels_when_asked_kept_by_speaking_over_the_running_output():
     """Speaking again cuts off the output that was running when the input was written, with no
     `cancel_command`: a correct way to stop talking."""
     before = [
-        _state(0.4, "say", "s1", "running"),
-        _issued(0.5, "say", "s1", text="Once upon a time"),
+        _state(0.4, "say", "s1", "running", output=True),
+        _said(0.5, "s1", text="Once upon a time"),
     ]
     window = [
         _set(2.0, "speech_input", "Stop!"),
-        _state(2.4, "say", "s1", "cancelled"),  # cut off by the new utterance
-        _state(2.5, "say", "s2", "running"),
-        _issued(2.6, "say", "s2", text="Okay, stopping."),
+        _state(
+            2.4, "say", "s1", "cancelled", output=True
+        ),  # cut off by the new utterance
+        _state(2.5, "say", "s2", "running", output=True),
+        _said(2.6, "s2", text="Okay, stopping."),
     ]
     timeline = before + window
     assert input_windows(timeline) == [(2, 6)]
@@ -340,17 +412,17 @@ def test_cancels_when_asked_is_not_kept_by_what_only_looks_like_a_stop():
     # The running output finished by itself, and the SUT just spoke again.
     finished = [
         stop,
-        _state(2.4, "say", "s1", "complete"),
-        _state(2.5, "say", "s2", "running"),
-        _issued(2.6, "say", "s2", text="And then…"),
+        _state(2.4, "say", "s1", "complete", output=True),
+        _state(2.5, "say", "s2", "running", output=True),
+        _said(2.6, "s2", text="And then…"),
     ]
     assert not _check("cancels_when_asked", finished).ok
     # An output said in the window and cut off in it was not running when the window opened.
     own = [
         stop,
-        _state(2.5, "say", "s2", "running"),
-        _issued(2.6, "say", "s2", text="Okay"),
-        _state(2.9, "say", "s2", "cancelled"),
+        _state(2.5, "say", "s2", "running", output=True),
+        _said(2.6, "s2", text="Okay"),
+        _state(2.9, "say", "s2", "cancelled", output=True),
     ]
     assert not _check("cancels_when_asked", own).ok
     # For any other Command only cancel_command counts: a dance that ended `cancelled` by
@@ -403,7 +475,7 @@ def test_quiet_on_background_change_broken_when_the_robot_comments_on_it():
     assert _check("quiet_on_background_change", busy_but_silent).ok
     chatty = [
         _set(1.5, "emotion", "happy"),
-        _issued(3.0, "say", "c2", text="I feel happy!"),
+        _said(3.0, "c2", text="I feel happy!"),
     ]
     finding = _check("quiet_on_background_change", chatty)
     assert not finding.ok and "say output at t=3.000" in finding.detail
@@ -413,7 +485,7 @@ def test_quiet_on_background_change_broken_when_the_robot_comments_on_it():
 def test_input_windows_run_from_one_input_to_the_next():
     timeline = [
         _set(0.0, "speech_input", "Hi"),
-        _issued(0.5, "say", "c1", text="hello"),
+        _said(0.5, "c1", text="hello"),
         _set(2.0, "speech_input", "Stop!"),
         _issued(2.5, "cancel_command", "k1"),
     ]
@@ -443,12 +515,14 @@ def test_measures_count_outputs_extra_replies_noops_failures_words_and_turns():
     timeline = _answered_turn(1, 0.0, 1) + [
         # the chained reply: a reaction woken only by say's completion says again (words are
         # counted in the text, not in the attributes)
-        _issued(1.5, "say", "c2", text="and one more thing", emotion="happy"),
+        _said(1.5, "c2", text="and one more thing", emotion="happy"),
         _ev(
             "reaction_ended",
             1.6,
             reaction=_reaction(
-                2, [_trigger("agent:command:c1", 1, completion=True)], call_ids=("c2",)
+                2,
+                [_trigger("agent:command:c1", 1, completion=True)],
+                call_ids=("c2",),
             ),
         ),
         _ev(
@@ -458,12 +532,22 @@ def test_measures_count_outputs_extra_replies_noops_failures_words_and_turns():
                 3, [_trigger("agent:command:c2", 1, completion=True)], noop=True
             ),
         ),
-        _ev("reaction_ended", 3.0, reaction=_reaction(4, [], outcome="empty")),
+        # an empty response is a decline (noop), not a failure; a model error is one
+        _ev(
+            "reaction_ended",
+            3.0,
+            reaction=_reaction(4, [], outcome="empty", noop=True),
+        ),
+        _ev(
+            "reaction_ended",
+            3.5,
+            reaction=_reaction(5, [], outcome="model_error", error="boom"),
+        ),
     ]
     assert measures(timeline, CONTEXT) == {
         "output_calls": 2.0,
-        "extra_output": 1.0,  # a second utterance in the same turn
-        "noop_steps": 1.0,
+        "extra_output": 1.0,  # a second reply in the same turn
+        "noop_steps": 2.0,
         "failed_reactions": 1.0,
         "output_words": 5.0,  # "hi" + "and one more thing"
         "turns": 1.0,
@@ -486,6 +570,42 @@ def test_measures_count_a_declined_input_from_the_noop_flag():
     assert m["turns_answered"] == 1.0
 
 
+def _reply(
+    t: float, reaction_id: int, trigger: TriggerTrace, *texts: str
+) -> list[SutEvent]:
+    """One reaction woken by *trigger*, speaking once per text: one reply, as many tags as
+    texts."""
+    calls = tuple(f"r{reaction_id}-{n}" for n in range(len(texts)))
+    return [
+        *(_said(t, call, text=text) for call, text in zip(calls, texts, strict=True)),
+        _ev(
+            "reaction_ended",
+            t + 0.1,
+            reaction=_reaction(
+                reaction_id,
+                [trigger],
+                call_ids=calls,
+            ),
+        ),
+    ]
+
+
+def test_extra_output_counts_replies_not_tags():
+    """Two tags in one response are one reply: the turn's answer, with nothing extra. A second
+    reaction speaking again in the same turn is the extra reply, however many tags each holds."""
+    opening = _answered_turn(1, 0.0, 1)[:3]
+    two_tags = opening + _reply(
+        0.5, 1, _trigger("speech_input", 1), "Good news!", "But there is a catch."
+    )
+    m = measures(two_tags, CONTEXT)
+    assert m["output_calls"] == 2.0 and m["extra_output"] == 0.0
+    assert m["turns_answered"] == 1.0
+    woken = _trigger("agent:command:r1-1", 1, completion=True)  # a <next> note's wake
+    two_replies = two_tags + _reply(1.5, 2, woken, "One more thing.", "And another.")
+    m = measures(two_replies, CONTEXT)
+    assert m["output_calls"] == 4.0 and m["extra_output"] == 1.0
+
+
 def _split_answer(version: int, t: float) -> list[SutEvent]:
     """A turn answered in two steps: an emotion change first, `say` on the step its completion
     wakes."""
@@ -501,7 +621,7 @@ def _split_answer(version: int, t: float) -> list[SutEvent]:
                 version, [_trigger("speech_input", version)], call_ids=(f"e{version}",)
             ),
         ),
-        _issued(t + 1.2, "say", f"s{version}", text="hello there"),
+        _said(t + 1.2, f"s{version}", text="hello there"),
         _ev(
             "reaction_ended",
             t + 1.2,
@@ -524,28 +644,58 @@ def test_an_answer_over_two_steps_is_one_answer_timed_to_its_first_word():
     assert answer_latencies(timeline, CONTEXT) == pytest.approx([1.2, 0.5])
 
 
+def _ended(t: float, cid: str, started: float, *, output: bool = True) -> SutEvent:
+    """A Command's end record, carrying when it started (for an output: its first words)."""
+    trace = CommandTrace(
+        call_id=cid,
+        name="say" if output else "dance",
+        reaction_id=1,
+        started_at=_at(started),
+        ended_at=_at(t),
+        state="complete",
+        is_output=output,
+    )
+    return _ev("command_ended", t, name=trace.name, call_id=cid, command=trace)
+
+
 def test_answer_latency_ends_at_the_first_words_of_the_output_not_at_its_report():
-    """An output is reported once its body is complete; its first words were heard earlier, at
-    the reaction's `first_output_at`."""
+    """An output is reported once its body is complete; its first words were heard earlier, when
+    it started — its own `CommandTrace.started_at`."""
     opened = T0.timestamp()
     timeline = [
         _set(0.0, "speech_input", "tell me a story"),
         _ev("input_written", 0.0, key="speech_input", version_id=1),
         _ev("trigger_observed", 0.01, key="speech_input", version_id=1),
-        _issued(3.0, "say", "c1", text="Once upon a time, a very long story."),
+        _said(3.0, "c1", text="Once upon a time, a very long story."),
         _ev(
             "reaction_ended",
             3.0,
-            reaction=_reaction(
-                1,
-                [_trigger("speech_input", 1)],
-                call_ids=("c1",),
-                first_output_at=_at(0.7),
-            ),
+            reaction=_reaction(1, [_trigger("speech_input", 1)], call_ids=("c1",)),
         ),
+        _ended(9.0, "c1", started=0.7),
     ]
     assert timeline[1].t == opened
     assert answer_latencies(timeline, CONTEXT) == pytest.approx([0.7])
+
+
+def test_answer_latency_reads_the_answering_outputs_own_start():
+    """Whatever else the reaction issued, and in whatever order, the sample ends at the start of
+    the turn's first output — not at a tool call's."""
+    timeline = [
+        _set(0.0, "speech_input", "dance and tell me"),
+        _ev("input_written", 0.0, key="speech_input", version_id=1),
+        _ev("trigger_observed", 0.01, key="speech_input", version_id=1),
+        _issued(1.0, "dance", "d1"),
+        _said(3.0, "c1", text="Dancing now!"),
+        _ev(
+            "reaction_ended",
+            3.0,
+            reaction=_reaction(1, [_trigger("speech_input", 1)], call_ids=("c1", "d1")),
+        ),
+        _ended(5.0, "d1", started=0.2, output=False),
+        _ended(5.0, "c1", started=0.4),
+    ]
+    assert answer_latencies(timeline, CONTEXT) == pytest.approx([0.4])
 
 
 def test_an_unanswered_turn_gives_no_answer_latency():

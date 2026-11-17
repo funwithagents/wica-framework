@@ -15,7 +15,7 @@ From `wica`:
 | `TextPart`, `ImagePart`, `Content`, `ContentPart` | Provider-neutral multimodal content: `Content` is a `list` of parts, what a `serialize_fn` returns |
 | `Command` | A Command definition over a callable or an off-the-shelf LangChain tool, for a name or description override, `triggers_on_completion`, or tool wrapping |
 | `OutputStream` | What an output Command receives when its first parameter is annotated with it: the text of one output as the model writes it ([The output Command](#the-output-command)) |
-| `CommandIssued`, `CommandExecution` | The payload of `on_agent_command` (`name`, `args`, `call_id`); the value of an `agent:command:<call_id>` entry (`name`, `args`, `state`, `result`, `error`) |
+| `CommandIssued`, `CommandExecution` | The payload of `on_agent_command_started` and `on_agent_command` (`name`, `args`, `call_id`, `is_output`); the value of an `agent:command:<call_id>` entry (`name`, `args`, `state`, `result`, `error`) |
 | `Event` | The pub/sub primitive the Events are: `subscribe(handler)`, `unsubscribe(handler)` |
 | `WicaConfig`, `AgentConfig` | The configuration ([configuration.md](configuration.md)) |
 | `ReactionTrace`, `TriggerTrace`, `CommandTrace`, `TokenUsage` | The instrumentation records ([../guides/latency-and-traces.md](../guides/latency-and-traces.md)) |
@@ -43,7 +43,7 @@ wica.close()                                      # terminal: releases an owned 
 wica.is_running                                   # True between start() and stop()
 wica.remove_response_guard(name)                  # drop a default response guard (below)
 wica.response_guards                              # name -> guard, in the order they run
-wica.on_<event>.subscribe(handler)                # the nine Events (below)
+wica.on_<event>.subscribe(handler)                # the ten Events (below)
 ```
 
 - **`register_command(fn)`**: a sync or async function (its name and docstring become the tool's name and description), or a `Command`. Names are unique and `noop`, `next` and `cancel_command` are reserved: a duplicate or reserved name raises `ValueError`. Register before `start()`. [../guides/commands.md](../guides/commands.md).
@@ -99,7 +99,6 @@ async def say(text: OutputStream, emotion: Literal["happy", "sad", "neutral"] = 
 def say(text: str, emotion: str = "neutral") -> str | None        # sync or async
 
 wica.agent.output_command_name        # its name, None when none is set
-wica.agent.output_wakes(call_id)      # whether that output's end wakes a step; None when the call is not an output
 ```
 
 The output Command is the application's one output channel. The model issues it by writing a tag in its response text, named after the Command: `<say emotion="happy">Hello there!</say>`. Only the tag's body is delivered; text outside a tag is private ([Events](#events), `on_agent_private_text`). The task-oriented page is [../guides/commands.md](../guides/commands.md#make-your-agent-speak).
@@ -137,10 +136,10 @@ The parsing is lenient: a response with text and no output tag is delivered whol
 **Each output is a Command execution.** It gets an `agent:command:<call_id>` entry whose `CommandExecution` has the output Command's `name` and, as `args`, the attributes plus `text`. It differs from a Command issued as a tool call in these ways:
 
 - **It is not a tool.** It is not bound to the model and is not in `wica.agent.commands`.
-- **It starts before the response is complete.** The entry reads `running` from the output's first words; `on_agent_command` fires once the body is complete, with the whole `text`.
+- **It starts before the response is complete.** `on_agent_command_started` fires at the output's first words, and the entry reads `running` from then; `on_agent_command` fires once the body is complete, with the whole `text`. Both carry `is_output=True`.
 - **Several tags are several outputs**, delivered one after the other in the order written.
 - **One voice.** A response that starts an output cancels every output still running or waiting from an earlier response. Other Commands are left alone. `cancel_command` cancels an output like any Command.
-- **Its end wakes a step only through a `<next>` note.** A cancelled output wakes nothing.
+- **Its end wakes a step only through a `<next>` note.** A cancelled output wakes nothing. The record of its end says which it was: `CommandTrace.triggers_step`.
 - **A cancelled output corrects the history.** Its body is cut to `stream.heard` when the function set it, and an output of the same response that never started is removed.
 
 [specs/agent.md](../../specs/agent.md), "Output: tags in the model's text"; [specs/commands.md](../../specs/commands.md), "The output Command".
@@ -180,10 +179,11 @@ Each is an `Event[T]` you `.subscribe(handler)` on, multi-consumer, emitted on t
 | `wica.on_agent_trigger_dropped` | `WorldEntry` | A trigger that arrived while a step was in flight and was dropped |
 | `wica.on_agent_prompt` | `list[BaseMessage]` | The exact rendered messages, before each reaction's first model call |
 | `wica.on_agent_response_rejected` | `ResponseRejection` | A response the [response guards](#response-guards) rejected: `attempt`, `response`, `feedback`, `show_response`, `will_retry` |
-| `wica.on_agent_command` | `CommandIssued` | Each Command the model issues, at dispatch; the `agent:command:<call_id>` entry exists when it fires. An output is reported the same way, once per tag, when its body is complete: `args` holds its attributes and its whole `text`. A `<noop/>` response fires nothing |
-| `wica.on_agent_command_ended` | `CommandTrace` | A Command's terminal state (`complete`, `failed`, `cancelled`), with its timing |
+| `wica.on_agent_command_started` | `CommandIssued` | Each Command when its execution starts: the `agent:command:<call_id>` entry exists and its `running` value is not yet written, so a listener added then follows the whole run. A tool call starts at dispatch, just before `on_agent_command`, with the same arguments. An output starts at its first words, with `is_output=True`, its attributes and an empty `text`. For every `call_id`: started, then `on_agent_command`, then `on_agent_command_ended` |
+| `wica.on_agent_command` | `CommandIssued` | Each Command the model issues, once its arguments are complete: a tool call at dispatch, an output once per tag when its body is complete, with `is_output=True` and its whole `text`. A `<noop/>` response fires nothing |
+| `wica.on_agent_command_ended` | `CommandTrace` | A Command's terminal state (`complete`, `failed`, `cancelled`), an output's included, with its timing, `is_output`, and `triggers_step`: whether that end wakes a step (a tool call's `triggers_on_completion`, an output's granted `<next>` note; never a cancelled output) |
 | `wica.on_agent_private_text` | `str` | The text the model wrote outside its output tags in a step, when there is any, once the response is complete. Nobody hears it. With no output Command, all the model's text. The `<noop/>` and `<next>` tags are not part of it |
-| `wica.on_agent_reaction_ended` | `ReactionTrace` | Every reaction's record, at its end: the triggers, the phase stamps, the outcome, the Commands, the token usage |
+| `wica.on_agent_reaction_ended` | `ReactionTrace` | Every reaction's record, at its end: the triggers, the phase stamps, the outcome, the Commands issued, outputs included (`command_call_ids`), whether it declined (`noop`), the token usage |
 
 [../guides/latency-and-traces.md](../guides/latency-and-traces.md); [specs/instrumentation.md](../../specs/instrumentation.md).
 

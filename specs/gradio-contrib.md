@@ -126,7 +126,9 @@ Returning `None` falls back to the **generic default**: `⚡ key = value` for an
 for a Command execution (an entry whose value is a `CommandExecution`) `🦾 name` as label with
 `name(args)` as detail, or `🗣️ name` when the Command is the `Wica`'s configured output Command
 (read **live** from `wica.agent.output_command_name`, so it is right whether the presenter or
-`set_output_command` came first). An output is such an execution, one per tag the model wrote,
+`set_output_command` came first). A World entry carries no `is_output`, so this rendering of an
+entry alone goes by the name; what the transcript decides from its Events (which item is an
+output) reads `CommandIssued.is_output` instead. An output is such an execution, one per tag the model wrote,
 its `text` among the args ([agent.md](agent.md), "Output: tags in the model's text"). Because a
 Command's execution *is* a World entry, the same hook
 customizes both sides of the transcript — the demo's hook turns `speech_input` into `🗣️ "hello"`
@@ -240,8 +242,8 @@ it used to carry (now `ReactionLog`):
 ```python
 class TranscriptLog:
     def __init__(self, wica: Wica | None, display_entry: DisplayEntry | None = None) -> None: ...
-    # subscribes on_agent_trigger, on_agent_prompt, on_agent_command, on_agent_private_text,
-    # on_agent_reaction_ended
+    # subscribes on_agent_trigger, on_agent_prompt, on_agent_command_started, on_agent_command,
+    # on_agent_private_text, on_agent_reaction_ended
     def snapshot(self) -> TranscriptSnapshot: ...            # conversation (Gradio "messages" format) + change signature
 
 def conversation_panel(log: TranscriptLog, *, refresh_s: float = 0.2, height: int = 420) -> gr.Chatbot: ...
@@ -258,21 +260,27 @@ What it renders, from the framework's uniform signals only:
   `on_agent_reaction_ended`, losing the spinner and gaining a `duration` — the reaction's
   `busy_time`, the same `metadata.duration` its Command items already use — matched by
   `reaction_id`, which counts reactions exactly as `on_agent_prompt` does), and its items nest
-  under it in the order their Events arrive — the step's outputs first (each is reported during
-  the model call, when its text is complete), then its private text, then the Commands it issued
-  as tool calls — which is not always the order the model wrote them in:
-  - **every Command and output the model issued** (`on_agent_command`), titled through the hook
-    (`🗣️` for an output, `🦾` otherwise), **with its execution state live**: the item is created
-    when the Event fires, marked *pending* (a spinner), and the log listens to the
+  under it in the order their Events arrive — the step's outputs first (each opens during the
+  model call, at its first words), then its private text, then the Commands it issued as tool
+  calls — which is not always the order the model wrote them in:
+  - **every Command and output the model issued**, titled `🗣️` for an output and `🦾` otherwise
+    — told apart by the Event's `CommandIssued.is_output`, never by the Command's name — and
+    re-rendered through the hook on each state, **with its execution state live**. A Command
+    gets its item on `on_agent_command_started`, when it starts — a tool call at dispatch, an
+    output at its first words — and its later `on_agent_command` report (its arguments complete)
+    adds nothing; a log that missed the start creates the item then. The item is
+    marked *pending* (a spinner), and the log listens to the
     Command's `agent:command:<call_id>` World entry — the seam `CommandIssued.call_id` exists for
     ([agent.md](agent.md), "Instrumentation") — to edit the item in place as it goes running →
     **✅ complete** (with its result) / **❌ failed** (with the error) / **⏹ cancelled**, plus how
     long it ran. A finished item **stays open**: its `status` is removed rather than set to
     `done`, because Gradio auto-collapses a `done` item and the reader could no longer see what
     was said. The listener is async so terminal states are delivered in version order after
-    `running`. An output is reported once its text is complete and is by then already `running`,
-    so on attaching the listener the log also reads the entry's current state and takes the
-    item's start from that version's timestamp; one item per output tag, with its whole text.
+    `running`. Both Events fire once the entry is registered and before its `running` value is
+    written ([agent.md](agent.md), "Instrumentation"), so the listener sees an output's whole
+    life — running with no text yet, running with its whole text, then its outcome — and the log
+    never reads an entry's earlier version; one item per output tag, with its whole text once
+    the tag closes.
   - **💭 private text** — what the model wrote outside its output tags in the step
     (`on_agent_private_text`, which fires only for non-empty text). With no output Command set
     this is all of the model's text.
@@ -330,7 +338,8 @@ the package layout — [testing.md](testing.md)). They import the contrib (hence
 - **`TranscriptLog`** driven the way the Agent drives it: `on_trigger`/`on_prompt`/`on_command`
   calls and an `on_command_update` sequence, asserting the transcript items, reaction nesting,
   the pending → terminal edits (state suffix, result/error, duration, `status` removed), an
-  output's item created from an entry already `running`, the `noop` item from a reaction record,
+  output followed from `on_command_started` with no second item on its `on_command`, the `🗣️`
+  read from `is_output`, the `noop` item from a reaction record,
   the private-text item, and that the change signature moves on an in-place edit and is stable
   otherwise. Where a log needs a `Wica` (live output Command name, per-Command World listeners),
   the tests build an **unstarted** one over the key-less `provider: "fake"` model, as today.

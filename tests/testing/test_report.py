@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -75,7 +76,7 @@ def test_compute_metrics_from_a_hand_built_timeline():
         SutEvent(kind="prompt", t=t0 + 1.6, message_count=3),
         SutEvent(kind="trigger_dropped", t=t0 + 1.7, key="prompt", version_id=3),
     ]
-    metrics, dropped = compute_metrics(timeline, output_command_name=None)
+    metrics, dropped = compute_metrics(timeline)
     # The reaction opened an output: its latency ends at the first words, not at its own end.
     assert round(metrics["reaction_latency"].min, 6) == 0.9
     assert round(metrics["time_to_first_output"].min, 6) == 0.55
@@ -92,7 +93,14 @@ def test_compute_metrics_from_a_hand_built_timeline():
 
 
 def _say(t: float, call_id: str, state: str) -> SutEvent:
-    return SutEvent(kind="command_state", t=t, name="say", call_id=call_id, state=state)
+    return SutEvent(
+        kind="command_state",
+        t=t,
+        name="say",
+        call_id=call_id,
+        state=state,
+        is_output=True,
+    )
 
 
 def test_barge_in_runs_from_the_input_over_an_output_to_that_output_cancelled():
@@ -102,12 +110,13 @@ def test_barge_in_runs_from_the_input_over_an_output_to_that_output_cancelled():
         SutEvent(kind="command_issued", t=1.4, name="cancel_command", call_id="x"),
         _say(1.5, "s1", "cancelled"),
     ]
-    metrics, _ = compute_metrics(cancelled_by_command, output_command_name="say")
+    metrics, _ = compute_metrics(cancelled_by_command)
     assert round(metrics["barge_in"].min, 6) == 0.5 and metrics["barge_in"].count == 1
-    assert (
-        "barge_in"
-        not in compute_metrics(cancelled_by_command, output_command_name=None)[0]
-    )
+    # The output is the call the framework reports as one, not a Command named like it.
+    not_an_output = [
+        dataclasses.replace(e, is_output=False) for e in cancelled_by_command
+    ]
+    assert "barge_in" not in compute_metrics(not_an_output)[0]
     # A new utterance cutting the output off counts the same, with no cancel_command at all;
     # the sample starts at the first input written over the output.
     cut_off = [
@@ -118,7 +127,7 @@ def test_barge_in_runs_from_the_input_over_an_output_to_that_output_cancelled():
         _say(1.35, "s2", "running"),
         _say(2.0, "s2", "complete"),
     ]
-    metrics, _ = compute_metrics(cut_off, output_command_name="say")
+    metrics, _ = compute_metrics(cut_off)
     assert round(metrics["barge_in"].min, 6) == 0.3 and metrics["barge_in"].count == 1
 
 
@@ -128,13 +137,13 @@ def test_barge_in_has_no_sample_when_the_output_was_not_talked_over_or_not_cut()
         SutEvent(kind="input_written", t=1.0, key="speech", version_id=2),
         _say(1.5, "s1", "complete"),
     ]
-    assert "barge_in" not in compute_metrics(finished, output_command_name="say")[0]
+    assert "barge_in" not in compute_metrics(finished)[0]
     unprompted = [  # cancelled with no input written while it ran
         SutEvent(kind="input_written", t=0.0, key="speech", version_id=1),
         _say(0.5, "s1", "running"),
         _say(1.5, "s1", "cancelled"),
     ]
-    assert "barge_in" not in compute_metrics(unprompted, output_command_name="say")[0]
+    assert "barge_in" not in compute_metrics(unprompted)[0]
     another = [  # a Command that is not the output Command
         SutEvent(
             kind="command_state", t=0.0, name="dance", call_id="d1", state="running"
@@ -144,7 +153,7 @@ def test_barge_in_has_no_sample_when_the_output_was_not_talked_over_or_not_cut()
             kind="command_state", t=1.5, name="dance", call_id="d1", state="cancelled"
         ),
     ]
-    assert "barge_in" not in compute_metrics(another, output_command_name="say")[0]
+    assert "barge_in" not in compute_metrics(another)[0]
 
 
 def test_report_roundtrips_to_json_and_renders_markdown(tmp_path: Path):
@@ -156,7 +165,7 @@ def test_report_roundtrips_to_json_and_renders_markdown(tmp_path: Path):
             kind="command_issued", t=10.5, name="add", call_id="c1", args={"a": 2}
         ),
     ]
-    metrics, dropped = compute_metrics(timeline, output_command_name=None)
+    metrics, dropped = compute_metrics(timeline)
     report = Report(
         scenario="smoke",
         sut_label="fake",

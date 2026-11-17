@@ -116,7 +116,7 @@ def run_once(
         if report.outcome == "completed":
             context = check_context(run, scenario)
             run_measures = measures(report.timeline, context)
-            samples = metric_samples(report.timeline, output_command_name=output)
+            samples = metric_samples(report.timeline)
             samples["answer_latency"] = answer_latencies(report.timeline, context)
         base = Path(out_dir) / target.label / scenario.name
         report.write(

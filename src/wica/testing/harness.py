@@ -56,14 +56,14 @@ _COMMAND_KEY_PREFIX = "agent:command:"
 
 def _busy_reasons(
     timeline: list[SutEvent],
-    wakes: Callable[[str, str], bool],
     triggers: Callable[[str], bool],
     *,
     running: bool = True,
 ) -> list[str]:
     """Why the SUT is not idle yet, as short reasons; empty when it is. See `wait_for`. With
     *running* false a Command or an output still running is not a reason: the `"ready"`
-    condition. *wakes(call_id, name)* says whether that call's completion wakes a step."""
+    condition. Whether a finished call's end triggers a step is read from its `command_ended`
+    record (`CommandTrace.triggers_step`), never decided here."""
     arrived = {
         (e.key, e.version_id)
         for e in timeline
@@ -96,26 +96,27 @@ def _busy_reasons(
         for e in timeline
         if e.kind == "command_issued" and e.name and e.call_id
     }
-    terminal_at = {
-        e.call_id: e.t
+    terminal = {
+        e.call_id
         for e in timeline
         if e.kind == "command_state" and e.state in _TERMINAL and e.call_id
     }
+    ended = {e.command.call_id: e.command for e in timeline if e.command is not None}
     if running:
-        reasons += [
-            f"{issued[c]} ({c}) running" for c in issued if c not in terminal_at
-        ]
-    for call_id, t in terminal_at.items():
-        name = issued.get(call_id)
-        if name is None or not wakes(call_id, name):
+        reasons += [f"{issued[c]} ({c}) running" for c in issued if c not in terminal]
+    for call_id in terminal:
+        trace = ended.get(call_id)
+        name = issued.get(call_id) or (trace.name if trace is not None else "?")
+        if trace is None:
+            # The framework records a call's end as its terminal state is written; until that
+            # record arrives, whether the end wakes a step is unknown.
+            reasons.append(f"{name} ({call_id}) ended, its end not yet recorded")
             continue
+        if not trace.triggers_step:
+            continue
+        # A Command entry triggers once, at its terminal write: any trigger on its key is it.
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
-        if not any(
-            e.kind in ("trigger_observed", "trigger_dropped")
-            and e.key == key
-            and e.t >= t
-            for e in timeline
-        ):
+        if not any(k == key for k, _ in arrived):
             reasons.append(f"{name} ({call_id}) completed, its step not yet woken")
     return reasons
 
@@ -157,8 +158,6 @@ class TestRun:
         self._cond = threading.Condition()
         self._timeline: list[SutEvent] = []
         self._watermark = 0
-        # Outputs that reached a terminal state → whether their end wakes a step (see _record).
-        self._output_wakes: dict[str, bool] = {}
         self._findings: list[Finding] = []
         self._issues: list[Issue] = []
         self._notes: list[str] = []
@@ -175,22 +174,7 @@ class TestRun:
     # --- the timeline ----------------------------------------------------------------------------
 
     def _record(self, event: SutEvent) -> None:
-        wakes: bool | None = None
-        if (
-            event.kind == "command_state"
-            and event.state in _TERMINAL
-            and event.call_id is not None
-        ):
-            # An output's end wakes a step only when its response asked for one (a `<next>` note,
-            # under `max_next_steps`) — a per-response decision no Event carries, so the Agent is
-            # asked as the terminal state arrives. None: the call is not an output, and the
-            # Command's own `triggers_on_completion` decides. A cancelled output wakes nothing.
-            granted = self._sut.agent.output_wakes(event.call_id)
-            if granted is not None:
-                wakes = granted and event.state != "cancelled"
         with self._cond:
-            if wakes is not None and event.call_id is not None:
-                self._output_wakes[event.call_id] = wakes
             self._timeline.append(event)
             self._cond.notify_all()
 
@@ -321,7 +305,7 @@ class TestRun:
             return self._finding(label, False, "the SUT has no output Command")
 
         def matches(event: SutEvent) -> bool:
-            if event.kind != "command_issued" or event.name != name:
+            if event.kind != "command_issued" or not event.is_output:
                 return False
             if contains is None:
                 return True
@@ -382,11 +366,11 @@ class TestRun:
 
         - `"idle"` — the SUT has finished reacting: every write to a triggering Input seen (or
           dropped) by the Agent, every observed trigger consumed by a reaction that ended, every
-          issued Command and output terminal, and every completion that wakes a step has had
-          that trigger arrive (so the step it wakes is not missed in the gap). A Command's
-          completion wakes a step when it was registered with `triggers_on_completion`; an
-          output's only when it was granted a wake (`agent.output_wakes`) and was not cancelled
-          — so after a plain spoken reply, idle holds as soon as the speech is over.
+          issued Command and output terminal, and every end that triggers a step has had that
+          trigger arrive (so the step it wakes is not missed in the gap). Which ends trigger a
+          step is the framework's own record: `CommandTrace.triggers_step`, on the
+          `command_ended` event — so after a plain spoken reply, idle holds as soon as the
+          speech is over.
         - `"ready"` — the Agent can take an input now: `"idle"` without waiting for running
           Commands. An input written then is not dropped as busy, even over a dance or a speech.
         - `"speaking"` — an output has been reported since the last input: its text is complete
@@ -419,35 +403,27 @@ class TestRun:
         if condition in ("idle", "ready"):
             return _busy_reasons(
                 self._timeline,
-                self._wakes,
                 self._triggers_input,
                 running=condition == "idle",
             )
+        since = _last_input_index(self._timeline)
         if condition == "speaking":
             name = self.probe.output_command
             if name is None:
                 return ["the SUT has no output Command"]
+            started = any(
+                e.kind == "command_issued" and e.is_output
+                for e in self._timeline[since:]
+            )
         elif isinstance(condition, dict) and isinstance(condition.get("running"), str):
             name = condition["running"]
+            started = any(
+                e.kind == "command_issued" and e.name == name
+                for e in self._timeline[since:]
+            )
         else:
             return [f"unknown condition {condition!r}"]
-        since = _last_input_index(self._timeline)
-        started = any(
-            e.kind == "command_issued" and e.name == name
-            for e in self._timeline[since:]
-        )
         return [] if started else [f"{name} has not started since the last input"]
-
-    def _wakes(self, call_id: str, name: str) -> bool:
-        """Whether the completion of the call *call_id* (of *name*) wakes a step. An output: what
-        the Agent answered when its terminal state arrived. A Command issued as a tool call: its
-        `triggers_on_completion` (the Agent's rule for an unknown name is True). Called under the
-        lock."""
-        granted = self._output_wakes.get(call_id)
-        if granted is not None:
-            return granted
-        command = self._sut.agent.commands.get(name)
-        return command.triggers_on_completion if command is not None else True
 
     def _triggers_input(self, key: str) -> bool:
         """Whether a write to *key* always produces a trigger: registered triggering, with no
@@ -529,9 +505,7 @@ class TestRun:
     # --- results ---------------------------------------------------------------------------------
 
     def metrics(self) -> tuple[dict[str, MetricSummary], int]:
-        return compute_metrics(
-            self.timeline(), output_command_name=self.probe.output_command
-        )
+        return compute_metrics(self.timeline())
 
     def findings(self) -> list[Finding]:
         with self._cond:

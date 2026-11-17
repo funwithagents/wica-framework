@@ -110,10 +110,11 @@ class CommandIssued:
     # suffix and the cancel_command target. For a dispatched Command the Event carrying this
     # payload fires once that entry is registered (before its running value is written), so a
     # subscriber can add_listener on it right away. An output is reported once its body is
-    # complete, when its entry is already running.
+    # complete, when its entry is already running (its start is on_command_started).
     name: str
     args: dict[str, Any]
     call_id: str
+    is_output: bool = False
 
 
 # History records — Observation captures the full include_in_prompt bundle at trigger
@@ -884,11 +885,10 @@ class Agent:
         self._next_note: str | None = None
         self._next_note_reaction = 0
         # Outputs (see specs/agent.md, "Output: tags in the model's text"), by entry key: whether
-        # the end of a registered one wakes a step; the same for every output ever opened (what
-        # output_wakes reports); the response each running one belongs to; and the running or
-        # waiting ones — one voice, so a later response that speaks cancels them.
+        # the end of each one still registered wakes a step (reported as CommandTrace's
+        # triggers_step); the response each running one belongs to; and the running or waiting
+        # ones — one voice, so a later response that speaks cancels them.
         self._output_wake: dict[str, bool] = {}
-        self._output_calls: dict[str, bool] = {}
         self._output_sessions: dict[str, _OutputSession] = {}
         self._live_outputs: dict[str, asyncio.Task[None]] = {}
         # Set while no reaction runs: an output that ends before the step that issued it waits
@@ -968,6 +968,7 @@ class Agent:
         self.on_prompt: Event[list[BaseMessage]] = Event()
         self.on_response_rejected: Event[ResponseRejection] = Event()
         self.on_command: Event[CommandIssued] = Event()
+        self.on_command_started: Event[CommandIssued] = Event()
         self.on_private_text: Event[str] = Event()
         self.on_reaction_ended: Event[ReactionTrace] = Event()
         self.on_trigger_dropped: Event[WorldEntry] = Event()
@@ -1472,7 +1473,7 @@ class Agent:
             )
         for triggered in batch:
             self.on_trigger.emit(triggered)
-        if any(entry.key not in self._output_calls for entry in batch):
+        if any(entry.key not in self._output_wake for entry in batch):
             self._next_chain = (
                 0  # something other than the Agent's own output woke this step
             )
@@ -1576,7 +1577,7 @@ class Agent:
         builder.outcome = "ok" if said_or_did else "empty"
         # Doing nothing: a <noop/>, or no text at all, and no tool call. See specs/agent.md
         # ("The agent may choose not to act").
-        builder.noop = parsed.noop and not parsed.private and not response.tool_calls
+        builder.noop = parsed.noop and not response.tool_calls
         if parsed.private:
             self.on_private_text.emit(parsed.private)
 
@@ -1719,13 +1720,6 @@ class Agent:
     # -- The model's text: outputs, the note, doing nothing -------------------------------------
     # See specs/agent.md ("Output: tags in the model's text", "Continuing after an output").
 
-    def output_wakes(self, call_id: str) -> bool | None:
-        """Whether the end of this output wakes a step; None for a call that is not an output,
-        or an output whose entry the next step has already observed and removed. A harness
-        waiting for the Agent to settle reads it as the output's terminal state arrives: an
-        output's completion is followed by a step only when it was granted one."""
-        return self._output_calls.get(f"{_COMMAND_KEY_PREFIX}{call_id}")
-
     def _new_output_session(self, builder: _ReactionBuilder) -> _OutputSession:
         """The parser for one attempt's text, over the output Command the step started with."""
         command = self._output_command
@@ -1785,7 +1779,6 @@ class Agent:
                 self._output_wake[old_key] = (
                     False  # cut off, not finished: wakes nothing
                 )
-                self._output_calls[old_key] = False
                 old_task.cancel()
         call_id = self._mint_call_id()
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
@@ -1793,7 +1786,6 @@ class Agent:
         session.parts.append(part)
         self._command_keys.add(key)
         self._output_wake[key] = False
-        self._output_calls[key] = False
         self._output_sessions[key] = session
         self._world.register(
             key,
@@ -1806,6 +1798,11 @@ class Agent:
                 and new.is_terminal()
                 and self._output_wake.get(key, False)
             ),
+        )
+        # Reported once the entry exists and before its first value lands — the contract on_command
+        # gives a tool call — so a subscriber can add_listener and follow the whole output.
+        self.on_command_started.emit(
+            CommandIssued(command.name, {**kept, "text": ""}, call_id, is_output=True)
         )
         self._world.update(
             key,
@@ -1856,7 +1853,9 @@ class Agent:
                     CommandExecution(name=command.name, args=args, state="running"),
                 )
             self.on_command.emit(
-                CommandIssued(command.name, copy.deepcopy(args), part.call_id)
+                CommandIssued(
+                    command.name, copy.deepcopy(args), part.call_id, is_output=True
+                )
             )
             builder.command_call_ids.append(part.call_id)
         if session.parts and notes and parsed.note is not None:
@@ -1874,7 +1873,6 @@ class Agent:
                 return
             self._next_chain += 1
             self._output_wake[last.key] = True
-            self._output_calls[last.key] = True
 
     def _set_next_note(self, note: str, reaction_id: int) -> None:
         self._next_note = note
@@ -1934,7 +1932,6 @@ class Agent:
                 # A cancelled output wakes nothing, note or not — whoever cancelled it (a new
                 # response, cancel_command, the application).
                 self._output_wake[key] = False
-                self._output_calls[key] = False
                 heard = stream.heard if part.started else ""
                 final = args()
                 if heard is not None:
@@ -2040,9 +2037,12 @@ class Agent:
             trigger_condition_fn=lambda old, new: new is not None and new.is_terminal(),
         )
         # Emit once the entry exists and before its first value lands, so a subscriber can
-        # add_listener(key) here and see running -> terminal. A subscriber may annotate or
-        # otherwise mutate what it receives without changing the arguments stored in history,
-        # shown in the World, or passed to the Command itself. See specs/agent.md.
+        # add_listener(key) here and see running -> terminal. A tool call's arguments arrive
+        # whole, so its start and its complete arguments are the same moment: started, then
+        # issued. A subscriber may annotate or otherwise mutate what it receives without
+        # changing the arguments stored in history, shown in the World, or passed to the Command
+        # itself. See specs/agent.md ("Instrumentation").
+        self.on_command_started.emit(CommandIssued(name, copy.deepcopy(args), call_id))
         self.on_command.emit(CommandIssued(name, copy.deepcopy(args), call_id))
         self._world.update(key, CommandExecution(name=name, args=args, state="running"))
         started_at = self._world.get_entry(key).current.timestamp
@@ -2166,6 +2166,16 @@ class Agent:
         except KeyError:
             return  # entry already gone (World stopped and the write was dropped)
         started_at, reaction_id = started
+        # Whether this terminal write triggers a step: an output's wake as decided (a cut-off
+        # output's was withdrawn), or the Command's registered triggers_llm_call.
+        is_output = key in self._output_wake
+        if is_output:
+            triggers_step = self._output_wake[key] and state != "cancelled"
+        else:
+            try:
+                triggers_step = self._world.get_config(key).triggers_llm_call
+            except KeyError:
+                triggers_step = False
         self.on_command_ended.emit(
             CommandTrace(
                 call_id=call_id,
@@ -2174,6 +2184,8 @@ class Agent:
                 started_at=started_at,
                 ended_at=ended_at,
                 state=state,
+                is_output=is_output,
+                triggers_step=triggers_step,
             )
         )
 
@@ -2291,12 +2303,11 @@ class Agent:
         )
 
     def _cleanup_command_entry(self, key: str) -> None:
-        # An output's records go with its entry: they are read only while the entry exists (its
-        # trigger, output_wakes as its terminal state arrives), so nothing grows with every
-        # utterance over a long-running Agent.
+        # An output's record goes with its entry: it is read only while the entry exists (its
+        # trigger, and CommandTrace's triggers_step when its terminal state lands), so nothing
+        # grows with every utterance over a long-running Agent.
         self._command_keys.discard(key)
         self._output_wake.pop(key, None)
-        self._output_calls.pop(key, None)
         try:
             self._world.unregister(key)
         except KeyError:

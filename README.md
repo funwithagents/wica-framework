@@ -43,7 +43,7 @@ The name is the model:
 | **Streamed, cancellable speech** | Set one output Command (your voice) and the model speaks by writing a tag named after it in its response text: `<say emotion="happy">Hello there!</say>`. The words reach your function as the model writes them, text outside the tag stays private, and each utterance is a tracked action: speaking again cuts off the speech still running, and the model decides per step whether to say anything, or to write `<noop/>` ([docs/guides/commands.md](docs/guides/commands.md#make-your-agent-speak)) |
 | **Provider-agnostic** | Anthropic, OpenAI, Gemini, Mistral or the Hugging Face Hub is a config edit; LangChain is used only at the model-facing edge, and nothing else touches a provider SDK. A built-in scripted `fake` provider drives the whole loop with no key and no network ([docs/reference/configuration.md](docs/reference/configuration.md#providers)) |
 | **Bounded history** | History is re-renderable World snapshots, unbounded by default; `history_reactions` keeps the last N reactions and `history_budget` keeps the prompt under a fraction of the model's context window, using the usage each call reports, with hysteretic cuts that keep the cached prefix stable |
-| **Observable** | Nine Events surface every trigger, dropped trigger, rendered prompt, rejected response, issued Command, Command end, private text and reaction record; OpenTelemetry spans join your own components' traces; three Gradio panels show the World, the prompts and the transcript live ([docs/guides/latency-and-traces.md](docs/guides/latency-and-traces.md), [docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)) |
+| **Observable** | Ten Events surface every trigger, dropped trigger, rendered prompt, rejected response, Command start, issued Command, Command end, private text and reaction record; OpenTelemetry spans join your own components' traces; three Gradio panels show the World, the prompts and the transcript live ([docs/guides/latency-and-traces.md](docs/guides/latency-and-traces.md), [docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)) |
 | **Testable, measurable, comparable** | The `fake` provider pins exact Commands and utterances in your tests; `wica.testing` probes a running agent, waits for what you expect and reports its latencies and costs; `wica.benchmark` runs scripted sessions across a matrix of models ([docs/guides/testing.md](docs/guides/testing.md), [docs/guides/benchmarking.md](docs/guides/benchmarking.md)) |
 
 ## Install
@@ -128,7 +128,7 @@ Start at [docs/index.md](docs/index.md), the documentation by task. The pages a 
 | | |
 |---|---|
 | [docs/getting-started.md](docs/getting-started.md) | Your first agent on the scripted provider, then on a real model; the lifecycle in a host of your own |
-| [docs/reference/api.md](docs/reference/api.md) | What you import, the `Wica` surface, the World API, `Command`, the output Command and `OutputStream`, the response guards, the nine Events, the errors, the contracts |
+| [docs/reference/api.md](docs/reference/api.md) | What you import, the `Wica` surface, the World API, `Command`, the output Command and `OutputStream`, the response guards, the ten Events, the errors, the contracts |
 | [docs/reference/configuration.md](docs/reference/configuration.md) | Every config field, the loaders, the API key and prompt rules, the history bounds, the providers |
 | [docs/guides/](docs/index.md#by-task) | The World and its Inputs, Commands, the Gradio panels, testing, latency and traces, benchmarking, limits, troubleshooting |
 

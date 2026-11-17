@@ -70,7 +70,7 @@ assert heard == ["I am in the kitchen."]
 
 ## The harness: `TestRun`
 
-`wica.testing.TestRun` connects to a running `Wica` through a **Probe** (a mirror of its Inputs and Commands over the eight Events) and records a **timeline**: every World write, trigger, prompt, Command issuance and state change (an output is one), private text and reaction record, stamped with the framework's own instrumentation. On it you call the shared expectation set from your test's thread, as blocking calls with a timeout:
+`wica.testing.TestRun` connects to a running `Wica` through a **Probe** (a mirror of its Inputs and Commands over the Events) and records a **timeline**: every World write, trigger, prompt, Command issuance and state change (an output is one, followed from its first words and marked `is_output`), private text and reaction record, stamped with the framework's own instrumentation. It reads what the framework reports and infers nothing: an output by `is_output`, whether a finished Command still wakes a step by `CommandTrace.triggers_step`, a decline by `ReactionTrace.noop` ([../reference/api.md](../reference/api.md#events)). On it you call the shared expectation set from your test's thread, as blocking calls with a timeout:
 
 ```python
 from wica.testing import TestRun
