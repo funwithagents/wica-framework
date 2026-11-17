@@ -132,7 +132,7 @@ class Robot:
         self.world = world
         self.notes: dict[str, str] = {}
 
-    async def say(self, text: OutputStream) -> str:
+    async def say(self, text: OutputStream) -> None:
         """Speak out loud — the only way people hear you."""
         # The voice starts at the first words and takes SAY_S_PER_WORD per word (capped), however
         # fast the model writes them. Cut off, it reports the words that were out by then, so
@@ -146,7 +146,6 @@ class Robot:
             out = int((time.monotonic() - started) / SAY_S_PER_WORD)
             text.heard = " ".join(text.text.split()[:out])
             raise
-        return "Said it."
 
     async def dance(self) -> str:
         """Perform a little dance; takes a few seconds."""

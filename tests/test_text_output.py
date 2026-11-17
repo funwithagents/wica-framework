@@ -553,7 +553,9 @@ def test_the_output_command_is_validated_when_set() -> None:
         wica.close()
 
 
-def test_an_output_entry_reads_as_speech_not_as_a_call(rig: Callable[..., Rig]) -> None:
+def test_an_output_entry_shows_its_tag_and_its_delivery_never_a_call(
+    rig: Callable[..., Rig],
+) -> None:
     r = rig(
         [
             {"text": '<say emotion="happy">Once upon a time.</say>'},
@@ -566,8 +568,10 @@ def test_an_output_entry_reads_as_speech_not_as_a_call(rig: Callable[..., Rig]) 
     r.delay = 0.0
     r.hear("stop", 2)
     running = r.observations()[1]
-    assert "Saying (emotion='happy') \"Once upon a time.\"… (still speaking" in running
+    assert (
+        '<say emotion="happy"> "Once upon a time." — still being delivered' in running
+    )
     assert "Calling say(" not in running
     r.hear("thanks", 3)
-    assert "Said (emotion='happy') \"Once \" → cut off there" in r.observations()[2]
-    assert 'Said "Okay." → finished: Said it.' in r.observations()[2]
+    assert '<say emotion="happy"> "Once " — cut off there' in r.observations()[2]
+    assert '<say> "Okay." — delivered: Said it.' in r.observations()[2]

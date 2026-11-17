@@ -123,11 +123,11 @@ def test_say_is_a_streaming_output_command_without_attributes(robot: Robot):
 
 
 def test_say_drives_the_speaking_slot_to_complete(robot: Robot):
-    async def run() -> str:
+    async def run() -> None:
         # Pieces cut mid-word, as a model's chunks are.
         return await robot.say(stream_of("hi th", "ere fri", "end"))
 
-    assert asyncio.run(run()) == "Said it."
+    assert asyncio.run(run()) is None
     speaking = robot.speaking.read()
     assert speaking is not None
     assert speaking.text == "hi there friend"
@@ -150,7 +150,7 @@ def test_say_starts_on_the_first_words_and_waits_for_the_rest(robot: Robot):
 
         stream.push("ee four")
         stream.close()
-        assert await task == "Said it."
+        assert await task is None
 
     asyncio.run(run())
     speaking = robot.speaking.read()
@@ -163,10 +163,10 @@ def test_say_with_no_words_leaves_the_panel_alone(robot: Robot):
     token = robot.speaking.start("before")
     robot.speaking.complete(token)
 
-    async def run() -> str:
+    async def run() -> None:
         return await robot.say(stream_of("  "))
 
-    assert asyncio.run(run()) == "Said it."
+    assert asyncio.run(run()) is None
     speaking = robot.speaking.read()
     assert speaking is not None and speaking.text == "before"
 

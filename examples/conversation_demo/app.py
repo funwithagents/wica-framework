@@ -182,7 +182,7 @@ class Robot:
         self.world = world
         self.speaking = speaking
 
-    async def say(self, text: OutputStream) -> str:
+    async def say(self, text: OutputStream) -> None:
         """Speak out loud to the person in front of you — this is the only way they hear you. Use it
         for anything you want to say; keep it to a sentence or two."""
         # The output Command: the model writes a <say> tag and its words arrive here as they are
@@ -230,7 +230,6 @@ class Robot:
             raise
         if token is not None:
             self.speaking.complete(token)
-        return "Said it."
 
     async def dance(self) -> str:
         """Perform a fun little dance. Takes about 10 seconds to complete."""

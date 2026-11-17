@@ -1288,7 +1288,7 @@ def test_system_prompt_without_an_output_command_is_the_persona_then_the_primer(
     )
     # No continuation clause without an output: there is no speech to continue after.
     assert "<next>" not in prompt
-    assert "end of your own speech" not in prompt
+    assert "end of the delivery" not in prompt
 
 
 def test_system_prompt_teaches_the_output_tag_its_attributes_and_the_note(
@@ -1307,12 +1307,12 @@ def test_system_prompt_teaches_the_output_tag_its_attributes_and_the_note(
     # The output clause: the tag, that it is not a tool, the Command's description, its
     # attributes with their allowed values, and an example carrying each default.
     assert "<say>Hello there!</say>" in prompt
-    assert "Only the text inside the tag is heard" in prompt
+    assert "Only the text inside the tag reaches the user" in prompt
     assert "say is not a tool" in prompt
     assert "What say does: Speak out loud." in prompt
     assert "emotion (one of: happy, sad); voice" in prompt
     assert '<say emotion="happy" voice="default">Hello there!</say>' in prompt
-    assert "Speaking again replaces what you were saying" in prompt
+    assert "A new say tag replaces the one still being delivered" in prompt
     assert "Nobody reads the text you write" not in prompt
     # The continuation clause, with its neutral example, comes last.
     assert "<next>look it up, then tell them what I found</next>" in prompt
@@ -1341,10 +1341,10 @@ def test_system_prompt_teaches_the_note_unless_it_is_turned_off(
     assert "<say>Hello there!</say>" in prompt
     assert "optional attributes" not in prompt  # the Command declares none
     assert ("<next>" in prompt) is taught
-    # Turned off, the model is still told its own speech ending does not call it again.
+    # Turned off, the model is still told the end of its output does not call it again.
     assert (
-        "The end of your own speech does not call you again; a command finishing does."
-        in prompt
+        "The end of the delivery of your own say tag does not call you again; a command "
+        "finishing does." in prompt
     ) is not taught
 
 
@@ -1408,7 +1408,7 @@ def test_an_output_is_a_command_execution_and_text_outside_its_tag_is_private(
     # The next step observes the finished output like any Command, then retires its entry.
     world.update("input", "again")
     wait_until(lambda: len(model.calls) == 2)
-    assert 'Said "hello" → finished: spoken.' in _rendered_user_text(model, 1)
+    assert '<speak> "hello" — delivered: spoken.' in _rendered_user_text(model, 1)
     wait_until(lambda: not world.is_registered(key))
 
     agent.stop()
@@ -2131,9 +2131,7 @@ def test_a_failing_output_command_ends_as_a_failed_entry_and_commands_still_disp
     assert [m.text for m in second if isinstance(m, AIMessage)] == [
         "<say>doing it</say>"
     ]
-    assert 'Tried to say "doing it" → failed: voice broke' in _rendered_user_text(
-        model, 1
-    )
+    assert '<say> "doing it" — failed: voice broke' in _rendered_user_text(model, 1)
 
     agent.stop()
 

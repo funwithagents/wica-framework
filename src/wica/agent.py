@@ -196,29 +196,27 @@ def _serialize_command_execution(
 def _serialize_output_execution(
     value: CommandExecution | None, previous: CommandExecution | None
 ) -> Content:
-    """An output's World entry: what is being said, in the words of speech, never as a call —
-    the model is told its output Command is not a tool. See specs/agent.md ("Output: tags in the
-    model's text")."""
+    """An output's World entry: the tag the model wrote and how far its delivery got — never a
+    call (the model is told its output Command is not a tool), and no verb: the output may be a
+    voice, a chat bubble or a screen, and its tag name says which. See specs/agent.md ("Output:
+    tags in the model's text")."""
     if value is None:
-        return [TextPart("(nothing said)")]
+        return [TextPart("(no output)")]
     text = str(value.args.get("text", ""))
-    attributes = {k: v for k, v in value.args.items() if k != "text"}
-    how = f" ({_format_args(attributes)})" if attributes else ""
-    words = f' "{text}"' if text else ""
+    attributes = "".join(f' {k}="{v}"' for k, v in value.args.items() if k != "text")
+    head = f"<{value.name}{attributes}>" + (f' "{text}"' if text else "")
     if value.state == "running":
-        body = f"Saying{how}{words}… (still speaking — not finished)"
+        body = f"{head} — still being delivered, not finished."
     elif value.state == "complete":
         # The output Command's own result, when it returned one ("Done." is the default).
         result = f": {value.result}" if value.result and value.result != "Done." else ""
-        body = f"Said{how}{words} → finished{result}."
+        body = f"{head} — delivered{result}."
     elif value.state == "failed":
-        body = f"Tried to say{how}{words} → failed: {value.error}"
+        body = f"{head} — failed: {value.error}"
+    elif text:
+        body = f"{head} — cut off there, the rest was not delivered."
     else:
-        body = (
-            f"Said{how}{words} → cut off there, the rest was not heard."
-            if text
-            else "Cut off before saying anything."
-        )
+        body = f"{head} — cut off before anything was delivered."
     return [TextPart(body)]
 
 
@@ -627,17 +625,17 @@ _HISTORY_WINDOW_PROMPT = (
 # and what makes that unlike a chat reply (it runs in the background; speaking again replaces
 # it). See specs/agent.md ("System prompt composition", "Output: tags in the model's text").
 _OUTPUT_PROMPT = (
-    "\n- To speak to the user, write your words inside a {name} tag in your response text, like "
-    "this:\n<{name}>Hello there!</{name}>\n"
-    "Only the text inside the tag is heard; any text outside it is private reasoning nobody "
-    "hears. {name} is not a tool: never call it as a tool, write the tag in your text."
+    "\n- To address the user, write inside a {name} tag in your response text, like this:\n"
+    "<{name}>Hello there!</{name}>\n"
+    "Only the text inside the tag reaches the user; any text outside it is private reasoning "
+    "nobody sees. {name} is not a tool: never call it as a tool, write the tag in your text."
     "{description}{attributes}"
-    " Speaking is not instant: your words are delivered in the background, like any command. "
-    "What you are saying appears in your World as a command entry (agent:command:<id>), running "
-    "until the words are out, then finished. You can be called again while you are still "
-    "speaking. Speaking again replaces what you were saying: the earlier speech is cut off. To "
-    f"stop your own speech without saying anything, call {_CANCEL_COMMAND_NAME} with that "
-    "entry's id, as for any other running command."
+    " Delivery is not instant: what you write in a {name} tag is delivered in the background, "
+    "like any command. It appears in your World as a command entry (agent:command:<id>), running "
+    "until it is fully delivered, then finished. You can be called again while it is still being "
+    "delivered. A new {name} tag replaces the one still being delivered: the earlier one is cut "
+    f"off. To stop it without writing a new one, call {_CANCEL_COMMAND_NAME} with that entry's "
+    "id, as for any other running command."
 )
 _OUTPUT_ATTRIBUTES_PROMPT = (
     " The {name} tag takes these optional attributes: {attributes}. Example:\n"
@@ -651,7 +649,7 @@ _NO_OUTPUT_PROMPT = (
 # ("The agent may choose not to act").
 _SILENCE_PROMPT = (
     "\n- You need not act on every observation. If one genuinely calls for nothing from you — "
-    f"passive background state, say — write <{NOOP_TAG}/> as your whole response to do nothing. "
+    f"passive background state, for example — write <{NOOP_TAG}/> as your whole response to do nothing. "
     f"{NOOP_TAG} is not a tool: write the tag in your text. But a request, a question, or "
     f"anything addressed to you should be answered; never use <{NOOP_TAG}/> to skip an expected "
     "response."
@@ -659,18 +657,20 @@ _SILENCE_PROMPT = (
 # The continuation clause (an output Command and max_next_steps other than 0). Its example is
 # deliberately neutral: one naming an application's action biases models toward that action.
 _NEXT_PROMPT = (
-    "\n- The end of your own speech does not call you again by itself; a command finishing does. "
-    "If something remains for you to do once you have finished speaking — an action that must "
-    "wait for the end of your words, or more to say afterwards — write it as a note in a "
-    "next tag, in the same response as your speech, like this:\n"
+    "\n- The end of the delivery of your own {name} tag does not call you again by itself; a "
+    "command finishing does. If something remains for you to do once it has been delivered — "
+    "an action that must wait until then, or more to add afterwards — write it as a note in a "
+    "next tag, in the same response, like this:\n"
     "<{name}>Give me a moment.</{name}>\n"
     "<next>look it up, then tell them what I found</next>\n"
-    "The note is private: nobody hears it. It appears in your World, and you are called again "
-    "when your speech ends so you can carry it out. Write a next note only when something "
-    "really remains to be done; with no note you are simply called at the next event."
+    "The note is private: nobody sees it. It appears in your World, and you are called again "
+    "once your {name} tag has been delivered, so you can carry it out. Write a next note only "
+    "when something really remains to be done; with no note you are simply called at the next "
+    "event."
 )
 _NO_NEXT_PROMPT = (
-    "\n- The end of your own speech does not call you again; a command finishing does."
+    "\n- The end of the delivery of your own {name} tag does not call you again; a command "
+    "finishing does."
 )
 
 
@@ -1079,7 +1079,7 @@ class Agent:
         )
         primer += _SILENCE_PROMPT
         if self._max_next_steps == 0:
-            primer += _NO_NEXT_PROMPT
+            primer += _NO_NEXT_PROMPT.format(name=name)
         else:
             primer += _NEXT_PROMPT.format(name=name)
         return self._persona + primer
