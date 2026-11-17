@@ -87,6 +87,9 @@ class ReactionTrace:
     # When the reaction's first output opened: its first words handed to the output Command. None
     # when it delivered nothing. See specs/agent.md ("Output: tags in the model's text").
     first_output_at: datetime | None = None
+    # Attempts rejected because their text was garbled, whether caught before anything was
+    # delivered or retracted after an output had started. See specs/agent.md ("Garbled text").
+    garbled_attempts: int = 0
 
     @property
     def coalescing_wait(self) -> float:

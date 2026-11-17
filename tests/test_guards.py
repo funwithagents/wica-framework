@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from langchain_core.tools import BaseTool
 
 from wica.command import Command
@@ -14,6 +15,8 @@ from wica.guards import (
     ProposedCommand,
     Retry,
     combine,
+    find_garbled,
+    garbled_text,
     invalid_args,
     incomplete_response,
     output_command_required,
@@ -203,13 +206,12 @@ def test_combine_keeps_a_single_rejection_as_is() -> None:
     assert combine([only]) == only
 
 
-def test_combine_lists_every_feedback_and_shows_if_any_asks() -> None:
+def test_combine_lists_every_feedback_and_hides_if_any_asks() -> None:
     combined = combine([Retry("a", show_response=False), Retry("b")])
     assert combined.feedback == "- a\n- b"
-    assert combined.show_response
-    assert not combine(
-        [Retry("a", show_response=False), Retry("b", show_response=False)]
-    ).show_response
+    # A guard that hides the response (garbage, a cut response) wins: shown back, a model repeats it.
+    assert not combined.show_response
+    assert combine([Retry("a"), Retry("b")]).show_response
 
 
 # --- output_command_required (tool mode only) ----------------------------------------------------
@@ -244,3 +246,101 @@ def test_output_command_required_accepts_any_call_and_leaves_a_cut_response_alon
     )
     assert cut is not None and "call `say` (or `noop`) right away" in cut.feedback
     assert incomplete_response(response(truncated=True, output_tokens=40)) is None
+
+
+# --- Garbled text (specs/agent.md "Garbled text") -------------------------------------------------
+
+# The output that started this: a model degenerating inside its <say> tag, then restarting.
+INCIDENT = (
+    "I'm                   …   ………… …  …… …  ………  … … ... ....……… ....… … … </… ………  ……\n\n"
+    "The response looks………\n\n…  </ </……\n…\nThe  … </……\n\nWe got …\n…\n**Unexpected  ...\n"
+    "...\nWe......\n\n</\nWe  …" + "\n" * 25 + "</\n…\n...\nWe\n…\n\n"
+    "<say>I can tell jokes, give the time, share a fun fact, play a short tune, or dance "
+    "again—just let me know what you'd like."
+)
+
+ORDINARY = {
+    "reply": "Hello! I'm Reachy. I can tell jokes, give the time, share a fun fact, or play a "
+    "short tune. What would you like?",
+    "french": "Bonjour ! Je peux raconter une blague, donner l'heure — ou danser ? Dis-moi ce "
+    "que tu préfères, je suis prêt.",
+    "japanese": "こんにちは!私はリーチーです。冗談を言ったり、時間を教えたり、豆知識を紹介したり、"
+    "短い曲を演奏したり、踊ったりできます。何をしましょうか?……ええと……",
+    "countdown": "Ten... nine... eight... seven... six... five... four... three... two... "
+    "one... zero! Lift-off!!!",
+    "hesitant": "Well... I... I don't know... maybe... we could... try again later? I'm... not "
+    "sure... sorry...",
+    "code": "def fib(n):\n    if n < 2:\n        return n\n    a, b = 0, 1\n    for _ in "
+    "range(n - 1):\n        a, b = b, a + b\n    return b\n",
+    "json": '{\n    "robot": {\n        "name": "Reachy",\n        "skills": [\n            '
+    '"joke",\n            "time"\n        ],\n        "battery": {\n            "level": '
+    "0.82\n        }\n    }\n}",
+    "table": "| Day | Min | Max |\n|-----|-----|-----|\n| Mon | 3   | 9   |\n| Tue | 4   | 11  "
+    "|\n| Wed | 2   | 8   |\n| Thu | 5   | 12  |",
+    "emoji": "😀🎉👍🤖✨🌞🍕🎸🚀🐱 🌈🍩🎯🧩🐢 🎵🦄🍉⚽🌻 🐙🎲🍪🛸🌵 🎹🐝🍓🏀🪁 🦊🍔🎨🚲🌙 "
+    "🐧🍋🎻⛵🌸 🧸🍿🎤🐳🌋",
+    "numbers": "Bus times: 7:05, 7:25, 7:45, 8:05, 8:25, 8:45, 9:05, 9:25, 9:45, 10:05, "
+    "10:25, 10:45, 11:05, 11:25.",
+    "song": "La la la, la la la, la la la la la. " * 12,
+}
+
+
+def test_the_incident_is_garbled_from_its_first_80_characters():
+    assert find_garbled(INCIDENT) == "mostly dots, ellipses and blank space"
+    assert find_garbled(INCIDENT[:90], tail_only=True) is not None
+
+
+@pytest.mark.parametrize("name", sorted(ORDINARY))
+def test_ordinary_text_of_any_kind_is_not_garbled(name):
+    """Code, tables, emoji, numbers, hesitations, other scripts, a song: none is garbled, even
+    cut at the output cap — except the song, which repeats itself (next test)."""
+    text = ORDINARY[name]
+    assert find_garbled(text) is None
+    if name != "song":
+        assert find_garbled(text, truncated=True) is None
+
+
+def test_a_loop_is_garbled_only_when_the_cap_cut_it():
+    """Repetition alone is a song the user asked for; repetition that ran into the output cap is
+    a loop."""
+    loop = "I can help with that. " * 30
+    assert find_garbled(loop) is None
+    assert find_garbled(loop, truncated=True) == "repeating itself until it was cut off"
+
+
+# A second reproduction: a whole <say> body, short, with no word in it.
+NO_WORDS = "……………… ... ... ...</...>"
+
+
+def test_a_complete_text_without_words_is_garbled_whatever_its_length():
+    """Under GARBLED_MIN_CHARS nothing is decided, except a whole text with no letter or digit
+    that is mostly filler. While the text is still being written (tail_only) it is not judged:
+    a reply may open with an ellipsis before its words arrive."""
+    assert find_garbled(NO_WORDS) == "no words, only dots and ellipses"
+    assert find_garbled("…") is not None
+    assert find_garbled(NO_WORDS, tail_only=True) is None
+    for text in ("Hmm...", "... well, I think so.", "?!", "😀🎉👍", "OK."):
+        assert find_garbled(text) is None
+
+
+def test_nothing_is_decided_under_the_minimum_length():
+    assert find_garbled("Hmm… … … … ……   ……") is None
+
+
+def test_garbage_after_a_clean_start_is_found_anywhere_but_the_tail_only_check_sees_the_end():
+    text = ORDINARY["reply"] + " " + "……  …  ……  " * 15 + ORDINARY["reply"] * 3
+    assert find_garbled(text) is not None
+    assert find_garbled(text, tail_only=True) is None
+
+
+def test_garbled_text_checks_each_output_and_the_private_text_as_a_reminder():
+    def response(**fields: Any) -> ModelResponse:
+        return ModelResponse(text="(the raw text)", commands=(), bound={}, **fields)
+
+    assert garbled_text(response(outputs=(ORDINARY["reply"],))) is None
+    retry = garbled_text(response(outputs=(ORDINARY["reply"], INCIDENT)))
+    assert retry is not None and retry.show_response is False
+    assert "garbled (mostly dots, ellipses and blank space)" in retry.feedback
+    assert garbled_text(response(private_text=INCIDENT)) is not None
+    # A response built by hand with only its text is checked on its text.
+    assert garbled_text(ModelResponse(text=INCIDENT, commands=(), bound={})) is not None

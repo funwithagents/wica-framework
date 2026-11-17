@@ -3,8 +3,9 @@ is retried within the same reaction, and only the accepted one enters history. S
 ("Response guards").
 
 The default guards (`incomplete_response`, `unknown_command`, `invalid_args`,
-`output_command_required` — the last active only when the output Command is a tool) are
-supported;
+`output_command_required` — active only when the output Command is a tool — and `garbled_text`)
+are supported, and so is `find_garbled`, the check `garbled_text` makes (the Agent also runs it on
+an output's text as it streams);
 writing an application guard — `Agent.add_response_guard` / `Wica.add_response_guard` and the types
 here — is **experimental**: the shape may change without a deprecation period.
 
@@ -14,6 +15,8 @@ way the command-definition surface speaks `Command` (see specs/commands.md).
 
 from __future__ import annotations
 
+import re
+import zlib
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -29,6 +32,8 @@ __all__ = [
     "ResponseRejection",
     "Retry",
     "combine",
+    "find_garbled",
+    "garbled_text",
     "incomplete_response",
     "invalid_args",
     "output_command_required",
@@ -62,8 +67,8 @@ class MalformedCommand:
 @dataclass(frozen=True)
 class ModelResponse:
     """What a guard sees: the response's text and tool calls, plus the binding they were made
-    against. Only a response that started no output is guarded (see specs/agent.md, "Response
-    guards")."""
+    against. A response whose output has started streaming is not guarded (see specs/agent.md,
+    "Response guards")."""
 
     text: str  # the text as the model wrote it, "" when none
     commands: tuple[ProposedCommand, ...]  # every well-formed tool call, in order
@@ -78,6 +83,11 @@ class ModelResponse:
     # The output Command's name when it is bound as a tool (tool mode), else None: the
     # response must then call a tool. See specs/agent.md ("The output Command as a tool call").
     output_command_name: str | None = None
+    # What the response would say and the rest of its text: the text of each output in order (an
+    # output tag's body, or in tool mode an output tool call's `text`), and the private text (outside
+    # the tags; all of the text in tool mode or when no output Command is set).
+    outputs: tuple[str, ...] = ()
+    private_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,6 +109,9 @@ class ResponseRejection:
     feedback: str  # the combined feedback of every guard that rejected it
     show_response: bool  # whether the retry shows the response (False for a reminder)
     will_retry: bool  # False when retries ran out and the reaction ends `rejected`
+    # True when an output of the rejected response had already started: it was cancelled, and the
+    # response removed from history (only a garbled one is; see specs/agent.md, "Garbled text").
+    output_started: bool = False
 
 
 # A guard is sync or async: an awaitable result is awaited (like a World listener's).
@@ -107,12 +120,13 @@ type ResponseGuard = Callable[[ModelResponse], Retry | None | Awaitable[Retry | 
 
 def combine(retries: Sequence[Retry]) -> Retry:
     """Several guards rejecting one attempt make one correction: one line of feedback each, shown
-    with the response if any of them asked for it."""
+    with the response only if every one of them asked for it — a guard that hides the response
+    (garbage, a cut response) does so whatever the others ask."""
     if len(retries) == 1:
         return retries[0]
     return Retry(
         feedback="\n".join(f"- {r.feedback}" for r in retries),
-        show_response=any(r.show_response for r in retries),
+        show_response=all(r.show_response for r in retries),
     )
 
 
@@ -239,12 +253,109 @@ def output_command_required(response: ModelResponse) -> Retry | None:
     )
 
 
+# --- Garbled text ------------------------------------------------------------------------------
+#
+# A model sometimes degenerates: it writes dots, ellipses and blank space instead of words, or loops
+# on one phrase until its output cap. The check is cheap, model-free and language-agnostic, and safe
+# for any output (code, JSON, a table, emoji, a song the user asked for). See specs/agent.md
+# ("Garbled text").
+
+# A text is judged only once it holds this many characters: below it, nothing is decided. While a
+# response streams, an output is held back until its text reaches it (or ends).
+GARBLED_MIN_CHARS = 80
+# The filler share is measured over the last this-many characters, so garbage after a clean start
+# is still caught.
+GARBLED_WINDOW_CHARS = 200
+# Garbled when filler is more than this share of the window.
+GARBLED_MAX_FILLER = 0.5
+# A response cut at its output cap whose last this-many characters compress below the ratio is a
+# loop.
+GARBLED_LOOP_CHARS = 400
+GARBLED_MIN_COMPRESSION = 0.2
+
+# Filler: ellipses, runs of dots and `</` that starts no tag (a run of them counts whole, the space
+# between them included), gaps of two or more spaces inside a line, and runs of blank lines.
+# Indentation is removed before measuring: it is structure.
+_FILLER_MARK = r"(?:…+|\.{2,}|</(?![A-Za-z/]))"
+_FILLER = re.compile(
+    rf"{_FILLER_MARK}(?:\s*{_FILLER_MARK})*|(?<=\S)[ \t]{{2,}}(?=\S)|\n{{3,}}"
+)
+_INDENTATION = re.compile(r"(?m)^[ \t]+")
+
+
+def _filler_share(text: str) -> float:
+    text = _INDENTATION.sub("", text)
+    length = len(text.strip())
+    if not length:
+        return 0.0
+    return sum(len(m) for m in _FILLER.findall(text)) / length
+
+
+def find_garbled(
+    text: str, *, truncated: bool = False, tail_only: bool = False
+) -> str | None:
+    """Why `text` is garbled, or None. Three signs: filler (ellipses, runs of dots, gaps inside a
+    line, blank lines) making up most of any `GARBLED_WINDOW_CHARS` characters of it, once it holds
+    `GARBLED_MIN_CHARS`; a complete text of any length with no letter or digit at all that is
+    mostly filler (`……… ... ...</...>`); and, for a response cut at its output cap (`truncated`),
+    an end that repeats itself — a text that repeats itself and ends on its own (a song) is not
+    garbled. `tail_only` is for a text still being written, checked again each time it grows: the
+    filler is measured over its last window only (the earlier ones were measured already), and a
+    text without words is not judged (its words may be still to come)."""
+    text = text.strip()
+    if (
+        not tail_only
+        and text
+        and not any(c.isalnum() for c in text)
+        and _filler_share(text) > GARBLED_MAX_FILLER
+    ):
+        return "no words, only dots and ellipses"
+    if len(text) < GARBLED_MIN_CHARS:
+        return None
+    ends = (
+        [len(text)]
+        if tail_only
+        else [*range(GARBLED_MIN_CHARS, len(text), GARBLED_MIN_CHARS // 2), len(text)]
+    )
+    for end in ends:
+        if (
+            _filler_share(text[max(0, end - GARBLED_WINDOW_CHARS) : end])
+            > GARBLED_MAX_FILLER
+        ):
+            return "mostly dots, ellipses and blank space"
+    if truncated:
+        tail = text[-GARBLED_LOOP_CHARS:].encode()
+        if len(zlib.compress(tail)) / len(tail) < GARBLED_MIN_COMPRESSION:
+            return "repeating itself until it was cut off"
+    return None
+
+
+GARBLED_FEEDBACK = (
+    "Your previous response was garbled ({reason}) and was discarded. Answer again, briefly, in "
+    "plain words."
+)
+
+
+def garbled_text(response: ModelResponse) -> Retry | None:
+    """A response whose text is garbled: an output's text or the private text (see
+    `find_garbled`). A reminder, never shown: shown its garbage, a model writes it again."""
+    texts = [*response.outputs, response.private_text]
+    if not response.outputs and not response.private_text:
+        texts = [response.text]  # a response built by hand, with only its text
+    for text in texts:
+        reason = find_garbled(text, truncated=response.truncated)
+        if reason is not None:
+            return Retry(GARBLED_FEEDBACK.format(reason=reason), show_response=False)
+    return None
+
+
 # Installed at Agent construction, in this order, before any application guard.
 DEFAULT_GUARDS: tuple[tuple[str, ResponseGuard], ...] = (
     ("incomplete_response", incomplete_response),
     ("unknown_command", unknown_command),
     ("invalid_args", invalid_args),
     ("output_command_required", output_command_required),
+    ("garbled_text", garbled_text),
 )
 
 # --- The correction frames ---------------------------------------------------------------------

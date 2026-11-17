@@ -139,7 +139,8 @@ The parsing is lenient: a response with text and no output tag is delivered whol
 - **It is not a tool.** It is not bound to the model and is not in `wica.agent.commands`.
 - **It starts before the response is complete.** `on_agent_command_started` fires at the output's first words, and the entry reads `running` from then; `on_agent_command` fires once the body is complete, with the whole `text`. Both carry `is_output=True`.
 - **Several tags are several outputs**, delivered one after the other in the order written.
-- **One voice.** A response that starts an output cancels every output still running or waiting from an earlier response. Other Commands are left alone. `cancel_command` cancels an output like any Command.
+- **One voice.** A response that starts an output cancels every output still running or waiting from an earlier response, as soon as the new output's first words are written, before it is delivered. Other Commands are left alone. `cancel_command` cancels an output like any Command.
+- **Delivery starts once the first 80 characters are written** (or the output ends, if it is shorter): they are checked for garbled text first (see [Response guards](#response-guards)). With `agent.stream_output: false` ([configuration.md](configuration.md#the-agent-block)), outputs are delivered only once the whole response has passed the guards; with the [tool call](#the-output-command-as-a-tool-call) they always are.
 - **Its end wakes a step only through a `<next>` note.** A cancelled output wakes nothing. The record of its end says which it was: `CommandTrace.triggers_step`.
 - **A cancelled output corrects the history.** Its body is cut to `stream.heard` when the function set it, and an output of the same response that never started is removed.
 
@@ -169,9 +170,9 @@ Neither the output tool nor `noop` is listed in `wica.agent.commands`. Which mod
 
 Before a model response is used (its Commands dispatched, its text recorded), WICA checks it with its **response guards**. A guard that finds a mistake rejects the response: the model is called again, over the same conversation plus a correction, up to `max_retries` times (default `1`, [configuration.md](configuration.md#the-agent-block)). Only the accepted response enters the history, so later prompts never show the mistake. Out of retries, the reaction ends with the `rejected` outcome: nothing is done, and an ERROR log line carries the reason.
 
-**A response that has started an output is not guarded** (with the tag; with the [tool call](#the-output-command-as-a-tool-call) the output waits for the response, so every response is guarded). An output is delivered as the response streams, so by the end of the response part of it has been heard and cannot be taken back: the response is accepted as it is and no guard runs. An unknown or invalid Command call beside the output is dispatched and ends as a `failed` entry the model observes. The guards therefore cover the responses that only act or do nothing.
+**A response that has started an output is not guarded**, except for garbled text (below). With the tag, an output is delivered as the response streams, so by the end of the response part of it has been heard and cannot be taken back: the response is accepted as it is and no other guard runs. An unknown or invalid Command call beside the output is dispatched and ends as a `failed` entry the model observes. With `agent.stream_output: false` ([configuration.md](configuration.md#the-agent-block)), or with the [tool call](#the-output-command-as-a-tool-call), nothing is delivered before the guards have run, so they cover every response.
 
-Four guards are on by default; the last acts only when the output Command is a tool:
+Five guards are on by default; `output_command_required` acts only when the output Command is a tool:
 
 | Guard | Rejects a response that |
 |---|---|
@@ -179,6 +180,9 @@ Four guards are on by default; the last acts only when the output Command is a t
 | `unknown_command` | calls a Command that is not registered |
 | `invalid_args` | calls a Command with arguments that do not fit its signature |
 | `output_command_required` | calls no tool at all, with the output Command bound as a tool: the model is told its free text is private and to call the output Command or `noop` |
+| `garbled_text` | is garbled: its text is mostly dots, ellipses and blank space (or, however short, has no word at all: `……… ... ...`), or it repeated itself until the output cap cut it. Code, tables, emoji and a song the user asked for pass |
+
+**With the tag, garbled text is also caught while an output streams.** A model sometimes degenerates mid-answer. While `garbled_text` is on, an output is held back until its first 80 characters are written and checked, then checked again as the rest arrives, and once more when the response ends. Garbled before delivery: nothing was said, the response is retried. Garbled after: the model is stopped, the output cancelled, the response kept out of the history and the output's entry marked `failed` without its text, then the response is retried; what was already said cannot be taken back. Clean outputs with garbled private text: the history keeps the response without the private text. Removing the guard turns all of this off, and outputs are delivered from their first words again. `wica.guards.find_garbled(text)` is the check itself. With the [tool call](#the-output-command-as-a-tool-call) the output waits for the whole response, so the guard alone catches it, on the call's `text`, before anything is said. [specs/agent.md](../../specs/agent.md), "Garbled text".
 
 Each retry is a full model call the person waits for, and the Agent drops new inputs meanwhile, like during any step. To turn a guard off:
 
@@ -188,7 +192,7 @@ wica.remove_response_guard("invalid_args")
 
 `max_retries: 0` keeps the guards but never retries: a rejected response ends the reaction at once, its other Commands included.
 
-**Your own guards are experimental.** `wica.add_response_guard(guard, name=None)` adds one: a function that receives a `wica.guards.ModelResponse` (`text`, `commands`, `bound`, `malformed`, `truncated`, `output_tokens`, `output_command_name`: the output Command's name when it is a tool, else `None`) and returns `None` to accept or a `wica.guards.Retry(feedback, show_response=True)` to reject; `show_response=False` retries with a reminder instead of showing the model its response. The shape may change without notice while we learn how guards behave, so do not build on it yet. A sync guard runs on the event loop and holds everything while it runs; an async one (an LLM judging the answer) holds the reaction, so inputs are dropped for as long as it takes. [specs/agent.md](../../specs/agent.md), "Response guards".
+**Your own guards are experimental.** `wica.add_response_guard(guard, name=None)` adds one: a function that receives a `wica.guards.ModelResponse` (`text`, `commands`, `bound`, `malformed`, `truncated`, `output_tokens`, `outputs`: the text of each output, a tag's body or the output tool call's `text`; `private_text`; `output_command_name`: the output Command's name when it is a tool, else `None`) and returns `None` to accept or a `wica.guards.Retry(feedback, show_response=True)` to reject; `show_response=False` retries with a reminder instead of showing the model its response. The shape may change without notice while we learn how guards behave, so do not build on it yet. A sync guard runs on the event loop and holds everything while it runs; an async one (an LLM judging the answer) holds the reaction, so inputs are dropped for as long as it takes. [specs/agent.md](../../specs/agent.md), "Response guards".
 
 ## Events
 
@@ -200,7 +204,7 @@ Each is an `Event[T]` you `.subscribe(handler)` on, multi-consumer, emitted on t
 | `wica.on_agent_trigger` | `WorldEntry` | Filtered: once per trigger a reasoning step observed (several per step when a burst was coalesced) |
 | `wica.on_agent_trigger_dropped` | `WorldEntry` | A trigger that arrived while a step was in flight and was dropped |
 | `wica.on_agent_prompt` | `list[BaseMessage]` | The exact rendered messages, before each reaction's first model call |
-| `wica.on_agent_response_rejected` | `ResponseRejection` | A response the [response guards](#response-guards) rejected: `attempt`, `response`, `feedback`, `show_response`, `will_retry` |
+| `wica.on_agent_response_rejected` | `ResponseRejection` | A response the [response guards](#response-guards) rejected: `attempt`, `response`, `feedback`, `show_response`, `will_retry`, and `output_started` (a garbled response whose output had started, cancelled and kept out of the history) |
 | `wica.on_agent_command_started` | `CommandIssued` | Each Command when its execution starts: the `agent:command:<call_id>` entry exists and its `running` value is not yet written, so a listener added then follows the whole run. A tool call starts at dispatch, just before `on_agent_command`, with the same arguments. An output starts at its first words, with `is_output=True`, its attributes and an empty `text`. For every `call_id`: started, then `on_agent_command`, then `on_agent_command_ended` |
 | `wica.on_agent_command` | `CommandIssued` | Each Command the model issues, once its arguments are complete: a tool call at dispatch, an output once per tag when its body is complete, with `is_output=True` and its whole `text`. A `<noop/>` response fires nothing |
 | `wica.on_agent_command_ended` | `CommandTrace` | A Command's terminal state (`complete`, `failed`, `cancelled`), an output's included, with its timing, `is_output`, and `triggers_step`: whether that end wakes a step (a tool call's `triggers_on_completion`, an output's granted `<next>` note; never a cancelled output) |

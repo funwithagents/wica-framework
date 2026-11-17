@@ -948,3 +948,26 @@ def test_openai_keeps_base_url_in_model_kwargs():
         _wica_dict(provider="openai", model_kwargs={"base_url": "http://proxy/v1"})
     )
     assert cfg.agent.model_kwargs == {"base_url": "http://proxy/v1"}
+
+
+# --- stream_output field ------------------------------------------------------------------
+
+
+def test_stream_output_defaults_to_the_mode_and_parses_a_boolean():
+    # Unset: the output mode's default (streamed with tags, not with the output as a tool).
+    assert AgentConfig.from_dict(_agent_dict()).stream_output is None
+    assert (
+        AgentConfig(provider="fake", model="x", system_prompt="p").stream_output is None
+    )
+    cfg = WicaConfig.from_json(json.dumps(_wica_dict(stream_output=False))).agent
+    assert cfg.stream_output is False
+    assert AgentConfig.from_dict(_agent_dict(stream_output=True)).stream_output is True
+    assert AgentConfig.from_dict(_agent_dict(stream_output=None)).stream_output is None
+
+
+@pytest.mark.parametrize("value", [0, 1, "false"])
+def test_stream_output_rejects_anything_but_a_boolean(value: Any):
+    with pytest.raises(ConfigError, match="stream_output"):
+        AgentConfig.from_dict(_agent_dict(stream_output=value))
+    with pytest.raises(ConfigError, match="stream_output"):
+        AgentConfig(provider="fake", model="x", system_prompt="p", stream_output=value)

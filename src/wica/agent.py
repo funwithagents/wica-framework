@@ -48,6 +48,8 @@ from wica.content import Content, ImagePart, TextPart
 from wica.events import Event
 from wica.guards import (
     DEFAULT_GUARDS,
+    GARBLED_FEEDBACK,
+    GARBLED_MIN_CHARS,
     REJECTED_TOOL_RESULT,
     REMINDER_FRAME,
     SHOW_FRAME,
@@ -58,6 +60,8 @@ from wica.guards import (
     ResponseRejection,
     Retry,
     combine,
+    find_garbled,
+    garbled_text,
 )
 from wica.instrumentation import (
     CommandTrace,
@@ -306,6 +310,8 @@ class _ReactionBuilder:
     first_input_tokens: int | None = None
     # The current attempt's first chunk carrying text or a tool call (reset at each attempt).
     first_content_at: datetime | None = None
+    # Attempts rejected because their text was garbled (see specs/agent.md, "Garbled text").
+    garbled_attempts: int = 0
 
 
 def _span_ids(span: otel_trace.Span) -> tuple[str | None, str | None]:
@@ -376,7 +382,11 @@ def _add_usage(total: TokenUsage | None, usage: TokenUsage | None) -> TokenUsage
 
 
 def _retry_messages(
-    messages: list[BaseMessage], response: AIMessage, feedback: str, *, show: bool
+    messages: list[BaseMessage],
+    response: AIMessage | None,
+    feedback: str,
+    *,
+    show: bool,
 ) -> list[BaseMessage]:
     """The prompt of a retry: the step's own messages plus the latest rejection's correction — never
     stored in history. Shown: the rejected response as returned, one fixed tool_result per tool call
@@ -385,7 +395,7 @@ def _retry_messages(
     user turns in a row are what the renderer merges for providers that reject them). The messages
     before the newest observation are untouched, so a cache breakpoint there still reads. See
     specs/agent.md ("Response guards")."""
-    if show:
+    if show and response is not None:
         calls = [
             {**call, "id": call["id"] or uuid.uuid4().hex}
             for call in response.tool_calls
@@ -445,10 +455,23 @@ def _model_response(
     response: AIMessage,
     bound: Mapping[str, Command],
     output_command_name: str | None = None,
+    parsed: ParseResult | None = None,
 ) -> ModelResponse:
     """The neutral view of a response the guards (and on_response_rejected) receive: its own
-    copies, so a guard or a subscriber cannot rewrite what gets dispatched."""
+    copies, so a guard or a subscriber cannot rewrite what gets dispatched. `outputs` is what the
+    response would say: its output tags' bodies, or in tool mode (`output_command_name` set) the
+    `text` of each call of the output tool."""
+    if output_command_name is not None:
+        outputs = tuple(
+            str(call["args"].get("text", ""))
+            for call in response.tool_calls
+            if call["name"] == output_command_name
+        )
+    else:
+        outputs = () if parsed is None else tuple(o.text for o in parsed.outputs)
     return ModelResponse(
+        outputs=outputs,
+        private_text="" if parsed is None else parsed.private,
         text=response.text,
         commands=tuple(
             ProposedCommand(call["name"], copy.deepcopy(call["args"]))
@@ -530,30 +553,52 @@ async def _stream_response(
     model call")."""
     summed: AIMessageChunk | None = None
     whole: AIMessage | None = None
-    async for piece in bound_model.astream(messages):
-        if on_first_content is not None and _has_content(piece):
-            on_first_content()
-            on_first_content = None
-        if on_text is not None:
-            # The text, as it arrives: the output parser delivers an output before the response
-            # is complete. See specs/agent.md ("Streaming the model call").
-            text = str(piece.text)
-            if text:
-                on_text(text)
-        if isinstance(piece, AIMessageChunk) and whole is None:
-            summed = piece if summed is None else summed + piece
-        elif isinstance(piece, AIMessage) and summed is None and whole is None:
-            whole = piece
-        else:
-            raise TypeError(
-                f"the model streamed an unexpected {type(piece).__name__} after "
-                f"{'a whole message' if whole is not None else 'chunks'}"
+    stream = bound_model.astream(messages)
+    try:
+        async for piece in stream:
+            summed, whole, on_first_content = _take_piece(
+                piece, summed, whole, on_first_content, on_text
             )
+    finally:
+        # Close the stream when the loop is left early — a garbled output stops the model (see
+        # specs/agent.md, "Garbled text") — so the connection closes and the server stops now.
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
     if whole is not None:
         return whole
     if summed is None:
         raise ValueError("the model's stream yielded nothing")
     return _assemble(summed)
+
+
+def _take_piece(
+    piece: AIMessage,
+    summed: AIMessageChunk | None,
+    whole: AIMessage | None,
+    on_first_content: Callable[[], None] | None,
+    on_text: Callable[[str], None] | None,
+) -> tuple[AIMessageChunk | None, AIMessage | None, Callable[[], None] | None]:
+    """One streamed piece: report it, then add it to the sum (or keep it as the whole message)."""
+    if on_first_content is not None and _has_content(piece):
+        on_first_content()
+        on_first_content = None
+    if on_text is not None:
+        # The text, as it arrives: the output parser delivers an output before the response
+        # is complete. See specs/agent.md ("Streaming the model call").
+        text = str(piece.text)
+        if text:
+            on_text(text)
+    if isinstance(piece, AIMessageChunk) and whole is None:
+        summed = piece if summed is None else summed + piece
+    elif isinstance(piece, AIMessage) and summed is None and whole is None:
+        whole = piece
+    else:
+        raise TypeError(
+            f"the model streamed an unexpected {type(piece).__name__} after "
+            f"{'a whole message' if whole is not None else 'chunks'}"
+        )
+    return summed, whole, on_first_content
 
 
 def _token_usage(response: AIMessage) -> TokenUsage | None:
@@ -767,6 +812,37 @@ class _OutputPart:
     attributes: dict[str, str]
     started: bool = False  # delivery has begun (it was not still waiting for its turn)
     kept: str | None = None  # what history keeps after a cut; None = all of it
+    # Its response was garbled: it is cancelled, and its text is not kept.
+    retracted: bool = False
+
+
+@dataclass
+class _HeldOutput:
+    """An output the model has started writing that is not delivered yet: held back until its
+    start passed the garbled check, or until the response passed the guards. See specs/agent.md
+    ("Output: tags in the model's text", "Garbled text")."""
+
+    attributes: dict[str, str]
+    # The text as it arrived, handed over in the same pieces.
+    pieces: list[str] = field(default_factory=list)
+    closed: bool = False
+
+    @property
+    def text(self) -> str:
+        return "".join(self.pieces)
+
+
+class _GarbledOutput(Exception):
+    """Raised from the parser's callbacks when an output's text turns garbled: it ends the model
+    stream, and the attempt is rejected (see specs/agent.md, "Garbled text")."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# A retracted output's entry: failed, without its text.
+_GARBLED_ENTRY_ERROR = "the output was garbled and was cut off; its text is not kept"
 
 
 @dataclass
@@ -784,6 +860,15 @@ class _OutputSession:
     last_task: asyncio.Task[None] | None = None
     # Tool mode: each output's recorded tool call, by part index (rewritten when it is cut).
     tool_records: dict[int, CommandRecord] = field(default_factory=dict)
+    # Delivery: whether an output starts as the response streams (stream_output) and whether the
+    # garbled check runs (the garbled_text guard is installed). Outputs written but not delivered
+    # yet wait in `held`; `writing` is the one being written while held, None when it is delivered.
+    streams: bool = True
+    check: bool = False
+    held: list[_HeldOutput] = field(default_factory=list)
+    writing: _HeldOutput | None = None
+    earlier_cut: bool = False
+    private_garbled: bool = False
 
 
 def _command_ack(call_id: str) -> str:
@@ -1027,6 +1112,10 @@ class Agent:
         # See specs/agent.md ("Response guards").
         self._guards: dict[str, ResponseGuard] = dict(DEFAULT_GUARDS)
         self._max_retries = config.max_retries
+        # Whether an output is delivered as the response streams, or once the whole response has
+        # passed the guards; None for the mode's default (streamed with tags; a tool call's text is
+        # never streamed). See specs/agent.md ("When an output is delivered").
+        self._stream_output = config.stream_output
         self._world = world
         # The shared event loop, owned and run by the Wica facade in one daemon thread and injected
         # here. The Agent runs its tasks/timers/cancellation on it but never starts or stops it. See
@@ -1110,8 +1199,8 @@ class Agent:
     @property
     def response_guards(self) -> Mapping[str, ResponseGuard]:
         """Read-only view of the response guards by name, in the order they run: the defaults
-        (``incomplete_response``, ``unknown_command``, ``invalid_args``) first, then the
-        application's. See specs/agent.md ("Response guards")."""
+        (``incomplete_response``, ``unknown_command``, ``invalid_args``, ``garbled_text``) first,
+        then the application's. See specs/agent.md ("Response guards")."""
         return MappingProxyType(self._guards)
 
     def add_response_guard(
@@ -1230,6 +1319,12 @@ class Agent:
             if signature.streams and not inspect.iscoroutinefunction(command.callable):
                 raise ValueError(
                     "output Command: a function taking an OutputStream must be async"
+                )
+            if as_tool and self._stream_output:
+                raise ValueError(
+                    "stream_output: true is not supported with the output Command as a tool: "
+                    "its text is delivered once the response is complete (leave stream_output "
+                    "unset or false)"
                 )
         self._output_command = command
         self._output_command_name = None if command is None else command.name
@@ -1583,6 +1678,7 @@ class Agent:
                     guard_duration=builder.guard_duration,
                     first_content_at=builder.first_content_at,
                     first_output_at=builder.first_output_at,
+                    garbled_attempts=builder.garbled_attempts,
                 )
             )
 
@@ -1637,28 +1733,88 @@ class Agent:
         )
         # Tool mode: the output Command is a tool the response must call (output_command_required).
         tool_output = self._output_command_name if self._output_as_tool else None
+        # The garbled check runs while the default guard that makes it is installed: on each
+        # output's text as it streams, and on the whole response. See specs/agent.md ("Garbled
+        # text").
+        check = any(guard is garbled_text for _, guard in guards)
         prompt = messages
         while True:
             builder.attempts += 1
             attempt = builder.attempts
-            session = self._new_output_session(builder)
+            session = self._new_output_session(builder, check=check)
             parser = session.parser
             assert parser is not None
-            response = await self._call_model(
-                bound_model, prompt, builder, representative, parser.feed
-            )
-            parsed = parser.finish()
+            garbled: str | None = None
+            response: AIMessage | None = None
+            parsed: ParseResult | None = None
+            try:
+                response = await self._call_model(
+                    bound_model, prompt, builder, representative, parser.feed
+                )
+                parsed = parser.finish()
+            except _GarbledOutput as exc:
+                garbled = exc.reason
+            if garbled is None and check and session.parts and response is not None:
+                # A response whose output has started is not guarded, but its text is checked once
+                # more whole: a loop shows only once the cap has cut it.
+                assert parsed is not None
+                garbled = self._find_garbled_outputs(parsed, _was_truncated(response))
+            if garbled is not None:
+                started = bool(session.parts)
+                if started:
+                    self._retract(session, builder)
+                builder.garbled_attempts += 1
+                _logger.warning(
+                    "garbled response (%s)%s: %s",
+                    garbled,
+                    ", its output cancelled and retracted" if started else "",
+                    _truncate(parser.text, 200),
+                )
+                candidate = (
+                    _model_response(response, bound, tool_output, parsed)
+                    if response is not None
+                    else ModelResponse(
+                        text=parser.text,
+                        commands=(),
+                        bound=bound,
+                        outputs=tuple(
+                            [p.stream.text for p in session.parts]
+                            + [h.text for h in session.held]
+                        ),
+                    )
+                )
+                retry = Retry(
+                    GARBLED_FEEDBACK.format(reason=garbled), show_response=False
+                )
+                next_prompt = self._reject(
+                    candidate,
+                    retry,
+                    attempt,
+                    builder,
+                    representative,
+                    messages,
+                    response,
+                    show=False,
+                    output_started=started,
+                )
+                if next_prompt is None:
+                    return
+                prompt = next_prompt
+                continue
             if session.parts:
-                # An output has started and cannot be taken back: the response is used as it
-                # is, with no guard and no retry — and a model call that failed part-way keeps
-                # what was said. See specs/agent.md ("Response guards").
+                # An output has started streaming and cannot be taken back: the response is used
+                # as it is, with no guard and no retry — and a model call that failed part-way
+                # keeps what was said. See specs/agent.md ("Response guards").
+                assert parsed is not None
                 self._settle_text(session, parsed, builder)
                 if response is None:
                     return
                 break
             if response is None:
+                # A model error: what was held back is never delivered.
                 return
-            candidate = _model_response(response, bound, tool_output)
+            assert parsed is not None
+            candidate = _model_response(response, bound, tool_output, parsed)
             retry = await self._run_guards(guards, candidate, attempt, builder)
             if retry is None:
                 break
@@ -1671,38 +1827,27 @@ class Agent:
                 and not candidate.malformed
                 and not candidate.truncated
             )
-            will_retry = attempt <= self._max_retries
-            builder.rejections.append(retry.feedback)
-            self.on_response_rejected.emit(
-                ResponseRejection(
-                    attempt=attempt,
-                    response=_model_response(response, bound, tool_output),
-                    feedback=retry.feedback,
-                    show_response=show,
-                    will_retry=will_retry,
-                )
-            )
-            if not will_retry:
-                # Out of retries: nothing recorded but the Observation (it renders merged into the
-                # next one), nothing delivered or dispatched — a model error's ending.
-                builder.outcome = "rejected"
-                builder.error = retry.feedback
-                _logger.error(
-                    "response rejected after %d attempt(s); step abandoned (trigger: %s): %s",
-                    attempt,
-                    _describe_entry(representative),
-                    retry.feedback,
-                )
-                return
-            _logger.warning(
-                "response rejected (attempt %d), retrying with %s: %s",
+            if check and garbled_text(candidate) is not None:
+                builder.garbled_attempts += 1
+            next_prompt = self._reject(
+                candidate,
+                retry,
                 attempt,
-                "the response shown" if show else "a reminder",
-                retry.feedback,
+                builder,
+                representative,
+                messages,
+                response,
+                show=show,
             )
-            prompt = _retry_messages(messages, response, retry.feedback, show=show)
+            if next_prompt is None:
+                return
+            prompt = next_prompt
 
-        if not session.parts:
+        assert parsed is not None and response is not None
+        if session.held:
+            # stream_output false: the accepted response's outputs are delivered now, in order.
+            self._release_held(session, builder)
+        if session.parsed is None:
             self._settle_text(session, parsed, builder)
         _logger.debug(
             "LLM output: text=%s, commands=%s",
@@ -1720,7 +1865,7 @@ class Agent:
             if not (self._output_as_tool and c["name"] == NOOP_TAG)
         ]
         builder.noop = parsed.noop and not acted
-        if parsed.private:
+        if parsed.private and not session.private_garbled:
             self.on_private_text.emit(parsed.private)
 
         tool_session: _OutputSession | None = None
@@ -1750,6 +1895,54 @@ class Agent:
         if builder.first_input_tokens is not None:
             self._apply_history_budget(builder.first_input_tokens)
         _logger.debug("step complete (trigger: %s)", _describe_entry(representative))
+
+    def _reject(
+        self,
+        candidate: ModelResponse,
+        retry: Retry,
+        attempt: int,
+        builder: _ReactionBuilder,
+        representative: WorldEntry,
+        messages: list[BaseMessage],
+        response: AIMessage | None,
+        *,
+        show: bool,
+        output_started: bool = False,
+    ) -> list[BaseMessage] | None:
+        """A rejected attempt: report it, then return the retry's prompt — or None once retries
+        have run out, the reaction ending `rejected` with nothing recorded but its Observation.
+        See specs/agent.md ("Response guards")."""
+        will_retry = attempt <= self._max_retries
+        builder.rejections.append(retry.feedback)
+        self.on_response_rejected.emit(
+            ResponseRejection(
+                attempt=attempt,
+                response=candidate,
+                feedback=retry.feedback,
+                show_response=show,
+                will_retry=will_retry,
+                output_started=output_started,
+            )
+        )
+        if not will_retry:
+            # Out of retries: nothing recorded but the Observation (it renders merged into the
+            # next one), nothing delivered or dispatched — a model error's ending.
+            builder.outcome = "rejected"
+            builder.error = retry.feedback
+            _logger.error(
+                "response rejected after %d attempt(s); step abandoned (trigger: %s): %s",
+                attempt,
+                _describe_entry(representative),
+                retry.feedback,
+            )
+            return None
+        _logger.warning(
+            "response rejected (attempt %d), retrying with %s: %s",
+            attempt,
+            "the response shown" if show else "a reminder",
+            retry.feedback,
+        )
+        return _retry_messages(messages, response, retry.feedback, show=show)
 
     async def _call_model(
         self,
@@ -1795,6 +1988,10 @@ class Agent:
                             "gen_ai.usage.output_tokens": usage.output_tokens,
                         }
                     )
+        except _GarbledOutput:
+            # Not a model failure: the text turned garbled and the stream was ended on purpose.
+            builder.model_ended_at = now()
+            raise
         except Exception as exc:
             # The observation is already in history (and terminal command entries are retired),
             # so the model never saw it this step; the renderer merges it into the next
@@ -1875,23 +2072,71 @@ class Agent:
     # -- The model's text: outputs, the note, doing nothing -------------------------------------
     # See specs/agent.md ("Output: tags in the model's text", "Continuing after an output").
 
-    def _new_output_session(self, builder: _ReactionBuilder) -> _OutputSession:
-        """The parser for one attempt's text, over the output Command the step started with."""
+    def _new_output_session(
+        self, builder: _ReactionBuilder, *, check: bool = False
+    ) -> _OutputSession:
+        """The parser for one attempt's text, over the output Command the step started with.
+
+        An output is delivered as soon as its first words arrive — unless it is held back: until
+        its text reaches GARBLED_MIN_CHARS (or ends) when the garbled check runs, or until the
+        whole response has passed the guards with stream_output false. Its first words cut off
+        what an earlier response is still saying, held back or not. See specs/agent.md ("Output:
+        tags in the model's text", "Garbled text")."""
         command = self._output_command
         session = _OutputSession(
             command=command,
             signature=self._output_signature if command is not None else None,
             reaction_id=builder.reaction_id,
+            streams=self._stream_output is not False,
+            check=check,
         )
 
         def on_open(attributes: dict[str, str]) -> None:
-            self._open_output(session, attributes, builder)
+            if not session.earlier_cut:
+                session.earlier_cut = True
+                self._cut_earlier_outputs()
+            session.writing = _HeldOutput(dict(attributes))
+            session.held.append(session.writing)
+            if session.streams and not session.check:
+                self._release_held(session, builder)
 
         def on_delta(text: str) -> None:
-            session.parts[-1].stream.push(text)
+            writing = session.writing
+            if writing is None:
+                part = session.parts[-1]
+                part.stream.push(text)
+                body = part.stream.text
+            else:
+                writing.pieces.append(text)
+                body = writing.text
+            if session.check:
+                # Measured over the newest window only: the earlier ones were measured as the text
+                # arrived.
+                reason = find_garbled(body, tail_only=True)
+                if reason is not None:
+                    raise _GarbledOutput(reason)
+            if (
+                writing is not None
+                and session.streams
+                and len(writing.text.strip()) >= GARBLED_MIN_CHARS
+            ):
+                self._release_held(session, builder)
 
         def on_close() -> None:
-            session.parts[-1].stream.close()
+            writing = session.writing
+            if writing is None:
+                session.parts[-1].stream.close()
+                return
+            writing.closed = True
+            session.writing = None
+            if session.check:
+                # A short output is complete before it reached the length the check needs as it
+                # streams: it is judged whole, before anything of it is delivered.
+                reason = find_garbled(writing.text)
+                if reason is not None:
+                    raise _GarbledOutput(reason)
+            if session.streams:
+                self._release_held(session, builder)
 
         session.parser = TextOutputParser(
             None if command is None or self._output_as_tool else command.name,
@@ -1901,6 +2146,64 @@ class Agent:
         )
         return session
 
+    def _cut_earlier_outputs(self) -> None:
+        """One voice: a response that starts an output cuts off every output an earlier response
+        is still delivering or waiting to deliver — at its first words, before anything of the new
+        one is delivered, and whether or not it is then accepted."""
+        for old_key, old_task in list(self._live_outputs.items()):
+            _logger.debug("output %s cut off by a new one", old_key)
+            self._output_wake[old_key] = False  # cut off, not finished: wakes nothing
+            old_task.cancel()
+
+    def _release_held(self, session: _OutputSession, builder: _ReactionBuilder) -> None:
+        """Deliver the outputs held back, in order: open each one's execution and hand it what was
+        written so far. The one still being written then streams on."""
+        while session.held:
+            held = session.held.pop(0)
+            self._open_output(session, held.attributes, builder)
+            part = session.parts[-1]
+            for piece in held.pieces:
+                part.stream.push(piece)
+            if held.closed:
+                part.stream.close()
+            elif session.writing is held:
+                session.writing = None
+
+    def _find_garbled_outputs(self, parsed: ParseResult, truncated: bool) -> str | None:
+        """Why an output of a complete response is garbled, or None."""
+        for output in parsed.outputs:
+            reason = find_garbled(output.text, truncated=truncated)
+            if reason is not None:
+                return reason
+        return None
+
+    def _retract(self, session: _OutputSession, builder: _ReactionBuilder) -> None:
+        """A response whose output had started turned out garbled: cancel its outputs and keep
+        none of its text — no history record (it was not written yet) and each output's entry
+        failed, without its text. See specs/agent.md ("Garbled text")."""
+        command = session.command
+        assert command is not None
+        builder.first_output_at = None  # the accepted response's, if any
+        for part in session.parts:
+            part.retracted = True
+            task = self._running_tasks.get(part.key)
+            if task is not None and not task.done():
+                task.cancel()  # _run_output writes the failed entry
+                continue
+            # Already ended (an application cancelled it during the step): its entry holds the
+            # text; rewrite it.
+            self._output_wake[part.key] = False
+            self._write_terminal(
+                part.key,
+                part.call_id,
+                CommandExecution(
+                    name=command.name,
+                    args={**part.attributes, "text": ""},
+                    state="failed",
+                    error=_GARBLED_ENTRY_ERROR,
+                ),
+            )
+
     def _open_output(
         self,
         session: _OutputSession,
@@ -1908,10 +2211,9 @@ class Agent:
         builder: _ReactionBuilder,
         call_id: str | None = None,
     ) -> _OutputPart:
-        """An output's first words arrived: open its execution — a Command entry, running — and
-        start delivering, before the response is complete. A response's outputs are delivered
-        one after the other; its first one cuts off what an earlier response is still saying
-        (one voice)."""
+        """An output is delivered: open its execution — a Command entry, running — and start
+        delivering, possibly before the response is complete (in tool mode, `call_id` is the one
+        minted for its tool call). A response's outputs are delivered one after the other."""
         command, signature = session.command, session.signature
         assert command is not None and signature is not None
         kept: dict[str, str] = {}
@@ -1926,16 +2228,9 @@ class Agent:
                     name,
                     value,
                 )
-        if not session.parts:
-            if builder.first_output_at is None:
-                builder.first_output_at = now()
-                otel_trace.get_current_span().add_event("wica.first_output")
-            for old_key, old_task in list(self._live_outputs.items()):
-                _logger.debug("output %s cut off by a new one", old_key)
-                self._output_wake[old_key] = (
-                    False  # cut off, not finished: wakes nothing
-                )
-                old_task.cancel()
+        if builder.first_output_at is None:
+            builder.first_output_at = now()
+            otel_trace.get_current_span().add_event("wica.first_output")
         call_id = call_id or self._mint_call_id()
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         part = _OutputPart(len(session.parts), OutputStream(), call_id, key, kept)
@@ -2004,6 +2299,8 @@ class Agent:
         assert command is not None
         text = str(args.get("text", ""))
         attributes = {k: str(v) for k, v in args.items() if k != "text"}
+        if not session.parts:
+            self._cut_earlier_outputs()  # one voice: the response's first output cuts the old one
         part = self._open_output(session, attributes, builder, call_id=call_id)
         session.tool_records[part.index] = record
         part.stream.push(text)
@@ -2047,11 +2344,25 @@ class Agent:
         step. Synchronous, so an output cannot end before it is published."""
         session.parsed = parsed
         raw = parsed.raw.strip()
+        command = session.command
+        if (
+            session.check
+            and command is not None
+            and parsed.private
+            and find_garbled(parsed.private) is not None
+        ):
+            # The outputs were clean but the private text is garbled: history keeps the response
+            # without it. See specs/agent.md ("Garbled text").
+            session.private_garbled = True
+            _logger.warning(
+                "garbled private text left out of history: %s",
+                _truncate(parsed.private, 200),
+            )
+            raw = parsed.rebuilt(command.name, {}, private=False)
         if raw:
             session.record = AssistantTextRecord(raw)
             self._history.append(session.record)
-        builder.text_length = len(raw)
-        command = session.command
+        builder.text_length = len(parsed.raw.strip())
         notes = command is not None and self._max_next_steps != 0
         if notes and parsed.note is not None:
             self._set_next_note(parsed.note, builder.reaction_id)
@@ -2131,6 +2442,21 @@ class Agent:
                 # A cancelled output wakes nothing, note or not — whoever cancelled it (a new
                 # response, cancel_command, the application).
                 self._output_wake[key] = False
+                if part.retracted:
+                    # Garbled: failed, and its text is not kept. See specs/agent.md ("Garbled
+                    # text").
+                    if self._write_terminal(
+                        key,
+                        call_id,
+                        CommandExecution(
+                            name=name,
+                            args={**part.attributes, "text": ""},
+                            state="failed",
+                            error=_GARBLED_ENTRY_ERROR,
+                        ),
+                    ):
+                        self._emit_command_ended(key, call_id, name, "failed")
+                    raise
                 heard = stream.heard if part.started else ""
                 final = args()
                 if heard is not None:
