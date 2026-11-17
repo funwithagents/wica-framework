@@ -233,10 +233,18 @@ class Wica:
         ``agent.remove_response_guard``."""
         self.agent.remove_response_guard(name)
 
-    def set_output_command(self, fn: Callable[..., Any] | Command | None) -> None:
+    def set_output_command(
+        self,
+        fn: Callable[..., Any] | Command | None,
+        *,
+        as_tool: bool = False,
+        force: bool = True,
+    ) -> None:
         """Set (or, with None, clear) the user-facing output Command — delegates verbatim to
         ``agent.set_output_command`` (a callable or a ``Command``): the model then speaks by
-        writing that Command's tag in its text. A reserved or already-registered name, or a
-        signature that cannot be an output's, raises ``ValueError``. See specs/wica.md ("Output wiring is delegated"), specs/agent.md ("Output
-        wiring")."""
-        self.agent.set_output_command(fn)
+        writing that Command's tag in its text, or, with ``as_tool=True``, by calling it as a
+        tool the model is forced to call (``force=False`` leaves it unforced). A reserved or
+        already-registered name, or a signature that cannot be an output's, raises
+        ``ValueError``. See specs/wica.md ("Output wiring is delegated"), specs/agent.md
+        ("Output wiring", "The output Command as a tool call")."""
+        self.agent.set_output_command(fn, as_tool=as_tool, force=force)

@@ -21,7 +21,7 @@ tests:
 
 # Testing
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -103,7 +103,7 @@ The gate's steps run against a **dedicated test app**, `tests-e2e/robot_app.py`:
 | Command | `dance` | | a few seconds, cancellable |
 | Command | `write_note(title, text)` | | saves a note; its result names the word count, marked `(long)` from 150 words |
 
-`say` is a fake: no TTS, it waits and completes. It takes the stream, not the whole text, so the gate runs the path a real voice uses ([commands.md](commands.md), "The output Command"). Only the Interrupt step needs the wait (the running `say` must outlast the model's reaction to "Stop"); every other step speaks a sentence or two. Long output goes through `write_note`, not `say`: the failure it guards against — a reasoning model cut off by an output cap before its tool call — is about tool arguments, not speech. Each `Wica` is set up as a person (`u1`) walking up: the app writes its context and `closest_user`, then waits for the robot to settle **before** the step's own `TestRun` begins, so that first reaction is not judged.
+`say` is a fake: no TTS, it waits and completes. It takes the stream, not the whole text, so the gate runs the path a real voice uses ([commands.md](commands.md), "The output Command"). **The gate runs in tag mode; `WICA_ROBOT_OUTPUT=tool` runs it with the output Command as a forced tool call** ([agent.md](agent.md), "The output Command as a tool call"): the same robot, the same steps and checks, the persona's "How you speak" section worded for the tool. CI runs tag mode only; the variable is for comparing a model in both modes by hand. Only the Interrupt step needs the wait (the running `say` must outlast the model's reaction to "Stop"); every other step speaks a sentence or two. Long output goes through `write_note`, not `say`: the failure it guards against — a reasoning model cut off by an output cap before its tool call — is about tool arguments, not speech. Each `Wica` is set up as a person (`u1`) walking up: the app writes its context and `closest_user`, then waits for the robot to settle **before** the step's own `TestRun` begins, so that first reaction is not judged.
 
 ### The steps
 

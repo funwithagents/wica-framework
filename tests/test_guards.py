@@ -16,6 +16,7 @@ from wica.guards import (
     combine,
     invalid_args,
     incomplete_response,
+    output_command_required,
     unknown_command,
 )
 
@@ -64,6 +65,7 @@ def response(
     malformed: tuple[MalformedCommand, ...] = (),
     truncated: bool = False,
     output_tokens: int | None = None,
+    output_command_name: str | None = None,
 ) -> ModelResponse:
     return ModelResponse(
         text=text,
@@ -72,6 +74,7 @@ def response(
         malformed=malformed,
         truncated=truncated,
         output_tokens=output_tokens,
+        output_command_name=output_command_name,
     )
 
 
@@ -207,3 +210,37 @@ def test_combine_lists_every_feedback_and_shows_if_any_asks() -> None:
     assert not combine(
         [Retry("a", show_response=False), Retry("b", show_response=False)]
     ).show_response
+
+
+# --- output_command_required (tool mode only) ----------------------------------------------------
+
+
+def test_output_command_required_is_inactive_in_tag_mode():
+    assert output_command_required(response(text="Hello there!")) is None
+
+
+def test_output_command_required_rejects_free_text_when_the_output_is_a_tool():
+    retry = output_command_required(
+        response(text="Hello there!", output_command_name="say")
+    )
+    assert retry is not None and retry.show_response
+    assert "Call `say` to reply to the user, or `noop` to do nothing." in retry.feedback
+    # An empty response cannot be shown: a reminder.
+    empty = output_command_required(response(output_command_name="say"))
+    assert empty is not None and not empty.show_response
+
+
+def test_output_command_required_accepts_any_call_and_leaves_a_cut_response_alone():
+    assert (
+        output_command_required(response(("wave", {}), output_command_name="say"))
+        is None
+    )
+    assert (
+        output_command_required(response(truncated=True, output_command_name="say"))
+        is None
+    )
+    cut = incomplete_response(
+        response(truncated=True, output_tokens=40, output_command_name="say")
+    )
+    assert cut is not None and "call `say` (or `noop`) right away" in cut.feedback
+    assert incomplete_response(response(truncated=True, output_tokens=40)) is None

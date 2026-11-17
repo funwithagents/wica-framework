@@ -41,13 +41,13 @@ The transcript panel and the `on_agent_command` / `on_agent_command_ended` Event
 
 ## Make your agent speak
 
-Set one **output Command**: the function that receives what the model says to its user, whether it drives a voice, a chat bubble or a robot's mouth. The model speaks by writing a tag named after it in its response text:
+Set one **output Command**: the function that receives what the model says to its user, whether it drives a voice, a chat bubble or a robot's mouth. By default the model speaks by writing a tag named after it in its response text (it can call it as a tool instead: [Tag or tool call](#tag-or-tool-call)):
 
 ```
 <say emotion="happy">Hello there!</say>
 ```
 
-Only the tag's body reaches your function. Text the model writes outside a tag is private: nobody hears it, and `wica.on_agent_private_text` reports it. The output Command is not a tool and is not in `wica.agent.commands`; speaking does not depend on the provider's tool calling. With no output Command set, no tag is taught and all the model's text is private, which suits an agent that only acts. The contract in full is [../reference/api.md](../reference/api.md#the-output-command).
+Only the tag's body reaches your function. Text the model writes outside a tag is private: nobody hears it, and `wica.on_agent_private_text` reports it. The output Command is not a tool and is not in `wica.agent.commands`; speaking with the tag does not depend on the provider's tool calling. With no output Command set, no tag is taught and all the model's text is private, which suits an agent that only acts. The contract in full is [../reference/api.md](../reference/api.md#the-output-command).
 
 Set it **before `start()`**: `set_output_command` recomposes the system prompt (the primer teaches the tag, with your docstring), and setting it after the first step rebuilds the system message and drops the cached prefix.
 
@@ -141,6 +141,18 @@ When the response's last output ends, a step runs and shows the model its note. 
 ### Staying silent
 
 An observation does not oblige a reaction. The model declines by writing `<noop/>` as its whole response; an empty response counts the same. Nothing is dispatched, no Command Event fires, and the reaction's record has `noop=True` ([latency-and-traces.md](latency-and-traces.md)). The primer allows it conservatively: a request or a question must still be answered. `noop` is not a Command; the name stays reserved.
+
+### Tag or tool call
+
+The same output Command can be bound to the model as a tool instead. The model then speaks by calling it, `say(text="Hello there!", emotion="happy")`, and declines by calling a `noop` tool bound beside it:
+
+```python
+wica.set_output_command(say, as_tool=True)
+```
+
+A tool call is forced on every model call, so the model cannot answer in plain text nobody hears; its free text stays private. `force=False` binds the tool without forcing, for Anthropic extended thinking or a backend that rejects `tool_choice`. Your function is unchanged, but the text arrives whole once the response is complete (an `OutputStream` gets one piece), no `<next>` note is read, and the end of every output wakes a step instead, bounded by `max_next_steps`, where the model speaks again or calls `noop`.
+
+Which one is better depends on the model. On the live gate (tests passed of 48, three runs, before the tag landed), ministral-14b passed 47 with the tool call and 37 with the tag, gpt-4o-mini 35 and 44, Qwen2.5 7B on Ollama 5 and 36. The tool call helps a model that describes its actions instead of calling them, and keeps some models quieter on background sounds. The tag works on local servers, which may ignore `tool_choice` ([local-models.md](local-models.md)), gets the first word out earlier, and ran away less on gpt-4o-mini. Measure on yours ([benchmarking.md](benchmarking.md)). The differences in full are in [../reference/api.md](../reference/api.md#the-output-command-as-a-tool-call).
 
 ## Cancellation reaches the task, not always the work
 

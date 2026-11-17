@@ -3934,6 +3934,7 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
         "incomplete_response",
         "unknown_command",
         "invalid_args",
+        "output_command_required",
     ]
 
     agent.add_response_guard(lambda r: None, name="mine")
@@ -3941,6 +3942,7 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
     assert list(agent.response_guards) == [
         "incomplete_response",
         "unknown_command",
+        "output_command_required",
         "mine",
     ]
     with pytest.raises(ValueError, match="already added"):
@@ -4700,3 +4702,223 @@ def test_an_output_cut_at_the_cap_is_delivered_as_far_as_it_got(loop, world, pri
     assert traces[0].attempts == 1
     assert len(model.calls) == 1
     assert agent._history[1:] == [AssistantTextRecord("<say>Once upon a")]
+
+
+# --- the output Command as a tool call (specs/agent.md, "The output Command as a tool call") ---
+
+
+def _tool_mode_agent(
+    model: ProgrammableChatModel,
+    loop: asyncio.AbstractEventLoop,
+    world: World,
+    output: Command,
+    *,
+    force: bool = True,
+    max_next_steps: int | None = 1,
+    commands: Sequence[Callable[..., Any] | Command] = (),
+) -> Agent:
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        coalesce_window=0,
+        max_next_steps=max_next_steps,
+    )
+    for command in commands:
+        agent.register_command(command)
+    agent.set_output_command(output, as_tool=True, force=force)
+    return agent
+
+
+def _emotional_say(spoken: list[tuple[str, str]], delay: float = 0.0) -> Command:
+    async def say(
+        text: OutputStream, emotion: Literal["happy", "sad", "neutral"] = "neutral"
+    ) -> str:
+        """Say something to the user."""
+        words = await text.read()
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            text.heard = words[:5]
+            raise
+        spoken.append((words, emotion))
+        return "spoken"
+
+    return Command(say)
+
+
+def test_tool_mode_binds_the_output_and_noop_forced_and_delivers_a_call(loop, world):
+    spoken: list[tuple[str, str]] = []
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("say", {"text": "Hi!", "emotion": "happy"}, "t1")]),
+            tool_call_response([("noop", {}, "t2")]),
+        )
+    )
+    agent = _tool_mode_agent(
+        model, loop, world, _emotional_say(spoken), commands=(_named("wave"),)
+    )
+    issued: list[CommandIssued] = []
+    traces: list[ReactionTrace] = []
+    agent.on_command.subscribe(issued.append)
+    agent.on_reaction_ended.subscribe(traces.append)
+    agent.start()
+    world.update("input", "hello")
+    wait_until(lambda: spoken == [("Hi!", "happy")] and len(traces) == 2)
+
+    assert model.bindings[0]["tool_choice"] == "any"
+    assert sorted(model.bindings[0]["tools"]) == [
+        "cancel_command",
+        "noop",
+        "say",
+        "wave",
+    ]
+    assert sorted(agent.commands) == [
+        "cancel_command",
+        "wave",
+    ]  # WICA's tools are not listed
+    assert issued == [
+        CommandIssued("say", {"emotion": "happy", "text": "Hi!"}, "c1", is_output=True)
+    ]
+    # The end of the output woke a step (the second call), which declined with the noop tool.
+    assert [(t.noop, t.command_call_ids) for t in traces] == [
+        (False, ("c1",)),
+        (True, ()),
+    ]
+    # History: native tool calls, each with its tool result — noop's a plain acknowledgement.
+    third = agent._render_messages()
+    calls = [m for m in third if isinstance(m, AIMessage)]
+    assert [c.tool_calls[0]["name"] for c in calls] == ["say", "noop"]
+    acks = [m.content for m in third if isinstance(m, ToolMessage)]
+    assert acks[1] == "Acknowledged — no action taken."
+    agent.stop()
+
+
+def test_tool_mode_unforced_with_force_false(loop, world):
+    model = ProgrammableChatModel(respond=tool_call_response([("noop", {}, "t1")]))
+    agent = _tool_mode_agent(model, loop, world, _emotional_say([]), force=False)
+    agent.start()
+    world.update("input", "hello")
+    wait_until(lambda: len(model.bindings) == 1)
+    assert model.bindings[0]["tool_choice"] is None
+    assert "say" in model.bindings[0]["tools"]
+    agent.stop()
+
+
+def test_tool_mode_wakes_after_each_output_under_the_cap(loop, world):
+    spoken: list[tuple[str, str]] = []
+    say_again = tool_call_response([("say", {"text": "More."}, "t")])
+    model = ProgrammableChatModel(respond=sequence(say_again, say_again, say_again))
+    agent = _tool_mode_agent(
+        model, loop, world, _emotional_say(spoken), max_next_steps=1
+    )
+    ended: list[CommandTrace] = []
+    agent.on_command_ended.subscribe(ended.append)
+    agent.start()
+    world.update("input", "talk")
+    wait_until(lambda: len(ended) == 2)
+    time.sleep(0.2)
+    # The first output woke one step; that step's output did not wake another (the cap).
+    assert len(model.calls) == 2
+    assert [(t.is_output, t.triggers_step) for t in ended] == [
+        (True, True),
+        (True, False),
+    ]
+    agent.stop()
+
+
+def test_tool_mode_rejects_a_plain_text_reply_and_retries(loop, world):
+    spoken: list[tuple[str, str]] = []
+    model = ProgrammableChatModel(
+        respond=sequence(
+            text_response("Hello there!"),
+            tool_call_response([("say", {"text": "Hello there!"}, "t1")]),
+            tool_call_response([("noop", {}, "t2")]),
+        )
+    )
+    agent = _tool_mode_agent(model, loop, world, _emotional_say(spoken))
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+    world.update("input", "hello")
+    wait_until(lambda: spoken == [("Hello there!", "neutral")])
+    assert [r.feedback for r in rejections] == [
+        "Your response called no command, so the user heard nothing: your free text is "
+        "private. Call `say` to reply to the user, or `noop` to do nothing."
+    ]
+    agent.stop()
+
+
+def test_tool_mode_rejects_an_attribute_outside_its_values(loop, world):
+    spoken: list[tuple[str, str]] = []
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("say", {"text": "Hi", "emotion": "angry"}, "t1")]),
+            tool_call_response([("say", {"text": "Hi", "emotion": "sad"}, "t2")]),
+            tool_call_response([("noop", {}, "t3")]),
+        )
+    )
+    agent = _tool_mode_agent(model, loop, world, _emotional_say(spoken))
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+    world.update("input", "hello")
+    wait_until(lambda: spoken == [("Hi", "sad")])
+    assert len(rejections) == 1 and "emotion" in rejections[0].feedback
+    agent.stop()
+
+
+def test_tool_mode_cut_off_output_keeps_what_was_heard_in_its_call(loop, world):
+    spoken: list[tuple[str, str]] = []
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("say", {"text": "Once upon a time."}, "t1")]),
+            tool_call_response([("say", {"text": "Okay."}, "t2")]),
+            tool_call_response([("noop", {}, "t3")]),
+        )
+    )
+    agent = _tool_mode_agent(
+        model, loop, world, _emotional_say(spoken, delay=0.5), max_next_steps=0
+    )
+    agent.start()
+    world.update("input", "story")
+    wait_until(lambda: len(model.calls) == 1)
+    time.sleep(0.1)
+    world.update("input", "stop")  # its say cuts off the running story (one voice)
+    wait_until(lambda: spoken == [("Okay.", "neutral")])
+    calls = [
+        m.tool_calls[0]
+        for m in agent._render_messages()
+        if isinstance(m, AIMessage) and m.tool_calls
+    ]
+    assert [c["args"]["text"] for c in calls] == ["Once ", "Okay."]
+    agent.stop()
+
+
+def test_tool_mode_primer_teaches_the_call_and_the_noop_tool(loop, world):
+    agent = _tool_mode_agent(ProgrammableChatModel(), loop, world, _emotional_say([]))
+    prompt = agent.system_prompt
+    assert "must be said by calling say" in prompt
+    assert "call noop to do nothing" in prompt
+    assert "<say>" not in prompt and "<next>" not in prompt and "<noop/>" not in prompt
+
+
+def test_switching_the_output_mode_while_running_rebinds_the_model(loop, world):
+    model = ProgrammableChatModel(respond=text_response("<noop/>"))
+    agent = _tool_mode_agent(model, loop, world, _emotional_say([]))
+    agent.set_output_command(_emotional_say([]))  # back to tag mode before start
+    agent.start()
+    world.update("input", "one")
+    wait_until(lambda: len(model.calls) == 1)
+    assert "say" not in (model.bindings[0]["tools"] or [])
+    assert model.bindings[0]["tool_choice"] is None
+    model.respond = tool_call_response([("noop", {}, "t1")])
+    agent.set_output_command(_emotional_say([]), as_tool=True)
+    world.update("input", "two")
+    wait_until(lambda: len(model.calls) == 2)
+    assert "say" in model.bindings[1]["tools"]
+    assert model.bindings[1]["tool_choice"] == "any"
+    agent.stop()

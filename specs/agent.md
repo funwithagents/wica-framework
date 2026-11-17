@@ -11,7 +11,7 @@ tests:
 
 # Agent
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -208,15 +208,38 @@ This replaces two earlier modes — free text delivered whole to an output sink,
 
 A Command issued as a tool call still wakes a step on completion according to its own `triggers_on_completion` ([commands.md](commands.md)): "speak and act together, then speak about the result" needs no note.
 
+#### The output Command as a tool call
+
+**`set_output_command(fn, as_tool=True)` switches the output to a tool call.** The same output Command is bound to the model as a tool, and the model speaks by calling it, `say(text="…", emotion="happy")`, rather than writing a tag. This is the earlier output design, kept as an option because some models are measurably better with it, and others worse:
+
+| Live gate tests passed of 48 (three runs, same robot, before tag output landed) | Tool call | Tag |
+|---|---|---|
+| ministral-14b | 47 | 37 |
+| gpt-4o-mini | 35 | 44 |
+| Qwen2.5 7B on Ollama (a server that ignores `tool_choice`) | 5 | 36 |
+
+With the tool call, ministral-14b calls its actions instead of describing them, and gpt-4o and gpt-4o-mini stay silent on background sounds more often. With the tag, local servers work at all, the first word arrives earlier, and gpt-4o-mini runs away less (`analysis/_text-output.md`, local notes). Which is better depends on the model, so the application chooses.
+
+What changes with `as_tool=True`:
+
+- **The tool.** Its arguments are the output Command's signature read as for a tag: `text` (a string, whatever the first parameter is called), then the attributes, each with its allowed values (a `Literal` becomes an enum) and its default. Its description is the Command's.
+- **Forcing.** The binding forces a tool call on every model call (`tool_choice` "any", or "required" where the provider needs it), so a model cannot slip into a plain-text reply nobody hears. `force=False` keeps the binding unforced: for an inference backend that rejects `tool_choice`, or Anthropic extended thinking, whose API rejects a forced choice. A backend that ignores `tool_choice` (`mlx_lm.server`, Ollama) is not helped by this mode.
+- **Doing nothing is a tool.** A zero-argument `noop` tool is bound with it, since a forced call needs a way to decline. Calling it sets the reaction record's `noop` flag and does nothing else; like `<noop/>`, it issues no Command and fires no `on_command`. It is recorded in history as the model's native tool call with a plain acknowledgement.
+- **The primer.** The output clause says to speak only by calling the output Command, that free text is private, and that calling it again replaces what is being said; the silence clause says to call `noop` to do nothing. No tag is taught, and there is no `<next>` note: the continuation is the wake below.
+- **Waking.** The end of a spoken output wakes a step, as a tool-call Command's does, so the model can chain an utterance or call `noop` to stop. The chain is bounded by `max_next_steps`: once that many steps in a row were woken by the Agent's own output, the end of the next one wakes nothing. A cancelled output wakes nothing. `CommandTrace.triggers_step` reports the decision, as in tag mode.
+- **Delivery.** The output opens when the response is complete and its tool call is dispatched, like any tool call; the output Command receives the whole text at once (an `OutputStream` with a single piece, or a `str`). Everything else is as in tag mode: an output is a Command execution, `is_output` is set on its reports, `on_command_started` and `on_command` fire at dispatch, one voice holds, and each call is its own output.
+- **History and the World.** The output is recorded as the model's native tool call (a `CommandRecord`), paired with the usual entry-pointer acknowledgement, and its World entry renders in the call form (`Calling say(text='…')…`), correct here since it is a tool. A cut-off output's recorded `text` is replaced by what was heard.
+- **Guards.** Outputs dispatch after the response is complete, so every response is guarded. `output_command_required` is active in this mode only: a response with no tool call at all is rejected and retried, the feedback telling the model its free text is private and to call the output Command or `noop`. `incomplete_response` also rejects a response cut at the output cap before it made a call.
+
 ### Output wiring: `set_output_command`
 
 The output Command is not a constructor argument: `Agent.__init__(config, *, world, loop, coalesce_window=0.2, model=None)` takes only what must exist at construction. It is wired afterwards, like Commands, through one setter (mirrored onto `Wica` — see [wica.md](wica.md), "Output wiring is delegated"). The reason is ordering: what an output Command references (a transcript, a UI, a TTS engine) usually needs the running system — the World for listeners, the `Event`s to subscribe — so it can only be built *after* the Agent exists.
 
-- **`set_output_command(fn | Command | None)`.** A callable is wrapped as `Command(fn)`; a `Command` is used directly. It then, in order:
+- **`set_output_command(fn | Command | None, *, as_tool=False, force=True)`.** A callable is wrapped as `Command(fn)`; a `Command` is used directly. `as_tool` selects the tool-call output ("The output Command as a tool call"); `force` is read only with it. It then, in order:
   1. **Validates, changing nothing on failure** — `ValueError` for a reserved name (`noop`, `next`, `cancel_command`), a name already registered as an application Command, a name that is not a valid tag name, a Command backed by an off-the-shelf tool, or a signature that cannot be an output's (see [commands.md](commands.md), "The output Command"). `register_command` keeps rejecting the current output Command's name, so the exclusion is symmetric whichever is wired first.
-  2. **Records it** (`output_command_name` now returns its name) and **recomposes the system prompt** so the output clause teaches its tag (see "System prompt composition").
+  2. **Records it** (`output_command_name` now returns its name) and **recomposes the system prompt** so the output clause teaches its tag, or its tool (see "System prompt composition"). With `as_tool`, the output tool and `noop` are bound, forced unless `force=False`; changing the mode rebinds the model.
   `None` clears: `output_command_name` returns `None` and the prompt no longer teaches an output. An output of a replaced or cleared Command that is still running finishes (or is cancelled) normally.
-- **Intended before `start()`; permitted while running.** A step already in flight keeps the output Command and the prompt it started with; the next step uses the new ones. The model binding is untouched: the output Command is not a tool.
+- **Intended before `start()`; permitted while running.** A step already in flight keeps the output Command and the prompt it started with; the next step uses the new ones. In tag mode the model binding is untouched: the output Command is not a tool. In tool mode it is bound, and `agent.commands` still lists only the application's Commands and `cancel_command`: the output tool and `noop` are WICA's.
 
 ### The agent may choose not to act
 
@@ -299,7 +322,8 @@ class MalformedCommand:
 class ModelResponse:
     text: str                                # the text as the model wrote it, "" when none (no output started: see below)
     commands: tuple[ProposedCommand, ...]    # every well-formed tool call, in order — cancel_command included
-    bound: Mapping[str, Command]             # the Commands this call was bound to (= agent.commands at the step)
+    bound: Mapping[str, Command]             # the Commands this call was bound to (= agent.commands at the step; in tool mode the output tool and noop too)
+    output_command_name: str | None = None   # the output Command's name when it is bound as a tool (tool mode), else None
     malformed: tuple[MalformedCommand, ...] = ()   # tool calls whose arguments could not be read (see "Streaming the model call")
     truncated: bool = False                  # the provider stopped the response at its output cap (its stop reason: `max_tokens`, `length`)
     output_tokens: int | None = None         # the output tokens the provider reported; for a truncated response, the cap that was hit
@@ -328,11 +352,12 @@ The view is neutral — no `AIMessage`, no provider ids, no `call_id` (none is m
 - **A raising guard accepts.** A guard is application code; one that raises is logged at ERROR and counts as accepting, so a buggy guard cannot silence the agent.
 - **The cache holds.** A retry adds messages only after the newest observation, so the Anthropic breakpoint before it (see "Prompt caching") is read, not rewritten.
 
-**The default guards.** Three guards catch responses that break WICA's own rules, whatever the application. Each is an ordinary guard over `ModelResponse`, installed at Agent construction under its name:
+**The default guards.** Four guards catch responses that break WICA's own rules, whatever the application; the last is active only when the output Command is a tool. Each is an ordinary guard over `ModelResponse`, installed at Agent construction under its name:
 
 | Guard | Rejects when | Retry |
 |---|---|---|
-| `incomplete_response` | the response did not arrive whole where it matters: a tool call's arguments could not be read (`malformed` is not empty), or the provider cut the response at its output cap (`truncated`) while it held a tool call — the last one is incomplete, however well-formed it looks | a reminder (a broken or cut response cannot be replayed); feedback says what was cut and that nothing was executed, and gives a length to stay under: half of where a malformed call's arguments stopped, or, for a truncated response, as many characters as the cap had tokens |
+| `incomplete_response` | the response did not arrive whole where it matters: a tool call's arguments could not be read (`malformed` is not empty), or the provider cut the response at its output cap (`truncated`) while it held a tool call — the last one is incomplete, however well-formed it looks — or, in tool mode, before it made the call the output Command requires | a reminder (a broken or cut response cannot be replayed); feedback says what was cut and that nothing was executed, and gives a length to stay under: half of where a malformed call's arguments stopped, or, for a truncated response, as many characters as the cap had tokens |
+| `output_command_required` | the output Command is a tool (`output_command_name` is set) and the response has no tool call at all — free text only, or nothing. A malformed or truncated response is left to `incomplete_response` | shows the response (a reminder when it is empty); feedback: the user did not hear free text, call `<output_command_name>` to reply or `noop` to do nothing |
 | `unknown_command` | a tool call names a Command that is not in `bound` | shows the response; feedback names the unknown Command and lists the bound ones |
 | `invalid_args` | a tool call's arguments do not validate against its Command's argument schema (when the backing tool's `args_schema` is a pydantic model; a tool declaring a raw JSON schema is not checked). The last call of a truncated response is skipped: it is incomplete, not wrong | shows the response; feedback carries the validation error |
 
