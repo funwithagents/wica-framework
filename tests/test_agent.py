@@ -1408,7 +1408,7 @@ def test_an_output_is_a_command_execution_and_text_outside_its_tag_is_private(
     # The next step observes the finished output like any Command, then retires its entry.
     world.update("input", "again")
     wait_until(lambda: len(model.calls) == 2)
-    assert '<speak> "hello" — delivered: spoken.' in _rendered_user_text(model, 1)
+    assert 'speak output: "hello" — delivered: spoken.' in _rendered_user_text(model, 1)
     wait_until(lambda: not world.is_registered(key))
 
     agent.stop()
@@ -2131,7 +2131,9 @@ def test_a_failing_output_command_ends_as_a_failed_entry_and_commands_still_disp
     assert [m.text for m in second if isinstance(m, AIMessage)] == [
         "<say>doing it</say>"
     ]
-    assert '<say> "doing it" — failed: voice broke' in _rendered_user_text(model, 1)
+    assert 'say output: "doing it" — failed: voice broke' in _rendered_user_text(
+        model, 1
+    )
 
     agent.stop()
 
