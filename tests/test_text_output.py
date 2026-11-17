@@ -591,7 +591,7 @@ def test_outputs_are_reported_as_outputs_from_their_first_words(
         entry = r.wica.world.get_entry(f"agent:command:{issued.call_id}")
         started.append((issued.call_id, issued.is_output, entry.current.value))
 
-    r.wica.on_agent_output_started.subscribe(on_started)
+    r.wica.on_agent_command_started.subscribe(on_started)
     r.wica.on_agent_command_ended.subscribe(ended.append)
     r.hear("hi", 1)
     wait_until(lambda: len(ended) == 2)
@@ -600,7 +600,6 @@ def test_outputs_are_reported_as_outputs_from_their_first_words(
         ("c1", True, None),
         ("c2", True, None),
     ]
-    assert r.reactions[0].output_call_ids == ("c1", "c2")
     assert r.reactions[0].command_call_ids == ("c1", "c2")
     assert [(t.is_output, t.triggers_step) for t in ended] == [
         (True, False),
@@ -616,7 +615,7 @@ def test_a_cancelled_noted_output_does_not_trigger_a_step(
     r.wica.on_agent_command_ended.subscribe(ended.append)
     r.delay = 5.0
     r.hear("story", 1)
-    r.wica.agent.cancel_command(r.reactions[0].output_call_ids[0])
+    r.wica.agent.cancel_command(r.reactions[0].command_call_ids[0])
     wait_until(lambda: len(ended) == 1)
     assert (ended[0].state, ended[0].triggers_step) == ("cancelled", False)
 
@@ -651,8 +650,63 @@ def test_private_text_alone_is_a_decline_without_an_output_command(
 def test_an_outputs_record_goes_with_its_entry(rig: Callable[..., Rig]) -> None:
     r = rig([{"text": "<say>One.</say>"}, {"text": "<say>Two.</say>"}])
     r.hear("hi", 1)
-    first = r.reactions[0].output_call_ids[0]
+    first = r.reactions[0].command_call_ids[0]
     wait_until(lambda: r.said == [("One.", "neutral")])
     r.hear("again", 2)  # the next step observes the finished output and removes it
     assert not r.wica.world.is_registered(f"agent:command:{first}")
     assert f"agent:command:{first}" not in r.wica.agent._output_wake
+
+
+def test_every_command_is_reported_started_then_issued(rig: Callable[..., Rig]) -> None:
+    """A tool call's arguments arrive whole, so it is reported started then issued at the same
+    moment, with the same arguments; an output is started at its first words and issued once its
+    body is complete. A listener attached on the start sees every state."""
+
+    def wave() -> str:
+        """Wave."""
+        return "waved"
+
+    order: list[tuple[str, str, str]] = []
+    r = rig(
+        [
+            {
+                "text": "<say>Hi there.</say>",
+                "tool_calls": [{"name": "wave", "args": {}}],
+            }
+        ],
+        commands=(wave,),
+    )
+    states: dict[str, list[str]] = {}
+
+    def on_started(issued: Any) -> None:
+        order.append(("started", issued.call_id, issued.args.get("text", "")))
+        states[issued.call_id] = []
+
+        async def follow(entry: Any) -> None:
+            states[issued.call_id].append(entry.current.value.state)
+
+        r.wica.world.add_listener(f"agent:command:{issued.call_id}", follow)
+
+    r.wica.on_agent_command_started.subscribe(on_started)
+    r.wica.on_agent_command.subscribe(
+        lambda issued: order.append(
+            ("issued", issued.call_id, issued.args.get("text", ""))
+        )
+    )
+    r.hear("hi", 1)
+    wait_until(
+        lambda: (
+            all(s[-1:] == ["complete"] for s in states.values()) and len(states) == 2
+        )
+    )
+    assert order == [
+        ("started", "c1", ""),  # the output, at its first words
+        ("issued", "c1", "Hi there."),  # its body complete
+        ("started", "c2", ""),  # the tool call: started …
+        ("issued", "c2", ""),  # … and issued at once
+    ]
+    # An output's entry is written running when it opens, again with its whole text, then done.
+    assert states == {
+        "c1": ["running", "running", "complete"],
+        "c2": ["running", "complete"],
+    }

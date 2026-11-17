@@ -196,7 +196,7 @@ def test_declined_reaction_is_shown_from_its_record_without_state():
 
 
 def test_an_output_is_followed_from_its_start(unstarted_wica):
-    """An output's item opens at `on_output_started` — its first words, before its `running`
+    """An output's item opens at `on_command_started` — its first words, before its `running`
     value lands — and follows its entry from there: running with no text yet, then with its
     whole text, then its outcome. The output's later `on_command` report adds no second item.
     The 🗣️ comes from the Event's `is_output`, not from the Command's name."""
@@ -206,7 +206,7 @@ def test_an_output_is_followed_from_its_start(unstarted_wica):
     key = "agent:command:o1"
     wica.world.register(key, CommandExecution, serialize_fn=lambda value, previous: [])
     opened = CommandIssued(name="say", args={"text": ""}, call_id="o1", is_output=True)
-    log.on_output_started(opened)
+    log.on_command_started(opened)
     item = item_titled(log.snapshot().conversation, "🗣️ say")
     assert item["content"] == "say(text='')"
     assert item["metadata"] == {

@@ -10,7 +10,7 @@ application adds its own through `build_registry(extra_checks)`.
 
 An **output** is a `command_issued` record whose `is_output` is set (one per tag of the model's
 text, reported once its body is complete), and the outputs of one reaction are listed in its
-record's `output_call_ids`; a reaction that **declined** is one whose record has the `noop` flag
+record's `command_call_ids`; a reaction that **declined** is one whose record has the `noop` flag
 set (it delivered no output and issued no tool call). These are fields the framework reports
 (specs/instrumentation.md): the checks tell speech from action and from silence by reading them,
 never by a Command's name or a position in a list.
@@ -151,9 +151,9 @@ def output_issued(timeline: list[SutEvent]) -> list[SutEvent]:
 
 
 def reply_of(timeline: list[SutEvent]) -> dict[str, int]:
-    """`call_id → reaction_id` for every output a reaction record in *timeline* lists in its
-    `output_call_ids`: the outputs of one reaction are one reply."""
-    return {c: r.reaction_id for r in reactions(timeline) for c in r.output_call_ids}
+    """`call_id → reaction_id` for every Command a reaction record in *timeline* lists in its
+    `command_call_ids` (outputs included): the outputs of one reaction are one reply."""
+    return {c: r.reaction_id for r in reactions(timeline) for c in r.command_call_ids}
 
 
 def replies(outputs: list[SutEvent], reply: Mapping[str, int]) -> int:
@@ -485,15 +485,14 @@ def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float
 
 def answer_latencies(timeline: list[SutEvent], context: CheckContext) -> list[float]:
     """One sample per answered turn: from the write that opened it to the first words of its first
-    output — the `first_output_at` of the reaction that issued it, whether the model spoke on its
-    first step or after a side Command (an emotion change) whose completion woke the step that
-    spoke. The reaction is the one whose `output_call_ids` opens with that output. When that
-    reaction's record is not in the timeline, or the output was not its first, the time the
-    output was reported stands in. Unanswered turns give none."""
+    output — the output's own start (`CommandTrace.started_at`, when it opened), whether the model
+    spoke on its first step or after a side Command (an emotion change) whose completion woke the
+    step that spoke. When the output's end record is not in the timeline, the time the output was
+    reported stands in. Unanswered turns give none."""
     first_of = {
-        r.output_call_ids[0]: r.first_output_at
-        for r in reactions(timeline)
-        if r.output_call_ids and r.first_output_at is not None
+        e.command.call_id: e.command.started_at
+        for e in timeline
+        if e.kind == "command_ended" and e.command is not None and e.command.is_output
     }
     samples: list[float] = []
     for turn in turns(timeline, context.turn_inputs):

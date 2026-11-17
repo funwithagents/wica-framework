@@ -87,8 +87,6 @@ class ReactionTrace:
     # When the reaction's first output opened: its first words handed to the output Command. None
     # when it delivered nothing. See specs/agent.md ("Output: tags in the model's text").
     first_output_at: datetime | None = None
-    # The reaction's outputs alone, in the order they opened (a subset of command_call_ids).
-    output_call_ids: tuple[str, ...] = ()
 
     @property
     def coalescing_wait(self) -> float:

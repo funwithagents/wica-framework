@@ -97,7 +97,6 @@ class ReactionTrace:
     error: str | None
     text_length: int                          # characters of the response's text as the model wrote it, tags included
     command_call_ids: tuple[str, ...]         # the reaction's outputs, in the order they opened, then its dispatched Commands, in response order
-    output_call_ids: tuple[str, ...]          # the reaction's outputs alone, in the order they opened (a subset of command_call_ids)
     noop: bool                                # the model declined: it delivered no output and issued no tool call
     usage: TokenUsage | None                  # from AIMessage.usage_metadata, summed over attempts; None when absent
     attempts: int                             # model calls made: 1, or more after rejected responses
@@ -129,7 +128,7 @@ Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `time_to_f
 
 **A declined reaction.** `noop` is true when the model declined: it delivered no output and issued no tool call. That covers a `<noop/>`, with or without private text before it (outcome `ok`), and a response with nothing in it (outcome `empty`). Nothing else reports it: no `on_command` fires for it ([agent.md](agent.md), "The agent may choose not to act").
 
-**An output is a Command in the record.** Each output of a response is a Command execution with its own `call_id`, so it appears in `command_call_ids` — and in `output_call_ids`, so a consumer never tells outputs apart by name or by position — and ends with a `CommandTrace` like any Command, with `is_output` set. Its `started_at` is when it opened, during the model call. Its terminal state is written only once the step that issued it is over, so the `ended_at` of an output shorter than its response is the end of that step, not the moment the output Command returned.
+**An output is a Command in the record.** Each output of a response is a Command execution with its own `call_id`, so it appears in `command_call_ids` and ends with a `CommandTrace` like any Command, with `is_output` set — a consumer never tells outputs apart by name or by position. Its `CommandTrace.started_at` is when it opened, its first words: the end of an answer's latency is read from the answering output itself. Its `started_at` is when it opened, during the model call. Its terminal state is written only once the step that issued it is over, so the `ended_at` of an output shorter than its response is the end of that step, not the moment the output Command returned.
 
 **Whether a Command's end triggers a step.** `CommandTrace.triggers_step` is the Agent's own decision, recorded so no consumer has to reproduce it: for a Command issued as a tool call, its `triggers_on_completion`, whatever its terminal state (a cancelled `dance` wakes a step like a finished one); for an output, whether its response carried a `<next>` note that was granted a wake under `max_next_steps` ([agent.md](agent.md), "Continuing after an output"), and never when the output was cancelled. It says the terminal write produced a trigger, not that a step ran for it: a trigger arriving while a reaction is in flight is dropped, and the completion is then observed by the next step. A test harness waiting for the Agent to settle reads it ([wica-tester.md](wica-tester.md), "idle").
 

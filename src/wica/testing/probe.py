@@ -3,12 +3,12 @@
 
 It inspects the SUT once through public surface only (`world.keys()` / `get_config()`,
 `agent.commands`, `agent.output_command_name`), writes its Inputs through `world.update`, and
-turns the facade's nine instrumentation Events — plus a per-key listener on each
+turns the facade's ten instrumentation Events — plus a per-key listener on each
 `agent:command:<call_id>` entry as it appears — into one normalized stream of `SutEvent` records.
 It knows no application Command by name and does not know whether a script or a model drives.
 
 An **output** (one tag of the SUT's output Command) is recognised by the `is_output` field its
-reports carry, never by its name. It is followed from `on_agent_output_started`, at its first words:
+reports carry, never by its name. Every Command is followed from `on_agent_command_started` — an output at its first words:
 the per-key listener attached there records each state its entry goes through, `running` from the
 start, and `on_agent_command` adds the `command_issued` record once its body is complete. A
 reaction that declines (`<noop/>`) issues no Command: its only report is the `noop` flag of the
@@ -131,7 +131,7 @@ class Probe:
     # --- perceiving ------------------------------------------------------------------------------
 
     def attach(self) -> None:
-        """Subscribe to the SUT's nine Events (idempotent)."""
+        """Subscribe to the SUT's ten Events (idempotent)."""
         if self._attached:
             return
         sut = self._sut
@@ -140,7 +140,7 @@ class Probe:
         sut.on_agent_trigger_dropped.subscribe(self._on_trigger_dropped)
         sut.on_agent_prompt.subscribe(self._on_prompt)
         sut.on_agent_command.subscribe(self._on_command)
-        sut.on_agent_output_started.subscribe(self._on_output_started)
+        sut.on_agent_command_started.subscribe(self._on_command_started)
         sut.on_agent_private_text.subscribe(self._on_private_text)
         sut.on_agent_reaction_ended.subscribe(self._on_reaction_ended)
         sut.on_agent_command_ended.subscribe(self._on_command_ended)
@@ -156,7 +156,7 @@ class Probe:
         sut.on_agent_trigger_dropped.unsubscribe(self._on_trigger_dropped)
         sut.on_agent_prompt.unsubscribe(self._on_prompt)
         sut.on_agent_command.unsubscribe(self._on_command)
-        sut.on_agent_output_started.unsubscribe(self._on_output_started)
+        sut.on_agent_command_started.unsubscribe(self._on_command_started)
         sut.on_agent_private_text.unsubscribe(self._on_private_text)
         sut.on_agent_reaction_ended.unsubscribe(self._on_reaction_ended)
         sut.on_agent_command_ended.unsubscribe(self._on_command_ended)
@@ -208,11 +208,12 @@ class Probe:
             SutEvent(kind="prompt", t=_t(), message_count=len(messages), text=text)
         )
 
-    def _on_output_started(self, issued: CommandIssued) -> None:
-        # An output opens at its first words: its entry is registered and its running value not
-        # yet written (specs/agent.md), so the listener attached here sees its whole life. Its
-        # `command_issued` record comes later, from on_agent_command, once its body is complete.
-        self._follow(issued.call_id, is_output=True)
+    def _on_command_started(self, issued: CommandIssued) -> None:
+        # Every Command is followed from its start: its entry is registered and its running value
+        # not yet written (specs/agent.md, "Instrumentation"), so the listener attached here sees
+        # its whole life. Its `command_issued` record comes from on_agent_command, once its
+        # arguments are complete: at once for a tool call, at the end of its body for an output.
+        self._follow(issued.call_id, is_output=issued.is_output)
 
     def _on_command(self, issued: CommandIssued) -> None:
         self._emit(
@@ -226,15 +227,14 @@ class Probe:
             )
         )
         key = f"{_COMMAND_KEY_PREFIX}{issued.call_id}"
-        if issued.is_output and key in self._followed:
-            # Followed since it opened; on_agent_command reports each output once.
-            with self._lock:
-                self._followed.discard(key)
-            return
-        # A tool call is reported once its entry is registered and before its running value
-        # lands, so the listener sees running → terminal. (An output whose opening this Probe
-        # missed — attached mid-output — is followed from here, its current state included.)
-        self._follow(issued.call_id, is_output=issued.is_output, late=issued.is_output)
+        with self._lock:
+            started = key in self._followed
+            self._followed.discard(key)
+        if started:
+            return  # followed since it started
+        # A Command whose start this Probe missed (attached mid-way) is followed from here, its
+        # current state included.
+        self._follow(issued.call_id, is_output=issued.is_output, late=True)
 
     def _follow(self, call_id: str, *, is_output: bool, late: bool = False) -> None:
         """Attach the per-key listener that records each state of `agent:command:<call_id>`.
@@ -288,7 +288,7 @@ class Probe:
                     return
         with self._lock:
             self._key_listeners[key] = handler
-            if is_output and not late:
+            if not late:
                 self._followed.add(key)
         try:
             self._sut.world.add_listener(key, handler)

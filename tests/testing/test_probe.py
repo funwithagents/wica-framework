@@ -118,7 +118,7 @@ def test_a_declined_reaction_is_reported_by_its_noop_flag_alone(
 def test_an_output_is_followed_from_its_start_to_its_end(
     sut_factory: Callable[..., Wica],
 ):
-    """An output is followed from `on_agent_output_started`, at its first words: the Probe's
+    """An output is followed from `on_agent_command_started`, at its first words: the Probe's
     listener records each state its entry goes through — `running` from the opening, with no
     text yet, then its outcome — each marked `is_output`, and `command_issued` comes once its
     body is complete, with the whole text. Nothing is reconstructed from an entry's earlier
@@ -165,7 +165,7 @@ def test_an_output_is_followed_from_its_start_to_its_end(
     assert [e.text for e in collector.of("private_text")] == ["thinking"]
     reaction = collector.of("reaction_ended")[0].reaction
     assert reaction is not None and not reaction.noop
-    assert reaction.output_call_ids == (issued[0].call_id,)
+    assert reaction.command_call_ids == (issued[0].call_id,)
     assert reaction.first_output_at is not None
     assert voice.said == ["Hello there."]
 
@@ -174,7 +174,7 @@ def test_an_output_whose_opening_the_probe_missed_is_followed_from_its_report(
     sut_factory: Callable[..., Wica],
 ):
     """A Probe attached while an output is already open (here, from inside that output's own
-    `on_agent_output_started`, which it is too late to receive) follows it from its
+    `on_agent_command_started`, which it is too late to receive) follows it from its
     `command_issued` report: the state the entry is in then, and every later one — so `"idle"`
     never waits on an output whose end it could not see."""
     sut = sut_factory([{"text": "<say>Hello there.</say>"}], commands=())
@@ -182,7 +182,7 @@ def test_an_output_whose_opening_the_probe_missed_is_followed_from_its_report(
     probe = Probe(sut)
     collector = Collector()
     probe.subscribe(collector)
-    sut.on_agent_output_started.subscribe(lambda issued: probe.attach())
+    sut.on_agent_command_started.subscribe(lambda issued: probe.attach())
     sut.start()
     sut.world.update("prompt", "Greet me.")
     wait_until(

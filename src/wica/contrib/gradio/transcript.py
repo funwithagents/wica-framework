@@ -6,16 +6,15 @@ Commands do, or what the agent is called. It consumes
 
   - `on_agent_trigger`  → the World entry a step observed, shown on the input (right) side;
   - `on_agent_prompt`   → the opening of the step's **reaction group** in the transcript;
-  - `on_agent_command`  → each Command the model issued as a tool call, shown as an item under
-                          the reaction, **with its live execution state**: the log listens to
-                          the Command's `agent:command:<call_id>` World entry (the seam
-                          `CommandIssued.call_id` exists for — see specs/agent.md
-                          "Instrumentation") and updates the item in place as it goes running →
-                          complete / failed / cancelled;
-  - `on_agent_output_started` → each output (a `CommandIssued` with `is_output` set), from its
-                          first words: its item opens then and is followed the same way, its text
-                          filling in when the body is complete. Its later `on_agent_command`
-                          report adds nothing;
+  - `on_agent_command_started` → each Command when it starts — a tool call at dispatch, an
+                          output at its first words — shown as an item under the reaction, **with
+                          its live execution state**: the log listens to the Command's
+                          `agent:command:<call_id>` World entry (the seam `CommandIssued.call_id`
+                          exists for — see specs/agent.md "Instrumentation") and updates the item
+                          in place as it goes running → complete / failed / cancelled, an
+                          output's text filling in when its body is complete;
+  - `on_agent_command`  → the same Command with its arguments complete: adds nothing to an item
+                          already open (it opens one only for a Command whose start was missed);
   - `on_agent_private_text` → what the model wrote outside its output tags in the step (💭);
   - `on_agent_reaction_ended` → the end of the reaction group, and a declined reaction (🚫): a
                           record whose `noop` flag is set. No Command is issued for it.
@@ -118,8 +117,8 @@ class TranscriptLog:
         # completion: when it was issued, or for an output when it opened.
         self._command_items: dict[str, dict[str, Any]] = {}
         self._command_started: dict[str, datetime] = {}
-        # Outputs followed since they opened, until on_command reports them (once each).
-        self._opened_outputs: set[str] = set()
+        # Commands followed since they started, until on_command reports them (once each).
+        self._opened: set[str] = set()
         # Reaction group items by reaction_id, so on_reaction_ended can drop the spinner and add
         # the duration once the reaction finishes. See specs/instrumentation.md.
         self._reaction_items: dict[int, dict[str, Any]] = {}
@@ -131,7 +130,7 @@ class TranscriptLog:
             wica.on_agent_trigger.subscribe(self.on_trigger)
             wica.on_agent_prompt.subscribe(self.on_prompt)
             wica.on_agent_command.subscribe(self.on_command)
-            wica.on_agent_output_started.subscribe(self.on_output_started)
+            wica.on_agent_command_started.subscribe(self.on_command_started)
             wica.on_agent_private_text.subscribe(self.on_private_text)
             wica.on_agent_reaction_ended.subscribe(self.on_reaction_ended)
 
@@ -191,24 +190,22 @@ class TranscriptLog:
         self._last_trigger_label = display.label
         self._items.put({"role": "user", "content": display.label})
 
-    def on_output_started(self, command: CommandIssued) -> None:
-        """An output opened, at its first words: create its item under the current reaction and
-        follow its execution entry from there. The Agent fires this once the entry is registered
-        and before its `running` value lands (specs/agent.md, "Instrumentation"), so the listener
-        sees the output's whole life — running with no text yet, running with its whole text,
-        then its outcome."""
+    def on_command_started(self, command: CommandIssued) -> None:
+        """A Command started — a tool call at dispatch, an output at its first words: create its
+        item under the current reaction and follow its execution entry from there. The Agent fires
+        this once the entry is registered and before its `running` value lands (specs/agent.md,
+        "Instrumentation"), so the listener sees the Command's whole life."""
         with self._lock:
-            self._opened_outputs.add(command.call_id)
+            self._opened.add(command.call_id)
         self._open_item(command)
 
     def on_command(self, command: CommandIssued) -> None:
-        """The model issued a Command — create its item under the current reaction right away
-        (pinning its position in arrival order) marked in progress, and follow its execution entry
-        so on_command_update can flip the item to its outcome. An output followed since it opened
-        is already there: its report here, once its text is complete, adds nothing."""
+        """The model issued a Command, its arguments complete. Its item already exists, opened
+        when it started; only a Command whose start this log missed gets its item here, marked in
+        progress and followed so on_command_update can flip it to its outcome."""
         with self._lock:
-            if command.call_id in self._opened_outputs:
-                self._opened_outputs.discard(command.call_id)
+            if command.call_id in self._opened:
+                self._opened.discard(command.call_id)
                 return
         self._open_item(command)
 

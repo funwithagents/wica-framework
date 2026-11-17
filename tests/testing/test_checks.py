@@ -2,7 +2,7 @@
 `ReactionTrace` / `TriggerTrace` records: each built-in kept and broken, the windows they judge,
 and the registry. In these timelines an output is a `command_issued` whose `is_output` is set (named
 `say`, the output Command, unless a test says otherwise), listed in its reaction's
-`output_call_ids`, and a declined reaction a record whose `noop` flag is set — there is no `noop`
+`command_call_ids`, and a declined reaction a record whose `noop` flag is set — there is no `noop`
 Command."""
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from wica.instrumentation import ReactionTrace, TokenUsage, TriggerTrace
+from wica.instrumentation import CommandTrace, ReactionTrace, TokenUsage, TriggerTrace
 from wica.testing import (
     answer_latencies,
     CHECKS,
@@ -56,7 +56,6 @@ def _reaction(
     *,
     outcome: Any = "ok",
     call_ids: tuple[str, ...] = (),
-    output_ids: tuple[str, ...] = (),
     noop: bool = False,
     error: str | None = None,
     usage: TokenUsage | None = None,
@@ -74,7 +73,6 @@ def _reaction(
         error=error,
         text_length=0,
         command_call_ids=call_ids,
-        output_call_ids=output_ids,
         noop=noop,
         usage=usage,
         ended_at=_at(1.0),
@@ -130,7 +128,6 @@ def _answered_turn(version: int, t: float, reaction_id: int) -> list[SutEvent]:
                 reaction_id,
                 [_trigger("speech_input", version)],
                 call_ids=(call,),
-                output_ids=(call,),
             ),
         ),
     ]
@@ -208,7 +205,6 @@ def test_a_dropped_write_opens_no_turn_and_coalesced_writes_open_one():
                 1,
                 [_trigger("speech_input", 1), _trigger("speech_input", 2)],
                 call_ids=("c1",),
-                output_ids=("c1",),
             ),
         ),
     ]
@@ -255,9 +251,7 @@ def test_no_noop_on_input_reads_the_noop_flag_of_a_reaction_to_a_scenario_input(
         _ev(
             "reaction_ended",
             3.0,
-            reaction=_reaction(
-                4, [_trigger("speech_input", 2)], call_ids=("c4",), output_ids=("c4",)
-            ),
+            reaction=_reaction(4, [_trigger("speech_input", 2)], call_ids=("c4",)),
         ),
     ]
     assert _check("no_noop_on_input", allowed).ok
@@ -351,7 +345,6 @@ def _cancel_reaction(
                 1,
                 [_trigger("speech_input", 1)],
                 call_ids=(*outputs, *(c for c in calls if c not in outputs)),
-                output_ids=outputs,
             ),
         )
     )
@@ -530,7 +523,6 @@ def test_measures_count_outputs_extra_replies_noops_failures_words_and_turns():
                 2,
                 [_trigger("agent:command:c1", 1, completion=True)],
                 call_ids=("c2",),
-                output_ids=("c2",),
             ),
         ),
         _ev(
@@ -593,7 +585,6 @@ def _reply(
                 reaction_id,
                 [trigger],
                 call_ids=calls,
-                output_ids=calls,
             ),
         ),
     ]
@@ -638,7 +629,6 @@ def _split_answer(version: int, t: float) -> list[SutEvent]:
                 version + 100,
                 [_trigger(f"agent:command:e{version}", 1, completion=True)],
                 call_ids=(f"s{version}",),
-                output_ids=(f"s{version}",),
             ),
         ),
     ]
@@ -654,9 +644,23 @@ def test_an_answer_over_two_steps_is_one_answer_timed_to_its_first_word():
     assert answer_latencies(timeline, CONTEXT) == pytest.approx([1.2, 0.5])
 
 
+def _ended(t: float, cid: str, started: float, *, output: bool = True) -> SutEvent:
+    """A Command's end record, carrying when it started (for an output: its first words)."""
+    trace = CommandTrace(
+        call_id=cid,
+        name="say" if output else "dance",
+        reaction_id=1,
+        started_at=_at(started),
+        ended_at=_at(t),
+        state="complete",
+        is_output=output,
+    )
+    return _ev("command_ended", t, name=trace.name, call_id=cid, command=trace)
+
+
 def test_answer_latency_ends_at_the_first_words_of_the_output_not_at_its_report():
-    """An output is reported once its body is complete; its first words were heard earlier, at
-    the reaction's `first_output_at`."""
+    """An output is reported once its body is complete; its first words were heard earlier, when
+    it started — its own `CommandTrace.started_at`."""
     opened = T0.timestamp()
     timeline = [
         _set(0.0, "speech_input", "tell me a story"),
@@ -666,22 +670,17 @@ def test_answer_latency_ends_at_the_first_words_of_the_output_not_at_its_report(
         _ev(
             "reaction_ended",
             3.0,
-            reaction=_reaction(
-                1,
-                [_trigger("speech_input", 1)],
-                call_ids=("c1",),
-                output_ids=("c1",),
-                first_output_at=_at(0.7),
-            ),
+            reaction=_reaction(1, [_trigger("speech_input", 1)], call_ids=("c1",)),
         ),
+        _ended(9.0, "c1", started=0.7),
     ]
     assert timeline[1].t == opened
     assert answer_latencies(timeline, CONTEXT) == pytest.approx([0.7])
 
 
-def test_answer_latency_finds_the_reaction_through_its_output_call_ids():
-    """The reaction that delivered a turn's first output is the one whose `output_call_ids` opens
-    with it, wherever that output sits among `command_call_ids`."""
+def test_answer_latency_reads_the_answering_outputs_own_start():
+    """Whatever else the reaction issued, and in whatever order, the sample ends at the start of
+    the turn's first output — not at a tool call's."""
     timeline = [
         _set(0.0, "speech_input", "dance and tell me"),
         _ev("input_written", 0.0, key="speech_input", version_id=1),
@@ -691,14 +690,10 @@ def test_answer_latency_finds_the_reaction_through_its_output_call_ids():
         _ev(
             "reaction_ended",
             3.0,
-            reaction=_reaction(
-                1,
-                [_trigger("speech_input", 1)],
-                call_ids=("d1", "c1"),
-                output_ids=("c1",),
-                first_output_at=_at(0.4),
-            ),
+            reaction=_reaction(1, [_trigger("speech_input", 1)], call_ids=("c1", "d1")),
         ),
+        _ended(5.0, "d1", started=0.2, output=False),
+        _ended(5.0, "c1", started=0.4),
     ]
     assert answer_latencies(timeline, CONTEXT) == pytest.approx([0.4])
 

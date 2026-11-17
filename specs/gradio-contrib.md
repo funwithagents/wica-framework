@@ -242,7 +242,7 @@ it used to carry (now `ReactionLog`):
 ```python
 class TranscriptLog:
     def __init__(self, wica: Wica | None, display_entry: DisplayEntry | None = None) -> None: ...
-    # subscribes on_agent_trigger, on_agent_prompt, on_agent_output_started, on_agent_command,
+    # subscribes on_agent_trigger, on_agent_prompt, on_agent_command_started, on_agent_command,
     # on_agent_private_text, on_agent_reaction_ended
     def snapshot(self) -> TranscriptSnapshot: ...            # conversation (Gradio "messages" format) + change signature
 
@@ -266,9 +266,9 @@ What it renders, from the framework's uniform signals only:
   - **every Command and output the model issued**, titled `🗣️` for an output and `🦾` otherwise
     — told apart by the Event's `CommandIssued.is_output`, never by the Command's name — and
     re-rendered through the hook on each state, **with its execution state live**. A Command
-    issued as a tool call gets its item on `on_agent_command`; an output gets its item on
-    `on_agent_output_started`, when it opens, and its later `on_agent_command` report (its text
-    complete) adds nothing — a log that missed the opening creates the item then. The item is
+    gets its item on `on_agent_command_started`, when it starts — a tool call at dispatch, an
+    output at its first words — and its later `on_agent_command` report (its arguments complete)
+    adds nothing; a log that missed the start creates the item then. The item is
     marked *pending* (a spinner), and the log listens to the
     Command's `agent:command:<call_id>` World entry — the seam `CommandIssued.call_id` exists for
     ([agent.md](agent.md), "Instrumentation") — to edit the item in place as it goes running →
@@ -338,7 +338,7 @@ the package layout — [testing.md](testing.md)). They import the contrib (hence
 - **`TranscriptLog`** driven the way the Agent drives it: `on_trigger`/`on_prompt`/`on_command`
   calls and an `on_command_update` sequence, asserting the transcript items, reaction nesting,
   the pending → terminal edits (state suffix, result/error, duration, `status` removed), an
-  output followed from `on_output_started` with no second item on its `on_command`, the `🗣️`
+  output followed from `on_command_started` with no second item on its `on_command`, the `🗣️`
   read from `is_output`, the `noop` item from a reaction record,
   the private-text item, and that the change signature moves on an in-place edit and is stable
   otherwise. Where a log needs a `Wica` (live output Command name, per-Command World listeners),

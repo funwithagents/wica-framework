@@ -110,7 +110,7 @@ class CommandIssued:
     # suffix and the cancel_command target. For a dispatched Command the Event carrying this
     # payload fires once that entry is registered (before its running value is written), so a
     # subscriber can add_listener on it right away. An output is reported once its body is
-    # complete, when its entry is already running (its opening is on_output_started).
+    # complete, when its entry is already running (its start is on_command_started).
     name: str
     args: dict[str, Any]
     call_id: str
@@ -290,7 +290,6 @@ class _ReactionBuilder:
     error: str | None = None
     text_length: int = 0
     first_output_at: datetime | None = None
-    output_call_ids: list[str] = field(default_factory=list)
     command_call_ids: list[str] = field(default_factory=list)
     noop: bool = False
     usage: TokenUsage | None = None  # summed over attempts
@@ -969,7 +968,7 @@ class Agent:
         self.on_prompt: Event[list[BaseMessage]] = Event()
         self.on_response_rejected: Event[ResponseRejection] = Event()
         self.on_command: Event[CommandIssued] = Event()
-        self.on_output_started: Event[CommandIssued] = Event()
+        self.on_command_started: Event[CommandIssued] = Event()
         self.on_private_text: Event[str] = Event()
         self.on_reaction_ended: Event[ReactionTrace] = Event()
         self.on_trigger_dropped: Event[WorldEntry] = Event()
@@ -1452,7 +1451,6 @@ class Agent:
                     guard_duration=builder.guard_duration,
                     first_content_at=builder.first_content_at,
                     first_output_at=builder.first_output_at,
-                    output_call_ids=tuple(builder.output_call_ids),
                 )
             )
 
@@ -1803,7 +1801,7 @@ class Agent:
         )
         # Reported once the entry exists and before its first value lands — the contract on_command
         # gives a tool call — so a subscriber can add_listener and follow the whole output.
-        self.on_output_started.emit(
+        self.on_command_started.emit(
             CommandIssued(command.name, {**kept, "text": ""}, call_id, is_output=True)
         )
         self._world.update(
@@ -1860,7 +1858,6 @@ class Agent:
                 )
             )
             builder.command_call_ids.append(part.call_id)
-            builder.output_call_ids.append(part.call_id)
         if session.parts and notes and parsed.note is not None:
             last = session.parts[-1]
             if last.key not in self._running_tasks:
@@ -2040,9 +2037,12 @@ class Agent:
             trigger_condition_fn=lambda old, new: new is not None and new.is_terminal(),
         )
         # Emit once the entry exists and before its first value lands, so a subscriber can
-        # add_listener(key) here and see running -> terminal. A subscriber may annotate or
-        # otherwise mutate what it receives without changing the arguments stored in history,
-        # shown in the World, or passed to the Command itself. See specs/agent.md.
+        # add_listener(key) here and see running -> terminal. A tool call's arguments arrive
+        # whole, so its start and its complete arguments are the same moment: started, then
+        # issued. A subscriber may annotate or otherwise mutate what it receives without
+        # changing the arguments stored in history, shown in the World, or passed to the Command
+        # itself. See specs/agent.md ("Instrumentation").
+        self.on_command_started.emit(CommandIssued(name, copy.deepcopy(args), call_id))
         self.on_command.emit(CommandIssued(name, copy.deepcopy(args), call_id))
         self._world.update(key, CommandExecution(name=name, args=args, state="running"))
         started_at = self._world.get_entry(key).current.timestamp
