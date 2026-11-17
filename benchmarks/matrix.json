@@ -1,5 +1,5 @@
 {
-  "_comment": "WICA demo benchmark matrix (specs/benchmark.md, 'The matrix'). One entry per model under test; 'agent' is the config's agent block, merged over 'agent_defaults' (the demo's persona, so every row drives the same robot). Ids verified 2026-11-09 against each provider's models endpoint (Anthropic, Mistral, the Gemini API list, the Hub's inference_provider filter) or by a one-token chat probe (OpenAI; the key has no model-list scope) \u2014 see README.md, 'Model catalog'. Optional per-entry keys: tags (filter with --tags / --exclude-tags: 'default' = the demo's committed model for that provider; 'small' / 'mid' / 'large' = the provider's own tier words; 'reasoning' = thinks before answering; 'open' = open weights; 'api' = hosted; 'fixture' = no network, scripted), enabled (false = opt-in with --include-disabled), requires_env (extra env vars that gate the entry), notes. Reasoning models run at the provider's floor (Anthropic reasoning_effort low \u2014 thinking cannot be off on the 5.5 line; OpenAI minimal / none; Gemini thinking_level low) so the latency column compares like with like: a conversational robot wants the fastest answer a model gives.",
+  "_comment": "WICA demo benchmark matrix (specs/benchmark.md, 'The matrix'). One entry per model under test; 'agent' is the config's agent block, merged over 'agent_defaults' (the demo's persona, so every row drives the same robot). Ids verified 2026-11-09 against each provider's models endpoint (Anthropic, Mistral, the Gemini API list, the Hub's inference_provider filter) or by a one-token chat probe (OpenAI; the key has no model-list scope) \u2014 see README.md, 'Model catalog'. Optional per-entry keys: tags (filter with --tags / --exclude-tags: 'default' = the demo's committed model for that provider; 'small' / 'mid' / 'large' = the provider's own tier words; 'reasoning' = thinks before answering; 'open' = open weights; 'api' = hosted; 'fixture' = no network, scripted; 'local' = a model you host, behind a server you start first), enabled (false = opt-in with --include-disabled), requires_env (extra env vars that gate the entry), notes. Reasoning models run at the provider's floor (Anthropic reasoning_effort low \u2014 thinking cannot be off on the 5.5 line; OpenAI minimal / none; Gemini thinking_level low) so the latency column compares like with like: a conversational robot wants the fastest answer a model gives.",
   "agent_defaults": {
     "system_prompt_file": "../examples/conversation_demo/prompts/wica.md"
   },
@@ -356,6 +356,68 @@
         "open"
       ],
       "notes": "The small gpt-oss on Groq."
+    },
+    {
+      "id": "openai-chat-completions-compatible/qwen2.5-7b-instruct@llama-server",
+      "agent": {
+        "provider": "openai-chat-completions-compatible",
+        "context_window": 8192,
+        "model_timeout": 30,
+        "model_kwargs": {
+          "max_tokens": 512
+        },
+        "model": "local",
+        "base_url": "http://127.0.0.1:8080/v1"
+      },
+      "enabled": false,
+      "tags": [
+        "local",
+        "open",
+        "small"
+      ],
+      "notes": "Qwen2.5-7B-Instruct Q4_K_M on llama.cpp's server: `llama-server -m qwen2.5-7b-instruct-q4_k_m.gguf --jinja -np 1 -c 8192 --port 8080`. Opt in with --only 'openai-chat-completions-compatible/*@llama-server' --include-disabled; see docs/guides/local-models.md."
+    },
+    {
+      "id": "openai-chat-completions-compatible/qwen2.5-7b-instruct@mlx",
+      "agent": {
+        "provider": "openai-chat-completions-compatible",
+        "context_window": 8192,
+        "model_timeout": 30,
+        "model_kwargs": {
+          "max_tokens": 512
+        },
+        "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        "base_url": "http://127.0.0.1:8081/v1"
+      },
+      "enabled": false,
+      "tags": [
+        "local",
+        "open",
+        "small"
+      ],
+      "notes": "The same model on Apple's server (Apple silicon only): `mlx_lm.server --model mlx-community/Qwen2.5-7B-Instruct-4bit --port 8081`. Its first request downloads and loads the model: warm it with one request first. Opt in with --only 'openai-chat-completions-compatible/*@mlx' --include-disabled; see docs/guides/local-models.md."
+    },
+    {
+      "id": "openai-chat-completions-compatible/qwen2.5-7b-instruct@ollama",
+      "agent": {
+        "provider": "openai-chat-completions-compatible",
+        "context_window": 8192,
+        "model_timeout": 30,
+        "model_kwargs": {
+          "extra_body": {
+            "max_tokens": 512
+          }
+        },
+        "model": "qwen2.5:7b",
+        "base_url": "http://127.0.0.1:11434/v1"
+      },
+      "enabled": false,
+      "tags": [
+        "local",
+        "open",
+        "small"
+      ],
+      "notes": "The same model on Ollama: `ollama pull qwen2.5:7b`, with the server started as `OLLAMA_CONTEXT_LENGTH=8192 ollama serve` (its 4096-token default cuts a longer prompt silently). The cap is in extra_body: Ollama ignores the max_completion_tokens a plain max_tokens becomes. Opt in with --only 'openai-chat-completions-compatible/*@ollama' --include-disabled; see docs/guides/local-models.md."
     }
   ]
 }
