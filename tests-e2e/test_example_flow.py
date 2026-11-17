@@ -155,7 +155,7 @@ def test_speech_input_drives_say_action_and_world_state(fast_say: None):
         assert len(items_titled(convo, "🗣️ say")) == 1
         say = items_titled(convo, "🗣️ say")[0]
         assert say["metadata"]["title"] == "🗣️ say ✅"
-        assert say["content"] == "hi there\n→ Said it."
+        assert say["content"] == "hi there\n→ Done."
         assert say["metadata"]["parent_id"] == "reaction-1"
         assert say["metadata"]["duration"] >= 0.0
 
@@ -235,8 +235,8 @@ def test_next_note_lets_the_robot_speak_again_once_it_has_spoken(fast_say: None)
         wait_until(spoke_twice)
         say = items_titled(transcript.snapshot().conversation, "🗣️ say")
         assert [(m["content"], m["metadata"]["parent_id"]) for m in say] == [
-            ("first thing\n→ Said it.", "reaction-1"),
-            ("second thing\n→ Said it.", "reaction-2"),
+            ("first thing\n→ Done.", "reaction-1"),
+            ("second thing\n→ Done.", "reaction-2"),
         ]
         choices = handle.reactions.snapshot().choices
         assert choices[1][0].endswith("— 🗣️ say finished")
@@ -344,7 +344,7 @@ def test_speaking_again_cuts_off_what_the_robot_was_saying(fast_say: None):
         assert first["metadata"]["parent_id"] == "reaction-1"
         words = first["content"].split()
         assert 1 <= len(words) < 10 and words == long_text.split()[: len(words)]
-        assert second["content"] == "all right\n→ Said it."
+        assert second["content"] == "all right\n→ Done."
         assert second["metadata"]["parent_id"] == "reaction-2"
         assert not items_titled(convo, "🦾 cancel_command")
 
