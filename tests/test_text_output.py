@@ -569,12 +569,15 @@ def test_an_output_entry_shows_its_tag_and_its_delivery_never_a_call(
     r.hear("stop", 2)
     running = r.observations()[1]
     assert (
-        '<say emotion="happy"> "Once upon a time." — still being delivered' in running
+        'say output (emotion="happy"): "Once upon a time." — still being delivered'
+        in running
     )
     assert "Calling say(" not in running
     r.hear("thanks", 3)
-    assert '<say emotion="happy"> "Once " — cut off there' in r.observations()[2]
-    assert '<say> "Okay." — delivered: Said it.' in r.observations()[2]
+    assert (
+        'say output (emotion="happy"): "Once " — cut off there' in r.observations()[2]
+    )
+    assert 'say output: "Okay." — delivered: Said it.' in r.observations()[2]
 
 
 def test_an_outputs_records_go_with_its_entry(rig: Callable[..., Rig]) -> None:

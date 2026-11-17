@@ -257,7 +257,7 @@ def test_output_command_flow_through_the_setters():
         assert isinstance(model, FakeChatModel)
         second_prompt = " ".join(message_text(m) for m in model.calls[1])
         assert "You planned to do next: check on them" in second_prompt
-        assert '<speak> "hello" — delivered: spoken.' in second_prompt
+        assert 'speak output: "hello" — delivered: spoken.' in second_prompt
         assert [r.noop for r in reactions] == [False, True]
         time.sleep(0.2)  # give any (erroneous) further wake a chance to fire
         assert len(model.calls) == 2

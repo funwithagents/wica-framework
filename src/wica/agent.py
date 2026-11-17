@@ -196,15 +196,17 @@ def _serialize_command_execution(
 def _serialize_output_execution(
     value: CommandExecution | None, previous: CommandExecution | None
 ) -> Content:
-    """An output's World entry: the tag the model wrote and how far its delivery got — never a
-    call (the model is told its output Command is not a tool), and no verb: the output may be a
-    voice, a chat bubble or a screen, and its tag name says which. See specs/agent.md ("Output:
-    tags in the model's text")."""
+    """An output's World entry: what was written in the tag and how far its delivery got —
+    never a call (the model is told its output Command is not a tool), never tag-shaped (a model
+    shown its actions as tags writes its tools as tags), and no verb: the output may be a voice,
+    a chat bubble or a screen, and its name says which. See specs/agent.md ("Output: tags in the
+    model's text")."""
     if value is None:
         return [TextPart("(no output)")]
     text = str(value.args.get("text", ""))
-    attributes = "".join(f' {k}="{v}"' for k, v in value.args.items() if k != "text")
-    head = f"<{value.name}{attributes}>" + (f' "{text}"' if text else "")
+    attributes = ", ".join(f'{k}="{v}"' for k, v in value.args.items() if k != "text")
+    head = f"{value.name} output" + (f" ({attributes})" if attributes else "")
+    head += f': "{text}"' if text else ""
     if value.state == "running":
         body = f"{head} — still being delivered, not finished."
     elif value.state == "complete":
