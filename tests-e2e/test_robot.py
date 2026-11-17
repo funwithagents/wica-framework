@@ -49,23 +49,19 @@ KNOWN_FLAKY: dict[tuple[str, str], str] = {
         "gpt-oss-120b speaks when a background sound wakes it (3 of 6 attempts, 2026-11-10): "
         "it checks in or follows up the previous turn instead of doing nothing"
     ),
-    ("e2e.mistral.config", "background"): (
-        "ministral-14b speaks when a background sound wakes it, offering to chat or to dance "
-        "again (11 of 12 attempts, 2026-11-17, speech as a tag in the text)"
-    ),
     ("e2e.huggingface-hub.config", "long_answer"): (
         "gpt-oss-120b, after writing the note, chains check-in says instead of doing nothing; "
         "about 3 in 10 runs end near the 30 s idle bound and some miss it (CI on main, "
         "2026-11-12: five says, still speaking at 30 s)"
     ),
-    ("e2e.mistral.config", "act_on_request"): (
-        "ministral-14b answers 'Can you dance for me?' by saying it will and never calls the "
-        "tool: it writes `<dance>` in its text, or speaks again as if it had danced "
-        "(12 of 12 attempts, 2026-11-17, speech as a tag in the text)"
+    ("e2e.huggingface-hub-tool.config", "background"): (
+        "gpt-oss-120b, with speech as a tool call, calls say instead of noop when a background "
+        "sound wakes it (2 of 6 attempts, 2026-11-17)"
     ),
     ("e2e.mistral.config", "long_answer"): (
-        "ministral-14b says the note is saved without calling write_note, or writes it as a "
-        "tag in its text (6 of 12 attempts, 2026-11-17, speech as a tag in the text)"
+        "ministral-14b, with speech as a tool call, sometimes does not call write_note within "
+        "60 s, or keeps speaking after the note past the 30 s settle (2 of 6 attempts, "
+        "2026-11-17)"
     ),
     ("e2e.openai.config", "long_answer"): (
         "gpt-4o sometimes writes the note as a tag in its text (`<functions.write_note …>`) or "

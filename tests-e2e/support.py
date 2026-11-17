@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -10,24 +12,83 @@ from langchain_core.language_models import BaseChatModel
 
 from wica import Wica
 from wica.agent import build_chat_model
-from wica.config import AgentConfig, MissingEnvError, WicaConfig
+from wica.config import AgentConfig, ConfigError, MissingEnvError, WicaConfig
 from wica.content import Content, TextPart
 from wica.testing import CheckSpec, ExpectStep, InputStep, Scenario, WaitStep
 
 E2E_DIR = Path(__file__).parent
 
-# One config per provider, named symmetrically (no privileged default) — the parametrized e2e
-# tests (smoke + tool-calling round trip) run against each. Each uses api_key_env, so a provider
-# whose key env var is unset skips (never fails): the key resolves at build, so MissingEnvError ->
-# pytest.skip lives in real_chat_model / real_agent (not the inert load). See specs/project.md
-# ("Live/e2e tests") and specs/config.md ("API key").
+# One e2e config per provider, named symmetrically (no privileged default), plus the Hub's model a
+# second time in tool mode — the parametrized e2e tests run against each. Each uses api_key_env,
+# so a provider whose key env var is unset skips (never fails): the key resolves at build, so
+# MissingEnvError -> pytest.skip lives in real_chat_model / real_wica (not the inert load). See
+# specs/testing.md ("Live tier", "E2e configs") and specs/config.md ("API key").
 PROVIDER_CONFIGS = [
     E2E_DIR / "e2e.anthropic.config.json",
     E2E_DIR / "e2e.openai.config.json",
     E2E_DIR / "e2e.huggingface-hub.config.json",
+    E2E_DIR / "e2e.huggingface-hub-tool.config.json",
     E2E_DIR / "e2e.gemini.config.json",
     E2E_DIR / "e2e.mistral.config.json",
 ]
+
+OUTPUT_MODES = ("tag", "tool")
+
+# Overrides every config's output mode when set (`tag` or `tool`), to compare a model in both
+# modes by hand; CI never sets it. See specs/testing.md ("E2e configs").
+OUTPUT_MODE_OVERRIDE = "WICA_ROBOT_OUTPUT"
+
+
+@dataclass(frozen=True)
+class E2EConfig:
+    """An e2e config file: the WICA config the test stands up (its `agent` block, a plain
+    `WicaConfig`) and how the test wires it — `output`, the output Command as a tag (`"tag"`)
+    or as a tool call (`"tool"`, `set_output_command(..., as_tool=True)`)."""
+
+    wica: WicaConfig
+    output: str
+
+    @property
+    def output_as_tool(self) -> bool:
+        return self.output == "tool"
+
+
+def load_e2e_config(config_path: Path) -> E2EConfig:
+    """Load an e2e config file (inert — validates only, reads no env). Strict like `WicaConfig`:
+    `output` is required and is `tag` or `tool`; a key other than `agent` and `output` is a
+    `ConfigError`. The `agent` block goes to `WicaConfig.from_dict` as is, with the file's
+    directory as `base_dir`."""
+    try:
+        data = json.loads(config_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"{config_path.name}: invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{config_path.name}: an e2e config is a JSON object")
+    unknown = sorted(set(data) - {"agent", "output"})
+    if unknown:
+        raise ConfigError(f"{config_path.name}: unknown e2e config keys {unknown}")
+    output = data.get("output")
+    if output not in OUTPUT_MODES:
+        raise ConfigError(
+            f"{config_path.name}: output must be 'tag' or 'tool', not {output!r}"
+        )
+    wica = WicaConfig.from_dict(
+        {"agent": data.get("agent")}, base_dir=config_path.parent
+    )
+    return E2EConfig(wica=wica, output=output)
+
+
+def output_as_tool(config_path: Path) -> bool:
+    """Whether the live tests over *config_path* wire the output Command as a tool call: the
+    config's `output`, unless `WICA_ROBOT_OUTPUT` (`tag` or `tool`) overrides it."""
+    override = os.environ.get(OUTPUT_MODE_OVERRIDE)
+    if override is not None:
+        if override not in OUTPUT_MODES:
+            raise ValueError(
+                f"{OUTPUT_MODE_OVERRIDE} must be 'tag' or 'tool', not {override!r}"
+            )
+        return override == "tool"
+    return load_e2e_config(config_path).output_as_tool
 
 
 # Set to "1" (CI's live job does), a missing key fails the test instead of skipping it, so a run
@@ -96,9 +157,9 @@ def skip_if_rate_limited(config_path: Path) -> None:
 
 
 def load_agent_config(config_path: Path) -> AgentConfig:
-    """Load the config (inert — validates only, reads no env/files). The api key resolves later, at
-    build; the skip-when-unset lives in the build helpers below."""
-    return WicaConfig.from_json_file(config_path).agent
+    """Load the e2e config's Agent block (inert — validates only, reads no env/files). The api
+    key resolves later, at build; the skip-when-unset lives in the build helpers below."""
+    return load_e2e_config(config_path).wica.agent
 
 
 def real_chat_model(config_path: Path) -> BaseChatModel:
@@ -133,7 +194,7 @@ def real_wica(
     (fails under `FAIL_ON_MISSING`) — the key resolves at build inside `Wica.init`, so
     `MissingEnvError -> pytest.skip` lives here — and when the provider rate-limits the key
     (`skip_if_rate_limited`)."""
-    config = WicaConfig.from_json_file(config_path)
+    config = load_e2e_config(config_path).wica
     overrides = dict(agent_overrides or {})
     if system_prompt is not None:
         overrides.update(system_prompt=system_prompt, system_prompt_file=None)

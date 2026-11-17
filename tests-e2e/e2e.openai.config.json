@@ -1,4 +1,5 @@
 {
+  "output": "tag",
   "agent": {
     "provider": "openai",
     "model": "gpt-4o",

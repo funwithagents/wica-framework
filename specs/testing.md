@@ -6,6 +6,7 @@ code:
   - tests-e2e/e2e.anthropic.config.json
   - tests-e2e/e2e.openai.config.json
   - tests-e2e/e2e.huggingface-hub.config.json
+  - tests-e2e/e2e.huggingface-hub-tool.config.json
   - tests-e2e/e2e.gemini.config.json
   - tests-e2e/e2e.mistral.config.json
   - tests-e2e/robot_app.py
@@ -13,6 +14,7 @@ code:
 tests:
   - tests-e2e/test_smoke.py
   - tests-e2e/test_preflight_fake.py
+  - tests-e2e/test_e2e_configs_fake.py
   - tests-e2e/test_wica.py
   - tests-e2e/test_robot.py
   - tests-e2e/test_fake_flows.py
@@ -73,15 +75,39 @@ There is no process-global World: each `Wica` (see [wica.md](wica.md)) owns its 
 
 The live e2e set is **parametrized over one committed config per provider**, not a single reference provider — so the live tests verify WICA's real provider-branching construction across the whole supported surface, not just one privileged backend.
 
-- **One config file per provider**, checked in and named symmetrically: `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, `huggingface-hub`, `gemini`, and `mistral` (the file stem is the `provider` value inside, which is also the extra's name). They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**.
+- **One config file per provider**, checked in and named symmetrically — `tests-e2e/e2e.<provider>.config.json` for `anthropic`, `openai`, `huggingface-hub`, `gemini` and `mistral` (the file stem is the `provider` value inside, which is also the extra's name) — plus `e2e.huggingface-hub-tool.config.json`, the Hub's model a second time in the other output mode. Each holds its Agent block and the output mode the tests wire it in ("E2e configs" below). They're wired together as `PROVIDER_CONFIGS` in `tests-e2e/support.py`, so **every live e2e test runs once per config**.
 - **The live tests go through WICA's own entrypoint**, not a divergent `init_chat_model` call: `support.real_chat_model()` builds via `build_chat_model()` (the smoke test), and `support.real_wica()` stands up the whole system via `Wica.init(WicaConfig.from_json_file(...))` — the real production path, loop + World + Agent and all. This is what makes the tier meaningful: it exercises the actual per-provider construction (including `huggingface-hub`'s dedicated non-`init_chat_model` path — see [agent.md](agent.md), "Provider-agnostic model, from config") end-to-end, so a branch that builds the wrong model is caught here rather than slipping through a test that bypassed it.
 - **Each config uses `api_key_env`**, so it carries no secret and is safe to commit (see [config.md](config.md), "API key"). A provider whose key env var is unset makes that config **skip itself** — never fail — via `MissingEnvError → pytest.skip` (in `support.load_agent_config`). You exercise only the providers you hold keys for; the rest skip cleanly, so a contributor with one key, or CI with none, is never broken by the others' absence.
 - **A provider's rate limit skips, too.** A key that is set but rate-limited or out of quota says nothing about the code, yet it fails the call. A `pytest_runtest_call` wrapper in `tests-e2e/conftest.py` therefore turns a test failure into a skip when an HTTP 429 sits in the chain of the raised exception **or of any exception logged under the `wica` logger while the test ran** — the Agent catches a failed model call and logs it (`model call failed; step abandoned`), so in a `Wica`-driven test the 429 surfaces only as an expectation that timed out. The check is duck-typed over the providers' SDKs (`status_code`, `code`, `response.status_code` equal to 429; none is imported); any other failure still fails, and the skip reason carries the provider's message, so `-rs` shows it. A test that failed for another reason while a 429 was also logged skips too — accepted, since the provider then failed a call of that test anyway.
 - **A rate limit is also checked once per provider, before its first test.** The per-test check only sees a 429 that surfaces, and inside a `Wica` it often does not: a provider's client retries a 429 with backoff for longer than `model_timeout`, so the reaction ends `model_timeout`, nothing carries a 429, and the test fails on a missed expectation — a whole provider going red on a spent quota (seen on Gemini: 17 failures in ten minutes). So the build helpers (`real_chat_model`, `real_wica` in `tests-e2e/support.py`) first make **one direct call per provider per session**, outside any `Wica` and so without a deadline: the client gives up retrying and raises the 429, and every test of that provider skips with the provider's message (`provider rate limit (429) at preflight: …`). A provider that answers, or fails some other way, runs its tests as usual; a missing key keeps its own rule (below). The price is one small call per provider per run. A quota that runs out mid-run is still left to the per-test check. `tests-e2e/test_preflight_fake.py` pins this with a stubbed provider, in the key-less set.
-- **Filter to one provider with `-k <provider>`.** Because the configs are named symmetrically, the provider name matches its config-filename stem, so `-k openai` runs just that one.
+- **Filter to one provider with `-k <provider>`.** Because the configs are named symmetrically, the provider name matches its config-filename stem, so `-k openai` runs just that one. `-k huggingface` runs both Hub configs; `-k huggingface-hub.config` or `-k huggingface-hub-tool.config` runs one.
 - **The live cases run on the `wica.testing` Harness** and can keep one JSON report per test per provider (`--wica-report-dir`) — see [wica-tester.md](wica-tester.md), "Relation to existing tests". Their assertions stay behavioral; no latency threshold is added.
 - **A missing key can be made to fail.** With `WICA_E2E_FAIL_ON_MISSING=1` in the environment (CI's `live` job sets it — [ci.md](ci.md) "Secrets"), a config whose key env var is unset **fails** its tests instead of skipping, so the job cannot go green with a provider silently untested. A local run without the variable keeps skipping. A rate-limited key still skips (below): that is the account's state, not a missing secret.
-- **The live set is not linked to the benchmark.** It is a fixed, scoped list — `PROVIDER_CONFIGS`, one committed config per provider — and nothing in it is parametrized over the benchmark's matrix (`benchmarks/matrix.json`), which lives its own life ([benchmark.md](benchmark.md) "Testing"). The benchmark's models are exercised by running the benchmark (`python -m benchmarks.bench --k N`); its code is covered key-less by `tests-e2e/test_demo_bench_fake.py`.
+- **The live set is not linked to the benchmark.** It is a fixed, scoped list — `PROVIDER_CONFIGS`, the committed configs above — and nothing in it is parametrized over the benchmark's matrix (`benchmarks/matrix.json`), which lives its own life ([benchmark.md](benchmark.md) "Testing"). The benchmark's models are exercised by running the benchmark (`python -m benchmarks.bench --k N`); its code is covered key-less by `tests-e2e/test_demo_bench_fake.py`.
+
+### E2e configs: the WICA config and how the test wires it
+
+An e2e config is **not a bare `WicaConfig`**: it is a test config that holds one, plus what the test needs to know to wire the application around it.
+
+```json
+{
+  "output": "tool",
+  "agent": { "provider": "mistral", "model": "ministral-14b-latest", "api_key_env": "WICA_MISTRAL_API_KEY", "system_prompt": "…" }
+}
+```
+
+- **`agent`** is the Agent block, exactly as in a `WicaConfig` file, and is loaded by `WicaConfig.from_dict` with the file's directory as `base_dir` — the same validation, the same production path.
+- **`output`** — required, `"tag"` or `"tool"` — is how the tests wire the output Command: as a tag in the model's text, or as a forced tool call (`set_output_command(…, as_tool=True)`, [agent.md](agent.md), "The output Command as a tool call"). It sits beside `agent`, not inside it: the output mode is the application's wiring, not the Agent's config ([config.md](config.md)), and the `WicaConfig` loader stays strict. Required, so every file states its mode.
+- **The loader is as strict as `WicaConfig`'s**: `support.load_e2e_config` rejects a key other than `agent` and `output`, and an `output` other than the two modes, with a `ConfigError`. Every helper that stands a provider up (`real_chat_model`, `real_wica`, the test robot) goes through it, and `support.output_as_tool(config_path)` is the one reader of the mode. `tests-e2e/test_e2e_configs_fake.py` pins the loader and checks every committed config loads, in the key-less set.
+- The shape mirrors a benchmark matrix entry — an `agent` block beside the application's own keys ([benchmark.md](benchmark.md)) — so a model's config moves between the two by hand.
+
+**Which mode each config runs.** An application chooses the output mode per model; the live set covers both, **one mode per config**, so each model is gated in the mode an application would run it in and both code paths are exercised against real providers on every push to `main`:
+
+- **The tag is the default** mode of the framework, and the Anthropic, OpenAI, Gemini and Hub configs run it.
+- **Mistral runs in tool mode** (`e2e.mistral.config.json`, `"output": "tool"`). `ministral-14b` is the committed model that is clearly better with the tool call: in tag mode it described its actions instead of calling them (37 of 48 gate tests over three runs, three steps on the known-flaky list), in tool mode it passed 47 of 48 ([agent.md](agent.md), "The output Command as a tool call"). No Mistral config runs the tag: gating a model in a mode no application should use it in would only re-measure a known weakness. It also covers the forced binding through `tool_choice="any"`.
+- **The Hub's model runs in both modes**: `e2e.huggingface-hub.config.json` (tag) and `e2e.huggingface-hub-tool.config.json` (tool), the same `gpt-oss-120b` on Cerebras. Its forced binding is `tool_choice="required"`, not `"any"` (`ChatHuggingFace` refuses `"any"` with several tools; [agent.md](agent.md), "The output Command as a tool call"), so the tool config covers a path no other config takes; keeping the tag config beside it keeps one model gated in both modes, so a regression in one mode is told apart from the model's drift. Both use `WICA_HF_TOKEN`. The second file needs its own name; its `-tool` suffix is only a name, the mode is its `output`.
+- **Known-flaky entries are per config** (`KNOWN_FLAKY` is keyed by config stem, below), so a model's entries in one mode say nothing about the other.
+- **`WICA_ROBOT_OUTPUT=tag|tool` overrides every config's mode**, to compare a model in both modes by hand (the measurements above were taken this way). CI never sets it.
 
 ## The live set as a regression gate
 
@@ -98,12 +124,12 @@ The gate's steps run against a **dedicated test app**, `tests-e2e/robot_app.py`:
 | Input | `ambient_sound` | yes | a background change addressed to no one |
 | Input | `people_present`, `battery_level`, `time_of_day` | no | ordinary context |
 | State | `emotion`, `tracked_user` | no | written by the Commands |
-| Output Command | `say(text)` | | speech, written by the model as a `<say>` tag: receives the text as an `OutputStream`, takes time in proportion to its words, up to a cap, is cancellable, and reports the words it got to (`stream.heard`) when cut |
+| Output Command | `say(text)` | | speech, written by the model as a `<say>` tag (a `say` tool call under `"output": "tool"`): receives the text as an `OutputStream`, takes time in proportion to its words, up to a cap, is cancellable, and reports the words it got to (`stream.heard`) when cut |
 | Command | `set_emotion`, `switch_user_tracking`, `look_at`, `wave` | | short expressive actions |
 | Command | `dance` | | a few seconds, cancellable |
 | Command | `write_note(title, text)` | | saves a note; its result names the word count, marked `(long)` from 150 words |
 
-`say` is a fake: no TTS, it waits and completes. It takes the stream, not the whole text, so the gate runs the path a real voice uses ([commands.md](commands.md), "The output Command"). **The gate runs in tag mode; `WICA_ROBOT_OUTPUT=tool` runs it with the output Command as a forced tool call** ([agent.md](agent.md), "The output Command as a tool call"): the same robot, the same steps and checks, the persona's "How you speak" section worded for the tool. CI runs tag mode only; the variable is for comparing a model in both modes by hand. Only the Interrupt step needs the wait (the running `say` must outlast the model's reaction to "Stop"); every other step speaks a sentence or two. Long output goes through `write_note`, not `say`: the failure it guards against — a reasoning model cut off by an output cap before its tool call — is about tool arguments, not speech. Each `Wica` is set up as a person (`u1`) walking up: the app writes its context and `closest_user`, then waits for the robot to settle **before** the step's own `TestRun` begins, so that first reaction is not judged.
+`say` is a fake: no TTS, it waits and completes. It takes the stream, not the whole text, so the gate runs the path a real voice uses ([commands.md](commands.md), "The output Command"). **The robot runs in its config's output mode** ("E2e configs" above): `say` as a tag, or as a forced tool call under `"output": "tool"` — the same robot, the same steps and checks, the persona's "How you speak" section worded for the tool. Only the Interrupt step needs the wait (the running `say` must outlast the model's reaction to "Stop"); every other step speaks a sentence or two. Long output goes through `write_note`, not `say`: the failure it guards against — a reasoning model cut off by an output cap before its tool call — is about tool arguments, not speech. Each `Wica` is set up as a person (`u1`) walking up: the app writes its context and `closest_user`, then waits for the robot to settle **before** the step's own `TestRun` begins, so that first reaction is not judged.
 
 ### The steps
 
@@ -132,23 +158,24 @@ Each step's run writes its own report under `--wica-report-dir`.
 
 ### What fails
 
-**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped — `KNOWN_FLAKY` in `tests-e2e/test_robot.py`. The list was measured with speech as a forced tool call and is **measured again when the tag output is built**, by the three-runs rule above. What the prototype's runs point at (`analysis/_text-output.md`, local notes): (huggingface-hub, background) and (mistral, background) stay — woken by a background sound, both models sometimes speak instead of writing `<noop/>` — and (mistral, act_on_request) joins: on a fresh robot `ministral-14b` sometimes says it will dance and does not call `dance`. (huggingface-hub, long_answer) was there for a chain of check-in utterances after the note was written; the end of an output no longer wakes a step unless the model asked for it, so that entry is expected to go. The 30 s bound stays: a chain of utterances after a finished task is the behaviour the gate exists to flag.
+**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (config, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped — `KNOWN_FLAKY` in `tests-e2e/test_robot.py`, keyed by config stem, so per output mode. Each entry gives the failure, its rate and the date it was measured; a new config's entries are set by the same three-runs rule before it joins `PROVIDER_CONFIGS`. When a model moves to another mode, its entries are dropped and measured again in the new one (Mistral's three tag-mode entries went when it moved to tool mode). The 30 s bound stays in both modes: a chain of utterances after a finished task is the behaviour the gate exists to flag — and in tool mode, where the end of every output wakes a step under `max_next_steps`, it is the failure to expect.
 
 ### Alongside the steps
 
-`test_wica.py` keeps the cases the robot does not cover: `test_spoken_reply_round_trip` (an output Command taking the whole text as a `str` receives the model's reply) and `test_noop_empty_reaction_live` (a background change answered with `<noop/>`: the reaction ends with its `noop` flag set and no Command issued). `test_smoke.py` checks the model answers at all. The two cases it held before are steps now: the voice-persona output-Command case is `greeting`, the tool-calling round trip is `act_on_request`.
+`test_wica.py` keeps the cases the robot does not cover: `test_spoken_reply_round_trip` (an output Command taking the whole text as a `str` receives the model's reply, in the config's output mode) and `test_noop_empty_reaction_live` (a background change answered with `<noop/>`: the reaction ends with its `noop` flag set and no Command issued). `test_smoke.py` checks the model answers at all. The two cases it held before are steps now: the voice-persona output-Command case is `greeting`, the tool-calling round trip is `act_on_request`.
 
 The committed configs and their key env vars:
 
-| Config | Provider | Model | Key env var |
-|---|---|---|---|
-| `tests-e2e/e2e.anthropic.config.json` | `anthropic` | `claude-haiku-4-5` | `WICA_ANTHROPIC_API_KEY` |
-| `tests-e2e/e2e.openai.config.json` | `openai` | `gpt-4o` | `WICA_OPENAI_API_KEY` |
-| `tests-e2e/e2e.huggingface-hub.config.json` | `huggingface-hub` | `openai/gpt-oss-120b` on `cerebras` | `WICA_HF_TOKEN` |
-| `tests-e2e/e2e.gemini.config.json` | `gemini` | `gemini-3.5-flash-lite` | `WICA_GEMINI_API_KEY` |
-| `tests-e2e/e2e.mistral.config.json` | `mistral` | `ministral-14b-latest` | `WICA_MISTRAL_API_KEY` |
+| Config | Provider | Model | Output | Key env var |
+|---|---|---|---|---|
+| `tests-e2e/e2e.anthropic.config.json` | `anthropic` | `claude-haiku-4-5` | tag | `WICA_ANTHROPIC_API_KEY` |
+| `tests-e2e/e2e.openai.config.json` | `openai` | `gpt-4o` | tag | `WICA_OPENAI_API_KEY` |
+| `tests-e2e/e2e.huggingface-hub.config.json` | `huggingface-hub` | `openai/gpt-oss-120b` on `cerebras` | tag | `WICA_HF_TOKEN` |
+| `tests-e2e/e2e.huggingface-hub-tool.config.json` | `huggingface-hub` | `openai/gpt-oss-120b` on `cerebras` | tool | `WICA_HF_TOKEN` |
+| `tests-e2e/e2e.gemini.config.json` | `gemini` | `gemini-3.5-flash-lite` | tag | `WICA_GEMINI_API_KEY` |
+| `tests-e2e/e2e.mistral.config.json` | `mistral` | `ministral-14b-latest` | tool | `WICA_MISTRAL_API_KEY` |
 
-**The models are chosen for the gate**, by running its steps at least three times on each candidate: a gate model must show the promised behaviours reliably, or the gate goes red on noise. `gemini-3.8-flash` was replaced by `gemini-3.5-flash-lite` (the former hit the 10 s `model_timeout` twice on long texts; the latter passed 45/45 at about 1 s a call), `ministral-8b` by `ministral-14b-latest` (the former ran away in the conversation in every run; the latter passed 44/45). Those counts predate the tag output. On the prototype the committed Anthropic, OpenAI and Hub models held (48, 45 and 46 of 48 against 48, 47 and 44 before), `ministral-14b` passed 37 of 48 against 47 before, and Gemini was not measured (`analysis/_text-output.md`, local notes); the models are confirmed, or the Mistral one replaced, by the same three-runs rule when the tag output is built. Which models an application should use is the benchmark's question, not this table's.
+**The models are chosen for the gate**, by running its steps at least three times on each candidate: a gate model must show the promised behaviours reliably, or the gate goes red on noise. `gemini-3.8-flash` was replaced by `gemini-3.5-flash-lite` (the former hit the 10 s `model_timeout` twice on long texts; the latter passed 45/45 at about 1 s a call), `ministral-8b` by `ministral-14b-latest` (the former ran away in the conversation in every run; the latter passed 44/45). Those counts predate the tag output. On the prototype the committed Anthropic, OpenAI and Hub models held (48, 45 and 46 of 48 against 48, 47 and 44 before), `ministral-14b` passed 37 of 48 against 47 before, and Gemini was not measured (`analysis/_text-output.md`, local notes); the Mistral model was kept and moved to tool mode instead ("E2e configs" above). Which models an application should use is the benchmark's question, not this table's.
 
 The provider/extra surface these configs select from is specced in [config.md](config.md) ("Providers") and packaged as install-time extras per [project.md](project.md) ("Provider integrations are optional extras").
 

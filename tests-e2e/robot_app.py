@@ -12,7 +12,6 @@ through `write_note`, whose result is marked `(long)` from `LONG_NOTE_WORDS` wor
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -23,7 +22,7 @@ from wica.content import Content, TextPart
 from wica.testing import TestRun
 from wica.world import World
 
-from support import real_wica
+from support import output_as_tool, real_wica
 
 SAY_S_PER_WORD = 0.25
 SAY_MAX_S = 15.0
@@ -193,10 +192,8 @@ class Robot:
         ]
 
 
-# The output mode the gate runs in: the tag (default), or `WICA_ROBOT_OUTPUT=tool` for the output
-# Command as a forced tool call. CI runs the default; the variable compares a model in both modes
-# by hand. See specs/testing.md ("The test robot").
-OUTPUT_AS_TOOL = os.environ.get("WICA_ROBOT_OUTPUT", "tag") == "tool"
+# The persona's "How you speak" section, worded for the tag (as written) or for the tool call; the
+# mode comes from the config (`support.output_as_tool`). See specs/testing.md ("Output mode").
 _SPEAK_TAG = PERSONA[
     PERSONA.index("## How you speak") : PERSONA.index("## How you act")
 ]
@@ -209,22 +206,23 @@ _SPEAK_TOOL = (
 )
 
 
-def persona(as_tool: bool = OUTPUT_AS_TOOL) -> str:
+def persona(as_tool: bool = False) -> str:
     """The robot's persona, its "How you speak" section worded for the output mode."""
     return PERSONA.replace(_SPEAK_TAG, _SPEAK_TOOL) if as_tool else PERSONA
 
 
 def build_robot(config_path: Path, **agent_overrides: Any) -> Wica:
     """A started robot over a committed provider config, with someone already standing in front
-    of it (`walk_up`). Skips when the config's key is not set. Its output mode follows
-    `WICA_ROBOT_OUTPUT` (`tag` by default, or `tool`)."""
+    of it (`walk_up`). Skips when the config's key is not set. Its output mode is the config's
+    (`support.output_as_tool`): the tag, or a tool call for a `-tool` config."""
+    as_tool = output_as_tool(config_path)
     wica = real_wica(
-        config_path, system_prompt=persona(), agent_overrides=agent_overrides
+        config_path, system_prompt=persona(as_tool), agent_overrides=agent_overrides
     )
     try:
         register_world(wica.world)
         robot = Robot(wica.world)
-        wica.set_output_command(robot.say, as_tool=OUTPUT_AS_TOOL)
+        wica.set_output_command(robot.say, as_tool=as_tool)
         for command in robot.commands:
             wica.register_command(command)
         wica.start()

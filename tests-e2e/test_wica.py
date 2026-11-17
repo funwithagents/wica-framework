@@ -18,7 +18,7 @@ import pytest
 from wica import ReactionTrace
 from wica.testing import Report, TestRun
 
-from support import PROVIDER_CONFIGS, identity_serialize, real_wica
+from support import PROVIDER_CONFIGS, identity_serialize, output_as_tool, real_wica
 
 WAIT_TIMEOUT = 15.0
 
@@ -29,8 +29,8 @@ def test_spoken_reply_round_trip(
 ):
     """A live provider, driven through the real entrypoint: Wica.init → set an output Command →
     register an Input → start → an update wakes the Agent, which reasons and replies by writing
-    the output Command's tag in its text (taught by the runtime primer alone); the tag's body
-    reaches the output Command."""
+    the output Command's tag in its text, or by calling it under a `-tool` config (taught by the
+    runtime primer alone); the text alone reaches the output Command."""
     wica = real_wica(config_path)
     spoken: list[str] = []
 
@@ -39,7 +39,7 @@ def test_spoken_reply_round_trip(
         spoken.append(text)
         return "Said it."
 
-    wica.set_output_command(say)
+    wica.set_output_command(say, as_tool=output_as_tool(config_path))
     wica.world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
