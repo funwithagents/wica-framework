@@ -3,19 +3,21 @@
 A social robot about as rich as the conversation demo, so the model faces a realistic World and
 Command list rather than a two-tool toy; it is not the demo and imports nothing from `examples/`,
 so a demo change cannot turn `main` red. Its Inputs are fakes the scenarios write; its Commands
-act on its own state. `say` is a fake voice: it waits in proportion to its words (capped) and can
-be cancelled, so the interrupt step has a running speech to cut off. Long output goes through
-`write_note`, whose result is marked `(long)` from `LONG_NOTE_WORDS` words.
+act on its own state. `say` is a fake voice, the robot's output Command: it takes the words as the
+model writes them, waits in proportion to them (capped) and can be cancelled, reporting the words
+that were out by then — so the interrupt step has a running speech to cut off. Long output goes
+through `write_note`, whose result is marked `(long)` from `LONG_NOTE_WORDS` words.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from wica import Wica
+from wica import OutputStream, Wica
 from wica.content import Content, TextPart
 from wica.testing import TestRun
 from wica.world import World
@@ -37,10 +39,10 @@ who you are tracking, your battery and the time of day.
 
 ## How you speak
 
-Everything people hear from you goes through your `say` command — that is your voice. Any other \
-text you write is private thinking that nobody hears. Say each reply in a single `say` call. Keep \
-everyday replies to a sentence or two; when someone asks you to tell a story or give a longer \
-answer, say all of it in that one call.
+Everything people hear from you goes through a say tag in your text — that is your voice. Any \
+other text you write is private thinking that nobody hears. Say each reply in a single say tag. \
+Keep everyday replies to a sentence or two; when someone asks you to tell a story or give a \
+longer answer, say all of it in that one tag.
 
 ## How you act
 
@@ -130,10 +132,20 @@ class Robot:
         self.world = world
         self.notes: dict[str, str] = {}
 
-    async def say(self, text: str) -> str:
-        """Speak out loud — the only way people hear you. Say each reply in one call."""
-        await asyncio.sleep(min(len(text.split()) * SAY_S_PER_WORD, SAY_MAX_S))
-        return "Said it."
+    async def say(self, text: OutputStream) -> None:
+        """Speak out loud — the only way people hear you."""
+        # The voice starts at the first words and takes SAY_S_PER_WORD per word (capped), however
+        # fast the model writes them. Cut off, it reports the words that were out by then, so
+        # history keeps what was heard.
+        started = time.monotonic()
+        try:
+            words = (await text.read()).split()
+            duration = min(len(words) * SAY_S_PER_WORD, SAY_MAX_S)
+            await asyncio.sleep(max(0.0, started + duration - time.monotonic()))
+        except asyncio.CancelledError:
+            out = int((time.monotonic() - started) / SAY_S_PER_WORD)
+            text.heard = " ".join(text.text.split()[:out])
+            raise
 
     async def dance(self) -> str:
         """Perform a little dance; takes a few seconds."""

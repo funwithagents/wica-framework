@@ -8,14 +8,15 @@ The documentation of WICA, by what you want to do. The [README](../README.md) is
 |---|---|
 | write my first agent | [getting-started.md](getting-started.md): a complete program on the scripted `fake` provider, then the config edit that moves it to a real model |
 | feed the agent a perception (speech, a sensor, a camera frame) | [guides/world-and-inputs.md](guides/world-and-inputs.md): registering an entry, serializing it to the prompt, what wakes the Agent, TTLs, bursts |
-| give the agent an action it can take | [guides/commands.md](guides/commands.md): functions as Commands, cancellation, the output Command, `noop`, what runs concurrently |
+| give the agent an action it can take | [guides/commands.md](guides/commands.md): functions as Commands, cancellation, what runs concurrently |
+| make the agent speak to its user | [guides/commands.md](guides/commands.md#make-your-agent-speak): the output Command, streamed or whole text, attributes, interruption, the `<next>` note, staying silent |
 | run on a model I host, locally or on my own server | [guides/local-models.md](guides/local-models.md): a server speaking OpenAI's Chat Completions API (`llama-server`, `mlx_lm.server`), the config, which model size works, what to tune |
 | configure the model, the key, the prompt, the history | [reference/configuration.md](reference/configuration.md): every field, the loaders, the providers |
 | watch the World, the prompts and the transcript in a browser | [guides/gradio-panels.md](guides/gradio-panels.md): the three `wica[gradio]` panels in your own `gr.Blocks` |
 | test my agent without a key or a network | [guides/testing.md](guides/testing.md): the scripted `fake` provider, the `TestRun` harness and its report, a scripted tester |
 | measure how fast it reacts, or see one trace end to end | [guides/latency-and-traces.md](guides/latency-and-traces.md): the reaction record, the measures, OpenTelemetry |
 | compare models on my application | [guides/benchmarking.md](guides/benchmarking.md): a `Target`, a matrix, scenarios, `wica.benchmark`'s runner and CLI |
-| know what v1 does not do yet | [guides/limits.md](guides/limits.md): one reaction at a time, dropped triggers, complete-text output, lossy history bounds |
+| know what v1 does not do yet | [guides/limits.md](guides/limits.md): one reaction at a time, dropped triggers, one output channel, lossy history bounds |
 | find out why nothing happens, or why a call raises | [guides/troubleshooting.md](guides/troubleshooting.md): the checks for each symptom, routed to the page that explains it |
 | look up a name, a signature, an Event or an error | [reference/api.md](reference/api.md) |
 | look up a config field | [reference/configuration.md](reference/configuration.md) |
@@ -23,7 +24,7 @@ The documentation of WICA, by what you want to do. The [README](../README.md) is
 
 ## The references
 
-- [reference/api.md](reference/api.md): what you import, construction, the `Wica` surface, the World API, `Command`, the response guards, the nine Events, the errors, and the contracts that hold across them (threads and the loop, lifecycle, keys and names).
+- [reference/api.md](reference/api.md): what you import, construction, the `Wica` surface, the World API, `Command`, the output Command and `OutputStream`, the response guards, the nine Events, the errors, and the contracts that hold across them (threads and the loop, lifecycle, keys and names).
 - [reference/configuration.md](reference/configuration.md): the `agent` block field by field, the three loaders and direct construction, the providers and their extras.
 
 ## Beyond the user documentation

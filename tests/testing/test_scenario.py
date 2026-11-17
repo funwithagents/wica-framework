@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sut_support import ADD_THEN_TEXT
+from sut_support import ADD_THEN_TEXT, Voice
 
 from wica import Wica
 from wica.testing import (
@@ -92,6 +92,45 @@ def test_requirements_are_derived_from_the_steps(tmp_path: Path):
     )
 
 
+def test_a_step_naming_the_output_command_as_an_action_needs_only_the_output_command():
+    """The output Command is not among a SUT's Commands (it is not a tool), yet a scenario may
+    name it in an action step: the SUT's output Command satisfies that."""
+    scenario = Scenario(
+        name="s",
+        steps=(
+            InputStep("speech_input", "Hi!"),
+            ExpectStep("no_action", "say", for_=1.0),
+            WaitStep({"running": "dance"}),
+        ),
+    )
+    assert scenario.requires.commands == ("say", "dance")
+    surface = {"inputs": {"speech_input"}, "commands": {"dance"}}
+    assert scenario.requires.missing(**surface, output_command_name="say") == []
+    assert scenario.requires.missing(**surface, output_command_name="talk") == [
+        "command 'say'"
+    ]
+    assert scenario.requires.missing(
+        inputs={"speech_input"}, commands=set(), output_command_name="say"
+    ) == ["command 'dance'"]
+
+
+def test_a_private_text_expect_loads_and_translates(tmp_path: Path):
+    document = _copy()
+    document["steps"][1] = {"expect": {"private_text": {"contains": "hm"}}, "within": 3}
+    scenario = load_scenario(_write(tmp_path, "dance", document))
+    assert scenario.steps[1] == ExpectStep(
+        "private_text", {"contains": "hm"}, within=3.0
+    )
+    assert to_script(scenario)[1]["tool_calls"][0] == {
+        "name": "expect_private_text",
+        "args": {"contains": "hm", "within": 3.0},
+    }
+    # Private text is not an output: the scenario no longer needs an output Command for it.
+    document["steps"][2] = {"wait": "idle"}
+    quiet = load_scenario(_write(tmp_path, "dance", document))
+    assert quiet.requires.output_command is False
+
+
 @pytest.mark.parametrize(
     ("mutate", "fragment", "step"),
     [
@@ -112,6 +151,18 @@ def test_requirements_are_derived_from_the_steps(tmp_path: Path):
         (
             lambda d: d["steps"].__setitem__(1, {"expect": {"miracle": {}}}),
             "exactly one of",
+            1,
+        ),
+        (  # the free-text expect was renamed with the Event: private_text
+            lambda d: d["steps"].__setitem__(1, {"expect": {"text": {}}}),
+            "exactly one of",
+            1,
+        ),
+        (  # private text has no attribute to name
+            lambda d: d["steps"].__setitem__(
+                1, {"expect": {"private_text": {"arg": "emotion"}}}
+            ),
+            "'private_text'",
             1,
         ),
         (
@@ -280,3 +331,94 @@ def test_a_wait_that_times_out_fails_the_run(sut_factory: Callable[..., Wica]):
     )
     timeout = [f for f in report.findings if f.kind == "wait"][0]
     assert "add has not started since the last input" in timeout.detail
+
+
+# --- run_scenario over a speaking SUT ------------------------------------------------------------
+
+
+def test_a_spoken_scenario_runs_on_outputs_and_judges_a_stop_by_the_cut_off_speech(
+    sut_factory: Callable[..., Wica],
+):
+    """The SUT tells a long story, the user talks over it, the SUT answers "Okay, stopping." — no
+    `cancel_command`, the new utterance cuts the story off — then declines a background change."""
+    sut = sut_factory(
+        [
+            {"text": "<say>Once upon a time there was a robot.</say>"},
+            {"text": '<say emotion="sad">Okay, stopping.</say>'},
+            {"text": "<noop/>"},
+        ],
+        commands=(),
+        inputs=("prompt", "mood"),
+    )
+    voice = Voice(first=5.0)  # the story is slow, the answer immediate
+    sut.set_output_command(voice.say)
+    sut.start()
+    run = TestRun(sut, scenario="s")
+    scenario = _scenario(
+        InputStep("prompt", "Tell me a story."),
+        WaitStep("speaking", within=5),
+        WaitStep("ready", within=5),
+        InputStep("prompt", "Stop!"),
+        CheckStep(CheckSpec("cancels_when_asked")),
+        CheckStep(CheckSpec("answers_each_input")),
+        ExpectStep("output", {"contains": "sad", "arg": "emotion"}, within=5),
+        WaitStep("idle", within=10),
+        InputStep("mood", "happy"),
+        CheckStep(CheckSpec("quiet_on_background_change")),
+        WaitStep("idle", within=10),
+        checks=(CheckSpec("no_colliding_cancel"), CheckSpec("no_failed_reactions")),
+    )
+    try:
+        report = run_scenario(run, scenario)
+    finally:
+        run.close()
+        sut.close()
+    assert report.outcome == "completed", report.stopped_at
+    assert report.ok, [f for f in report.findings if not f.ok]
+    by_name = {f.expectation: f for f in report.checks()}
+    assert "cut off" in by_name["cancels_when_asked"].detail
+    assert by_name["cancels_when_asked"].detail.startswith(
+        "on input 2 (prompt='Stop!'): "
+    )
+    assert "1 turn(s)" in by_name["answers_each_input"].detail
+    assert by_name["quiet_on_background_change"].ok
+    declined = [e.reaction for e in report.timeline if e.reaction and e.reaction.noop]
+    assert [t.key for r in declined for t in r.triggers] == ["mood"]
+    assert voice.said == ["Okay, stopping."]  # the story never reached its end
+    assert not any(
+        e.kind == "command_issued" and e.name == "cancel_command"
+        for e in report.timeline
+    )
+    assert report.metrics["barge_in"].count == 1
+
+
+def test_a_stop_that_stops_nothing_breaks_cancels_when_asked(
+    sut_factory: Callable[..., Wica],
+):
+    sut = sut_factory(
+        [{"text": "<say>Once upon a time.</say>"}, {"text": "<noop/>"}], commands=()
+    )
+    voice = Voice(delay=1.0)
+    sut.set_output_command(voice.say)
+    sut.start()
+    run = TestRun(sut, scenario="s")
+    scenario = _scenario(
+        InputStep("prompt", "Tell me a story."),
+        WaitStep("speaking", within=5),
+        WaitStep("ready", within=5),
+        InputStep("prompt", "Stop!"),
+        CheckStep(CheckSpec("cancels_when_asked")),
+        WaitStep("idle", within=10),
+        checks=(CheckSpec("no_noop_on_input"),),
+    )
+    try:
+        report = run_scenario(run, scenario)
+    finally:
+        run.close()
+        sut.close()
+    assert report.outcome == "completed" and not report.ok
+    broken = {f.expectation: f for f in report.checks() if not f.ok}
+    assert set(broken) == {"cancels_when_asked", "no_noop_on_input"}
+    assert "no running output was cut off" in broken["cancels_when_asked"].detail
+    assert "'prompt'" in broken["no_noop_on_input"].detail
+    assert voice.said == ["Once upon a time."]  # it talked to the end

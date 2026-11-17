@@ -125,8 +125,8 @@ def real_wica(
     entrypoint — `Wica.init`. This is what makes the live tier meaningful: it drives the whole
     system the way production does, exercising the real per-provider construction (including
     `huggingface-hub`'s dedicated non-`init_chat_model` path). Extra kwargs (`coalesce_window`,
-    `loop`) go to `Wica.init`; the output sink / output Command are wired by the caller afterwards
-    (`wica.set_output_sink(...)`, `wica.set_output_command(...)`). `system_prompt` overrides the
+    `loop`) go to `Wica.init`; the output Command is wired by the caller afterwards
+    (`wica.set_output_command(...)`). `system_prompt` overrides the
     committed persona when a test needs a specific one (replacing the committed persona; the file
     field is cleared so the exactly-one invariant holds); `agent_overrides` replaces other
     `AgentConfig` fields (e.g. `history_reactions`). Skips when the config's api_key_env is unset

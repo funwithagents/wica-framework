@@ -14,7 +14,7 @@ The extras are `anthropic`, `openai`, `gemini`, `mistral`, `huggingface-hub` and
 
 ## Your first agent
 
-Everything goes through one object, `Wica`. This program runs on the `fake` provider, a scripted model that ships with WICA and needs no key, no extra and no network: its `script` says what the model answers at each reasoning step, so you see the whole loop turn before you spend a token. It registers one **Input** (what the person said), one **Command** (a dance), and an **output sink** that receives the model's replies:
+Everything goes through one object, `Wica`. This program runs on the `fake` provider, a scripted model that ships with WICA and needs no key, no extra and no network: its `script` says what the model answers at each reasoning step, so you see the whole loop turn before you spend a token. It registers one **Input** (what the person said), one **Command** (a dance), and the **output Command** (`say`), the function that receives what the model says to the person:
 
 ```python
 import threading
@@ -30,7 +30,7 @@ config = WicaConfig(
             "delay_s": 0,
             "script": [
                 {"tool_calls": [{"name": "dance", "args": {}}]},  # step 1: act
-                {"text": "Hello! I just danced for you."},  # step 2: reply
+                {"text": "<say>Hello! I just danced for you.</say>"},  # step 2: speak
             ],
         },
     )
@@ -39,9 +39,9 @@ config = WicaConfig(
 replied = threading.Event()
 
 
-async def speak(text: str) -> None:
-    """The output sink: receives the model's reply, once per reasoning step."""
-    print("robot says:", text)
+async def say(text: str) -> None:
+    """Speak out loud to the person in front of you."""  # taught to the model
+    print("robot says:", text)  # your voice goes here
     replied.set()
 
 
@@ -52,7 +52,7 @@ async def dance() -> str:
 
 
 wica = Wica.init(config)  # owns the event loop, the World and the Agent
-wica.set_output_sink(speak)  # output wiring comes after init, before start
+wica.set_output_command(say)  # the model speaks by writing <say>…</say> in its text
 wica.register_command(dance)
 wica.world.register(
     "speech_input",
@@ -63,7 +63,7 @@ wica.world.register(
 wica.start()
 
 wica.world.update("speech_input", "Hello robot!")  # a perception arrives
-replied.wait(timeout=10)  # the system runs on its own thread; wait for the reply
+replied.wait(timeout=10)  # the system runs on its own thread; wait for the speech
 wica.close()
 ```
 
@@ -80,9 +80,9 @@ robot dances
 robot says: Hello! I just danced for you.
 ```
 
-What happened, in order. `Wica.init` built a **World** (a registry of typed entries) and an **Agent** (the reasoning loop) on one event loop that `start()` runs in a daemon thread. `update()` wrote a new value into the `speech_input` entry; because that entry is registered with `triggers_llm_call=True`, the Agent woke, rendered the World into a prompt (the `serialize_fn` turned the value into the text the model reads) and called the model. Step 1 of the script answered with a `dance` tool call: the Agent dispatched it as a cancellable task and tracked it as a World entry of its own, `agent:command:<call_id>`, which reads `running` and then `complete`. That completion is itself an observation, so the Agent woke again; step 2 answered with text, which went to the sink. Nothing else happened: the script is spent and a later step would answer with an empty default.
+What happened, in order. `Wica.init` built a **World** (a registry of typed entries) and an **Agent** (the reasoning loop) on one event loop that `start()` runs in a daemon thread. `update()` wrote a new value into the `speech_input` entry; because that entry is registered with `triggers_llm_call=True`, the Agent woke, rendered the World into a prompt (the `serialize_fn` turned the value into the text the model reads) and called the model. Step 1 of the script answered with a `dance` tool call: the Agent dispatched it as a cancellable task and tracked it as a World entry of its own, `agent:command:<call_id>`, which reads `running` and then `complete`. That completion is itself an observation, so the Agent woke again; step 2 wrote a `<say>` tag in its text, and the tag's body went to `say`, as a tracked execution of its own. Nothing else happened: the end of the speech wakes no further step, and the Agent waits for the next input.
 
-Two things to notice. **The prompt is a view of state, not a transcript you append to.** You maintain World entries; every reasoning step renders the current World, and the Agent keeps earlier steps as history. **A Command's outcome arrives later, as an observation.** The model gets an immediate acknowledgement that the Command was dispatched, then sees the result when the entry turns terminal, which is how it can also see an action still running and cancel it ([guides/commands.md](guides/commands.md)).
+Three things to notice. **The prompt is a view of state, not a transcript you append to.** You maintain World entries; every reasoning step renders the current World, and the Agent keeps earlier steps as history. **A Command's outcome arrives later, as an observation.** The model gets an immediate acknowledgement that the Command was dispatched, then sees the result when the entry turns terminal, which is how it can also see an action still running and cancel it ([guides/commands.md](guides/commands.md)). **The model speaks in its text, not through a tool.** With an output Command set, the model is taught a tag of the same name: only the text inside `<say>…</say>` reaches `say`, and anything it writes outside is private. `say` takes the whole text here (`text: str`); annotated `OutputStream`, it receives the words as the model writes them ([guides/commands.md](guides/commands.md#make-your-agent-speak)).
 
 ## Running it on a real model
 
@@ -99,7 +99,7 @@ config = WicaConfig(
 )
 ```
 
-With `api_key_env`, the config carries no secret and is safe to commit; the variable is read by `Wica.init`, which raises `MissingEnvError` when it is unset. The extra for the provider must be installed, or `Wica.init` raises `ImportError` naming it. WICA appends a short **runtime primer** to your system prompt that tells the model how to read observations, that Commands run asynchronously and concurrently, how to reply, and that it may call `noop` to not react; your persona stays verbatim before it.
+With `api_key_env`, the config carries no secret and is safe to commit; the variable is read by `Wica.init`, which raises `MissingEnvError` when it is unset. The extra for the provider must be installed, or `Wica.init` raises `ImportError` naming it. WICA appends a short **runtime primer** to your system prompt that tells the model how to read observations, that Commands run asynchronously and concurrently, how to speak (the output Command's tag), and that it may write `<noop/>` to not react; your persona stays verbatim before it.
 
 ## The lifecycle, in a host of your own
 
@@ -107,7 +107,7 @@ With `api_key_env`, the config carries no secret and is safe to commit; the vari
 
 ```python
 wica = Wica.init(config)
-wica.set_output_sink(speak)
+wica.set_output_command(say)
 wica.register_command(dance)
 wica.world.register("speech_input", str, serialize_fn=render, triggers_llm_call=True)
 wica.start()  # the loop runs in a daemon thread from here
@@ -118,14 +118,14 @@ wica.close()  # terminal: a closed Wica cannot restart
 ```
 
 - **`update()` is callable from any thread**, a UI callback, a sensor poll loop or a hardware interrupt, but only while the system is running: between `start()` and `stop()` it hops to the shared loop internally; outside, it raises `RuntimeError`. `register`, `get` and the Event subscriptions work at any time.
-- **Your callbacks run on the Wica's loop thread**: the sink, the Commands, the Event subscribers. Never call `stop()` or `close()` from one of them (a thread cannot join itself; the call raises `RuntimeError`); hand it to another thread, or do it after the server or the main loop returns, as the demo's `main()` does.
+- **Your callbacks run on the Wica's loop thread**: the output Command, the Commands, the Event subscribers. Never call `stop()` or `close()` from one of them (a thread cannot join itself; the call raises `RuntimeError`); hand it to another thread, or do it after the server or the main loop returns, as the demo's `main()` does.
 - **A host with its own asyncio loop** passes it to `Wica.init(config, loop=my_loop)`; WICA then creates no thread and leaves running the loop to you.
 - **To reset rather than resume**, close this Wica and `init` a new one: `stop()`/`start()` keeps everything.
 
 ## Where next
 
 - [guides/world-and-inputs.md](guides/world-and-inputs.md): what a World entry can carry, how it renders, what wakes the Agent, how bursts are coalesced.
-- [guides/commands.md](guides/commands.md): Commands in depth, the output Command for cancellable speech, `noop`, what runs concurrently.
+- [guides/commands.md](guides/commands.md): Commands in depth, the output Command (streamed, cancellable speech), staying silent, what runs concurrently.
 - [guides/gradio-panels.md](guides/gradio-panels.md): watch the World, the prompts and the transcript in a browser.
 - [guides/testing.md](guides/testing.md): the `fake` provider in your own tests, and the harness that measures a running agent.
 - [guides/limits.md](guides/limits.md): what v1 does not do yet.

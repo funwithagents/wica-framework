@@ -14,141 +14,39 @@
           "delay_s": 0,
           "script": [
             {
-              "tool_calls": [
-                {
-                  "name": "say",
-                  "args": {
-                    "text": "Hello! Nice to meet you."
-                  }
-                }
-              ]
+              "text": "<say>Hello! Nice to meet you.</say>"
             },
             {
-              "tool_calls": [
-                {
-                  "name": "noop",
-                  "args": {}
-                }
-              ]
+              "text": "<say>I can chat with you, dance and show emotions.</say>"
             },
             {
-              "tool_calls": [
-                {
-                  "name": "say",
-                  "args": {
-                    "text": "I can chat with you, dance and show emotions."
-                  }
-                }
-              ]
-            },
-            {
-              "tool_calls": [
-                {
-                  "name": "noop",
-                  "args": {}
-                }
-              ]
-            },
-            {
-              "tool_calls": [
-                {
-                  "name": "say",
-                  "args": {
-                    "text": "Once upon a time a little robot named Bolt wanted to dance. Every night it practiced alone in the workshop. Its first steps were clumsy and it fell many times. Slowly the moves became smooth and joyful. One day it danced for everyone and they cheered."
-                  }
-                }
-              ]
+              "text": "<say>Once upon a time a little robot named Bolt wanted to dance. Every night it practiced alone in the workshop. Its first steps were clumsy and it fell many times. Slowly the moves became smooth and joyful. One day it danced for everyone and they cheered.</say>"
             },
             {
               "tool_calls": [
                 {
                   "name": "cancel_command",
                   "args": {
-                    "call_id": "c5"
+                    "call_id": "c3"
                   }
                 }
               ]
             },
             {
-              "tool_calls": [
-                {
-                  "name": "say",
-                  "args": {
-                    "text": "Okay, I'll stop."
-                  }
-                }
-              ]
+              "text": "<say>Okay, I'll stop.</say>"
             },
             {
-              "tool_calls": [
-                {
-                  "name": "noop",
-                  "args": {}
-                }
-              ]
+              "text": "<say>Hi Alex, nice to meet you.</say>"
             },
             {
-              "tool_calls": [
-                {
-                  "name": "say",
-                  "args": {
-                    "text": "Hi Alex, nice to meet you."
-                  }
-                }
-              ]
+              "text": "<say>Yes!</say>"
             },
             {
-              "tool_calls": [
-                {
-                  "name": "noop",
-                  "args": {}
-                }
-              ]
-            },
-            {
-              "tool_calls": [
-                {
-                  "name": "say",
-                  "args": {
-                    "text": "Yes!"
-                  }
-                }
-              ]
-            },
-            {
-              "tool_calls": [
-                {
-                  "name": "noop",
-                  "args": {}
-                }
-              ]
-            },
-            {
-              "tool_calls": [
-                {
-                  "name": "say",
-                  "args": {
-                    "text": "Goodbye! See you soon."
-                  }
-                }
-              ]
-            },
-            {
-              "tool_calls": [
-                {
-                  "name": "noop",
-                  "args": {}
-                }
-              ]
+              "text": "<say>Goodbye! See you soon.</say>"
             }
           ],
           "default": {
-            "tool_calls": [
-              {
-                "name": "noop",
-                "args": {}
-              }
-            ]
+            "text": "<noop/>"
           }
         }
       },
@@ -156,7 +54,7 @@
       "tags": [
         "fixture"
       ],
-      "notes": "The key-less path: a scripted fake that plays the whole `conversation` session (one scripted model call per step, the long story cancelled by its minted id, c5: every call before it, noop included, takes a number), so `conversation` passes and `commands` does not. Harness floor; opt in with --only fake --include-disabled."
+      "notes": "The key-less path: a scripted fake that plays the whole `conversation` session (one scripted model call per step, each reply a <say> tag in its text; the long story cancelled by its minted id, c3: every output and every call before it takes a number), so `conversation` passes and `commands` does not. Harness floor; opt in with --only fake --include-disabled."
     },
     {
       "id": "anthropic/claude-haiku-4-5",

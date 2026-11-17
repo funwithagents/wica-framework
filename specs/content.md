@@ -19,7 +19,7 @@ tests:
   World serialization, although the real-world effect of a Command (speech, movement, display,
   API action) is not itself required to be a `Content` return value.
 
-The whole point is decoupling: everything that enters the model-facing prompt speaks `Content` and stays ignorant of LangChain or any model provider. Swapping the SDK, or supporting a second one, touches only the Agent's adapter — never the World, Inputs, Commands' World serialization, or a registrant's `serialize_fn`. WICA's broader “multimodal output” claim refers to Command-mediated action in the physical or digital world; the v1 output sink itself remains complete text.
+The whole point is decoupling: everything that enters the model-facing prompt speaks `Content` and stays ignorant of LangChain or any model provider. Swapping the SDK, or supporting a second one, touches only the Agent's adapter — never the World, Inputs, Commands' World serialization, or a registrant's `serialize_fn`. WICA's broader “multimodal output” claim refers to Command-mediated action in the physical or digital world; what the model says to its user remains text, delivered to the application's output Command ([agent.md](agent.md), "Output: tags in the model's text").
 
 `Content` lives in a neutral `wica/content` module that depends on **nothing** LLM- or provider-specific.
 

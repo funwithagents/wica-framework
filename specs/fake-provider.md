@@ -48,8 +48,8 @@ The scripted-flow tests belong in `tests-e2e/`, not `tests/` — they exercise t
 The fake is **scripted via `model_kwargs`** — JSON-expressible, so it flows through the ordinary config path with no special casing:
 
 - `model_kwargs.script`: an ordered list of step responses. Each model call — `ainvoke(messages)` or `astream(messages)` — **consumes the next one** and returns the corresponding `AIMessage` (streamed: chunks that sum to it, see "Streaming").
-- Each step: `{"text": str?, "tool_calls": [{"name": str, "args": object}]?}` — text, tool calls, or both. Each tool call becomes a **native LangChain tool call** (`AIMessage.tool_calls`), with a stable generated `id` when none is supplied, so the Agent dispatches it exactly like a real model's call (Commands *are* native tool calls — see [commands.md](commands.md)).
-- **Exhaustion:** once the script is spent, return `model_kwargs.default` (default: empty text, no tool calls) so an extra reasoning step never crashes a test. Optional `model_kwargs.loop: true` cycles the script instead.
+- Each step: `{"text": str?, "tool_calls": [{"name": str, "args": object}]?}` — text, tool calls, or both. Each tool call becomes a **native LangChain tool call** (`AIMessage.tool_calls`), with a stable generated `id` when none is supplied, so the Agent dispatches it exactly like a real model's call (Commands *are* native tool calls — see [commands.md](commands.md)). **Speech and silence are text**, as for a real model ([agent.md](agent.md), "Output: tags in the model's text"): a step that speaks writes the output Command's tag in its `text` (`{"text": "<say>Hello!</say>"}`), one that declines writes `{"text": "<noop/>"}`, and one that continues after speaking adds a `<next>` note. The fake does not interpret the text; the Agent parses it.
+- **Exhaustion:** once the script is spent, return `model_kwargs.default` (default: empty text, no tool calls — which the Agent reads as doing nothing) so an extra reasoning step never crashes a test. Optional `model_kwargs.loop: true` cycles the script instead.
 - **Token usage.** Every response carries `usage_metadata`, as a real provider's does, so the Agent's usage-driven history budget ([agent.md](agent.md), "History budget") is exercisable in the deterministic tier. By default `input_tokens` is an **estimate of the prompt's size** — the total text characters of the messages handed in, divided by 4 — and `output_tokens` the same estimate of the step's text; both are deterministic and the input figure grows with history, so a flow test can watch the budget trip naturally. A step may **override** both with `"usage": {"input_tokens": N, "output_tokens": M}` to trip the budget at a chosen step regardless of the prompt's real size (the robust choice when the trip point matters, since the estimate moves with the primer text).
 
 ### `bind_tools` & name checking
@@ -74,11 +74,11 @@ The fake is exercised at two levels, mirroring the rest of the repo (a module's 
 
 ### Streaming
 
-The Agent streams every model call ([agent.md](agent.md), "Streaming the model call"), so the fake streams too: `astream` yields the scripted step **in several chunks** — the text split at word boundaries, each tool call as a first chunk carrying its id, name and the first half of its JSON arguments followed by one with the rest, and the usage on the last chunk. Summed, the chunks equal the message `ainvoke` returns for the same step. The split is fixed, so a flow stays deterministic, and it puts the Agent's chunk assembly — tool-call chunks merged by index, usage summed, arguments parsed strictly — on the always-run path rather than only on live providers. A step with neither text nor tool calls yields one empty chunk carrying the usage.
+The Agent streams every model call ([agent.md](agent.md), "Streaming the model call"), so the fake streams too: `astream` yields the scripted step **in several chunks** — the text split at word boundaries, each tool call as a first chunk carrying its id, name and the first half of its JSON arguments followed by one with the rest, and the usage on the last chunk. Summed, the chunks equal the message `ainvoke` returns for the same step. The split is fixed, so a flow stays deterministic, and it puts the Agent's chunk assembly — tool-call chunks merged by index, usage summed, arguments parsed strictly — on the always-run path rather than only on live providers. Splitting at word boundaries also cuts a tag across chunks (`<say`, ` emotion="happy">Hello`, ` there!</say>`), so the Agent's incremental output parser is on that path too, and an output Command taking an `OutputStream` receives a scripted utterance in several pieces. A step with neither text nor tool calls yields one empty chunk carrying the usage.
 
 ### Example config
 
-The command names below are illustrative (they match the `walk_to`-style examples used elsewhere in the specs); the fake never interprets them beyond the `bind_tools` name check.
+The command names below are illustrative (they match the `walk_to`-style examples used elsewhere in the specs); the fake never interprets them beyond the `bind_tools` name check. The `<say>` tags assume the application set an output Command named `say`; it is not a tool, so it is not among the names `bind_tools` checks.
 
 ```json
 {
@@ -89,15 +89,15 @@ The command names below are illustrative (they match the `walk_to`-style example
     "model_kwargs": {
       "delay_s": 0.2,
       "script": [
-        {"text": "Hello! How can I help?"},
+        {"text": "<say>Hello! How can I help?</say>"},
         {"tool_calls": [{"name": "set_expression", "args": {"expression": "happy"}}]},
-        {"text": "On my way.",
+        {"text": "<say>On my way.</say>",
          "tool_calls": [
            {"name": "walk_to", "args": {"place": "kitchen"}}
          ]},
-        {"text": "Still here.", "usage": {"input_tokens": 90000, "output_tokens": 3}}
+        {"text": "<say>Still here.</say>", "usage": {"input_tokens": 90000, "output_tokens": 3}}
       ],
-      "default": {"text": ""}
+      "default": {"text": "<noop/>"}
     }
   }
 }

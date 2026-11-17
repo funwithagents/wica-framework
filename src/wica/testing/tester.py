@@ -8,8 +8,10 @@ The tester's Command set is the Harness API (`TestRun`'s methods) registered as 
 completions wake its next step — script step *k* runs exactly when Command *k−1* completes — and
 the waiting lives in the Commands (each `expect_*` blocks off the tester's loop via
 `asyncio.to_thread`), so the script never guesses the SUT's timing. `finish` is registered with
-`triggers_on_completion=False`: its completion wakes no step, which ends the chain. The fake's
-`default` is `noop`, so a script that forgets `finish` ends quietly and `run_script` times out.
+`triggers_on_completion=False`: its completion wakes no step, which ends the chain. The tester has
+no output Command, so all its text is private; once the script is spent the fake's `default`
+response is the text `<noop/>` — a step taken then does nothing and wakes nothing, so a script
+that forgets `finish` ends quietly and `run_script` times out.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ TESTER_COMMANDS = frozenset(
         "wait_for",
         "expect_action",
         "expect_output",
-        "expect_text",
+        "expect_private_text",
         "expect_no_action",
         "expect_world",
         "expect_latency",
@@ -80,7 +82,7 @@ def build_tester(
                 "model_kwargs": {
                     "script": script,
                     "delay_s": 0,
-                    "default": {"tool_calls": [{"name": "noop", "args": {}}]},
+                    "default": {"text": "<noop/>"},
                 },
             }
         }
@@ -112,10 +114,10 @@ def build_tester(
                 )
                 if (
                     event.kind == "command_issued"
-                    and event.name == run.probe.output_command_name
+                    and event.name == run.probe.output_command
                 ):
                     world.update("sut:output", f"{event.name}({event.args})")
-            elif event.kind == "output_text":
+            elif event.kind == "private_text":
                 world.update("sut:reasoning", event.text or "")
         except RuntimeError:
             pass  # the tester stopped between the check and the write
@@ -161,16 +163,19 @@ def build_tester(
     async def expect_output(
         contains: str | None = None, arg: str | None = None, within: float = 5.0
     ) -> str:
-        """Expect the SUT to call its output Command (its reply to the user)."""
+        """Expect an output from the SUT (its reply to the user); *contains* is matched against
+        its text, or against the attribute *arg* names."""
         finding = await asyncio.to_thread(
             run.expect_output, contains=contains, arg=arg, within=within
         )
         return ok_or_failed(finding)
 
-    async def expect_text(contains: str | None = None, within: float = 5.0) -> str:
-        """Expect free text from the SUT (its output sink)."""
+    async def expect_private_text(
+        contains: str | None = None, within: float = 5.0
+    ) -> str:
+        """Expect private text from the SUT (what its model wrote outside its output tags)."""
         finding = await asyncio.to_thread(
-            run.expect_text, contains=contains, within=within
+            run.expect_private_text, contains=contains, within=within
         )
         return ok_or_failed(finding)
 
@@ -218,7 +223,7 @@ def build_tester(
         wait,
         expect_action,
         expect_output,
-        expect_text,
+        expect_private_text,
         expect_no_action,
         wait_for,
         expect_world,

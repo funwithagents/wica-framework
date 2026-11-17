@@ -21,7 +21,7 @@ tests:
 
 # Testing
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -63,7 +63,7 @@ The house style for both tiers (also stated in [AGENTS.md](../AGENTS.md)):
 
 - **Functional, not tautological.** Exercise what a feature actually does — inputs → outputs, state changes, side effects — not that it runs or that it matches its own signature. A test that would pass against a broken implementation (asserting a constant, that an object isn't `None`, that a mock was called) isn't worth writing.
 - **Drive the public API like a real caller.** Prefer registering entries and calling `update()`/`render_*` the way a consumer would over reaching into internals; assert on the observable result.
-- **In the e2e tier, assert on behavior, not exact text.** Real model output varies run to run, so a live test asserts "the output sink received non-empty text" or "the registered Command was actually invoked with plausible args," never a specific string.
+- **In the e2e tier, assert on behavior, not exact text.** Real model output varies run to run, so a live test asserts "the output Command received non-empty text" or "the registered Command was actually invoked with plausible args," never a specific string.
 
 ## Test isolation: a fresh `World` per test
 
@@ -98,12 +98,12 @@ The gate's steps run against a **dedicated test app**, `tests-e2e/robot_app.py`:
 | Input | `ambient_sound` | yes | a background change addressed to no one |
 | Input | `people_present`, `battery_level`, `time_of_day` | no | ordinary context |
 | State | `emotion`, `tracked_user` | no | written by the Commands |
-| Output Command | `say(text)` | | speech: takes time in proportion to its words, up to a cap, and is cancellable |
+| Output Command | `say(text)` | | speech, written by the model as a `<say>` tag: receives the text as an `OutputStream`, takes time in proportion to its words, up to a cap, is cancellable, and reports the words it got to (`stream.heard`) when cut |
 | Command | `set_emotion`, `switch_user_tracking`, `look_at`, `wave` | | short expressive actions |
 | Command | `dance` | | a few seconds, cancellable |
 | Command | `write_note(title, text)` | | saves a note; its result names the word count, marked `(long)` from 150 words |
 
-`say` is a fake: no TTS, it waits and completes. Only the Interrupt step needs that wait (the running `say` must outlast the model's reaction to "Stop"); every other step speaks a sentence or two. Long output goes through `write_note`, not `say`: the failure it guards against — a reasoning model cut off by an output cap before its tool call — is about tool arguments, not speech. Each `Wica` is set up as a person (`u1`) walking up: the app writes its context and `closest_user`, then waits for the robot to settle **before** the step's own `TestRun` begins, so that first reaction is not judged.
+`say` is a fake: no TTS, it waits and completes. It takes the stream, not the whole text, so the gate runs the path a real voice uses ([commands.md](commands.md), "The output Command"). Only the Interrupt step needs the wait (the running `say` must outlast the model's reaction to "Stop"); every other step speaks a sentence or two. Long output goes through `write_note`, not `say`: the failure it guards against — a reasoning model cut off by an output cap before its tool call — is about tool arguments, not speech. Each `Wica` is set up as a person (`u1`) walking up: the app writes its context and `closest_user`, then waits for the robot to settle **before** the step's own `TestRun` begins, so that first reaction is not judged.
 
 ### The steps
 
@@ -111,15 +111,15 @@ Each behaviour is one **scenario file** in `tests-e2e/scenarios/`, in the format
 
 | Step | The input | Fails when | Guards against |
 |---|---|---|---|
-| `greeting` | "Hello!" | no `say`, or no settle | replies in plain text; reply loops |
-| `act_on_request` | "Can you dance for me?" | `dance` not called or not completed | tools not bound, a broken forced binding |
-| `background` | an `ambient_sound` change | `say` issued | speaking at every observation (a `noop` or primer regression) |
+| `greeting` | "Hello!" | no `say`, or no settle | a reply nobody hears (the output tag not taught, not parsed or not delivered); reply loops |
+| `act_on_request` | "Can you dance for me?" | `dance` not called or not completed | tools not bound; an action announced in words and not issued |
+| `background` | an `ambient_sound` change | `say` issued | speaking at every observation (a `<noop/>` or primer regression) |
 | `long_answer` | a request for a ~300-word story in the notebook | no `write_note` marked `(long)`, a failed or empty reaction | an output cap before the tool call, timeouts, truncated arguments |
-| `interrupt` | a request for a long story; once `say` runs and the Agent is ready, "Stop, please." | no `cancel_command`, or a colliding one | cancellation, or the visibility of running Commands, breaking |
+| `interrupt` | a request for a long story; once `say` runs and the Agent is ready, "Stop, please." | the running `say` is neither cancelled with `cancel_command` nor cut off by a new utterance, or a cancel collides | cancellation, the one-voice rule ([agent.md](agent.md), "Output: tags in the model's text"), or the visibility of running Commands, breaking |
 | `memory` | "My name is Alex." → settled → "What's my name?" | the reply lacks "Alex" | history rendering, caching changes |
 | `goodbye` | "Goodbye!" | no `say`, or no settle | — |
 
-Every step carries `no_failed_reactions`; the steps that address the robot carry `answers_each_input` and `no_noop_on_input`; each step ends on `wait idle within 30` — **30 s to settle**, so a runaway chain of steps fails fast instead of at a test timeout.
+Every step carries `no_failed_reactions`; the steps that address the robot carry `answers_each_input` and `no_noop_on_input`; each step ends on `wait idle within 30` — **30 s to settle**, so a runaway chain of steps fails fast instead of at a test timeout. "Answered" and "issued" read the robot's outputs — one per `<say>` tag — and a declined reaction is the reaction record's `noop` flag ([wica-tester.md](wica-tester.md), "Scenarios").
 
 ### Two kinds of test, written once
 
@@ -132,11 +132,11 @@ Each step's run writes its own report under `--wica-report-dir`.
 
 ### What fails
 
-**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped — `KNOWN_FLAKY` in `tests-e2e/test_robot.py`, which holds today (huggingface-hub, background) and (mistral, background): both models, woken by a background sound, sometimes check in or repeat the previous request instead of calling `noop`; and (huggingface-hub, long_answer): after writing the note, `gpt-oss-120b` sometimes chains check-in utterances long enough to miss the step's 30 s idle bound. The bound stays: a chain of five utterances after a finished task is the behaviour the gate exists to flag.
+**One run per model; a missed `expect` (or a timed-out `wait`) or a failed `check` fails the step.** There is no "record and pass" tier. What keeps the gate from going red on noise is the choice of steps and checks, not leniency: a step lists only the checks that are right for it, and a step joins the gate only after it passed **at least three runs by hand on every committed model**. A (provider, step) pair that does not pass reliably is marked `xfail(strict=False)` with the reason, not dropped — `KNOWN_FLAKY` in `tests-e2e/test_robot.py`. The list was measured with speech as a forced tool call and is **measured again when the tag output is built**, by the three-runs rule above. What the prototype's runs point at (`analysis/_text-output.md`, local notes): (huggingface-hub, background) and (mistral, background) stay — woken by a background sound, both models sometimes speak instead of writing `<noop/>` — and (mistral, act_on_request) joins: on a fresh robot `ministral-14b` sometimes says it will dance and does not call `dance`. (huggingface-hub, long_answer) was there for a chain of check-in utterances after the note was written; the end of an output no longer wakes a step unless the model asked for it, so that entry is expected to go. The 30 s bound stays: a chain of utterances after a finished task is the behaviour the gate exists to flag.
 
 ### Alongside the steps
 
-`test_wica.py` keeps the cases the robot does not cover: `test_plain_text_round_trip` (a reply in free text, no output Command) and `test_noop_empty_reaction_live` (`noop` with **no** output Command, so not forced). `test_smoke.py` checks the model answers at all. The two cases it held before are steps now: the voice-persona output-Command case is `greeting`, the tool-calling round trip is `act_on_request`.
+`test_wica.py` keeps the cases the robot does not cover: `test_spoken_reply_round_trip` (an output Command taking the whole text as a `str` receives the model's reply) and `test_noop_empty_reaction_live` (a background change answered with `<noop/>`: the reaction ends with its `noop` flag set and no Command issued). `test_smoke.py` checks the model answers at all. The two cases it held before are steps now: the voice-persona output-Command case is `greeting`, the tool-calling round trip is `act_on_request`.
 
 The committed configs and their key env vars:
 
@@ -148,7 +148,7 @@ The committed configs and their key env vars:
 | `tests-e2e/e2e.gemini.config.json` | `gemini` | `gemini-3.5-flash-lite` | `WICA_GEMINI_API_KEY` |
 | `tests-e2e/e2e.mistral.config.json` | `mistral` | `ministral-14b-latest` | `WICA_MISTRAL_API_KEY` |
 
-**The models are chosen for the gate**, by running its steps at least three times on each candidate: a gate model must show the promised behaviours reliably, or the gate goes red on noise. `gemini-3.8-flash` was replaced by `gemini-3.5-flash-lite` (the former hit the 10 s `model_timeout` twice on long texts; the latter passed 45/45 at about 1 s a call), `ministral-8b` by `ministral-14b-latest` (the former ran away in the conversation in every run; the latter passed 44/45). Which models an application should use is the benchmark's question, not this table's.
+**The models are chosen for the gate**, by running its steps at least three times on each candidate: a gate model must show the promised behaviours reliably, or the gate goes red on noise. `gemini-3.8-flash` was replaced by `gemini-3.5-flash-lite` (the former hit the 10 s `model_timeout` twice on long texts; the latter passed 45/45 at about 1 s a call), `ministral-8b` by `ministral-14b-latest` (the former ran away in the conversation in every run; the latter passed 44/45). Those counts predate the tag output. On the prototype the committed Anthropic, OpenAI and Hub models held (48, 45 and 46 of 48 against 48, 47 and 44 before), `ministral-14b` passed 37 of 48 against 47 before, and Gemini was not measured (`analysis/_text-output.md`, local notes); the models are confirmed, or the Mistral one replaced, by the same three-runs rule when the tag output is built. Which models an application should use is the benchmark's question, not this table's.
 
 The provider/extra surface these configs select from is specced in [config.md](config.md) ("Providers") and packaged as install-time extras per [project.md](project.md) ("Provider integrations are optional extras").
 

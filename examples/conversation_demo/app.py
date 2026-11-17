@@ -27,14 +27,15 @@ framework's output wiring exists to allow (specs/wica.md, "Output wiring is dele
 
     1. build_system(config)         → the Wica (or a World-only fallback), entries registered
     2. build_ui(wica, world, …)     → the Gradio page, which owns its presenters (app_ui.py):
-                                      the contrib's TranscriptLog + PromptLog and the Speaking slot
-    3. wire(wica, transcript, slot) → the Robot over the World + the UI's Speaking slot; output
-                                      sink + `say` output Command set on the Wica; Commands registered
+                                      the contrib's TranscriptLog + ReactionLog (subscribed to
+                                      the Wica's Events as they are built) and the Speaking slot
+    3. wire(wica, slot)             → the Robot over the World + the UI's Speaking slot; `say`
+                                      set as the output Command on the Wica; Commands registered
     4. wica.start(); blocks.launch()
 
 Nothing is bound late: every object is built after the ones it needs, and everything is wired
 before `start()`. Steps 1 and 3 build no Gradio page, so the tests run the same wiring against a
-transcript and slot they build themselves (tests-e2e/test_example_flow.py). The transcript, the
+slot they build themselves (tests-e2e/test_example_flow.py). The transcript, the
 World table and the prompt history are the package's reusable `wica.contrib.gradio` components
 (specs/gradio-contrib.md); what is the demo's own is the persona: the entries, the `display_entry`
 hook, the Robot and the Speaking panel.
@@ -51,9 +52,17 @@ from pathlib import Path
 from typing import Any
 
 from examples.conversation_demo.app_ui import build_ui
-from wica import CommandExecution, Content, TextPart, Wica, World, WorldEntry
+from wica import (
+    CommandExecution,
+    Content,
+    OutputStream,
+    TextPart,
+    Wica,
+    World,
+    WorldEntry,
+)
 from wica.config import MissingEnvError, WicaConfig
-from wica.contrib.gradio import EntryDisplay, TranscriptLog
+from wica.contrib.gradio import EntryDisplay
 
 from examples.conversation_demo.speaking import SpeakingSlot
 
@@ -72,7 +81,7 @@ _demo_logger = logging.getLogger(__name__)
 # Opt-in OpenTelemetry export, off by default (see specs/instrumentation.md "Consumers" —
 # exporters are an application concern; WICA itself never imports the SDK). Set
 # WICA_DEMO_TRACES=console to print every span (wica.world.update, wica.agent.reaction/model/
-# sink/command, plus anything a Command opens) to stdout via the SDK's ConsoleSpanExporter.
+# guards/command, plus anything a Command opens) to stdout via the SDK's ConsoleSpanExporter.
 _DEMO_TRACES_ENV = "WICA_DEMO_TRACES"
 
 
@@ -156,10 +165,10 @@ def display_entry(entry: WorldEntry) -> EntryDisplay | None:
 
 # --- The robot: its Commands (fake actions) -----------------------------------------
 
-# Simulated per-word speaking pace. Because `say` is a real Command, taking time here means it stays
-# "running" (and cancellable — barge-in) in the World for its whole duration, and the Speaking panel
-# shows the words as they're "spoken". This is a demo simulation, not framework token streaming
-# (which is post-v1 — see specs/agent.md "Future improvements").
+# Simulated per-word speaking pace. Because `say` is a real Command execution, taking time here
+# means it stays "running" (and cancellable — barge-in) in the World for its whole duration, and
+# the Speaking panel shows the words as they're "spoken". The streaming is the framework's (the
+# words reach `say` as the model writes them); the pace is the demo's simulated TTS.
 _SAY_WORD_DELAY_S = 0.3
 
 
@@ -173,27 +182,54 @@ class Robot:
         self.world = world
         self.speaking = speaking
 
-    async def say(self, text: str) -> str:
+    async def say(self, text: OutputStream) -> None:
         """Speak out loud to the person in front of you — this is the only way they hear you. Use it
         for anything you want to say; keep it to a sentence or two."""
-        words = text.split()
-        if not words:
-            return "Said it."
-        # `say` only drives the Speaking panel: the transcript shows this utterance as a Command
-        # item (full text, live state) through the generic log, like any other Command. Simulating
-        # speech as a slow async loop keeps the Command "running" (cancellable) while it speaks; a
-        # cancellation lands at the sleep, and the slot records it before the CancelledError
-        # propagates.
-        token = self.speaking.start(text)
+        # The output Command: the model writes a <say> tag and its words arrive here as they are
+        # written, so the robot starts speaking before the response is complete. `say` only
+        # drives the Speaking panel: the transcript shows this utterance as a Command item (full
+        # text, live state) through the generic log, like any other Command. Simulating speech
+        # as a slow async loop keeps the execution "running" (cancellable) while it speaks; a
+        # cancellation lands at a sleep (or while waiting for more words), and `say` then
+        # reports what was heard and marks the slot before the CancelledError propagates.
+        token: int | None = None
+        spoken = 0
+        words: list[str] = []
         try:
-            for _ in words:
-                await asyncio.sleep(_SAY_WORD_DELAY_S)
-                self.speaking.advance(token)
+            while True:
+                # Everything written so far; the last word may still be growing unless the
+                # body is over or a space followed it.
+                over = text.closed
+                words = text.text.split()
+                whole = len(words)
+                if not over and words and not text.text[-1].isspace():
+                    whole -= 1
+                if words:
+                    if token is None:
+                        token = self.speaking.start(text.text)
+                    else:
+                        self.speaking.extend(token, text.text)
+                if spoken < whole:
+                    await asyncio.sleep(_SAY_WORD_DELAY_S)
+                    spoken += 1
+                    if token is not None:
+                        self.speaking.advance(token)
+                elif over:
+                    break
+                else:
+                    # Caught up with the model: wait for more of the sentence (or its end).
+                    try:
+                        await anext(text)
+                    except StopAsyncIteration:
+                        pass
         except asyncio.CancelledError:
-            self.speaking.cancelled(token)
+            # Cut off: history keeps the words the person heard, not the whole sentence.
+            text.heard = " ".join(words[:spoken])
+            if token is not None:
+                self.speaking.cancelled(token)
             raise
-        self.speaking.complete(token)
-        return "Said it."
+        if token is not None:
+            self.speaking.complete(token)
 
     async def dance(self) -> str:
         """Perform a fun little dance. Takes about 10 seconds to complete."""
@@ -245,19 +281,18 @@ def build_system(config: WicaConfig) -> tuple[Wica | None, World, str | None]:
     return wica, wica.world, None
 
 
-def wire(wica: Wica, transcript: TranscriptLog, speaking: SpeakingSlot) -> Robot:
-    """Step 3: wire the robot to the Wica and to the UI's presenters, before `start()`. The Robot is
-    built over the Wica's World and the Speaking slot; the transcript's `output_sink` receives the
-    model's free text (private reasoning, since `say` is the output Command); `say` is the output
-    Command (the voice); the other Commands are registered. Gradio-free: the tests call this with a
-    transcript and slot of their own.
+def wire(wica: Wica, speaking: SpeakingSlot) -> Robot:
+    """Step 3: wire the robot to the Wica and to the UI's Speaking slot, before `start()`. The Robot
+    is built over the Wica's World and the slot; `say` is the output Command (the voice: what the
+    model writes inside a <say> tag); the other Commands are registered. The transcript needs no
+    wiring — it subscribed to the Wica's Events when it was built. Gradio-free: the tests call
+    this with a slot of their own.
 
     Wica owns the single event loop in a daemon thread and the World is thread-safe, so the Gradio
     side stays fully synchronous: sensor events call world.update(...) directly, and the Agent's
     instrumentation Events (emitted on the loop) reach the transcript, which pushes chat items onto
     its thread-safe queue that the UI's timer drains."""
     robot = Robot(wica.world, speaking)
-    wica.set_output_sink(transcript.output_sink)
     wica.set_output_command(robot.say)
     for command in robot.commands:
         wica.register_command(command)
@@ -274,7 +309,7 @@ def main() -> None:
     wica, world, config_error = build_system(WicaConfig.from_json_file(CONFIG_PATH))
     ui = build_ui(wica, world, display_entry, config_error)
     if wica is not None:
-        wire(wica, ui.transcript, ui.speaking)
+        wire(wica, ui.speaking)
         wica.start()
     try:
         ui.blocks.launch()

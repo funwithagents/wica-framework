@@ -14,8 +14,8 @@ from wica.config import WicaConfig
 from wica.content import Content, TextPart
 from wica.testing import Scenario
 
-SAY_HI = [{"tool_calls": [{"name": "say", "args": {"text": "hi there"}}]}]
-NOOP = {"tool_calls": [{"name": "noop", "args": {}}]}
+SAY_HI = [{"text": "<say>hi there</say>"}]
+NOOP = {"text": "<noop/>"}
 
 
 def _text(value: Any, previous: Any) -> Content:

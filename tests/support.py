@@ -58,7 +58,6 @@ def make_reaction_trace(**overrides: Any) -> ReactionTrace:
         "outcome": "ok",
         "error": None,
         "text_length": 5,
-        "sink_duration": 0.01,
         "command_call_ids": (),
         "noop": False,
         "usage": None,

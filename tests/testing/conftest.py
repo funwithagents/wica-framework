@@ -15,8 +15,10 @@ from wica.config import WicaConfig
 
 @pytest.fixture
 def sut_factory() -> Iterator[Callable[..., Wica]]:
-    """`make(script, *, delay_s=0, commands=(add,), inputs=("prompt",))` — an unstarted fake SUT
-    with the `prompt` Input (str, triggering) and the `add` Command registered."""
+    """`make(script, *, delay_s=0, commands=(add,), inputs=("prompt",), coalesce_window=0.0)` — an
+    unstarted fake SUT with the `prompt` Input (str, triggering) and the `add` Command registered,
+    and no output Command (a test sets one with `sut.set_output_command`). Once the script is
+    spent the model answers nothing at all."""
     created: list[Wica] = []
 
     def make(
@@ -25,6 +27,7 @@ def sut_factory() -> Iterator[Callable[..., Wica]]:
         delay_s: float = 0,
         commands: tuple[Callable[..., Any], ...] = (add,),
         inputs: tuple[str, ...] = ("prompt",),
+        coalesce_window: float = 0.0,
     ) -> Wica:
         config = WicaConfig.from_dict(
             {
@@ -40,7 +43,7 @@ def sut_factory() -> Iterator[Callable[..., Wica]]:
                 }
             }
         )
-        sut = Wica.init(config, coalesce_window=0.0)
+        sut = Wica.init(config, coalesce_window=coalesce_window)
         for key in inputs:
             sut.world.register(
                 key, str, serialize_fn=identity_serialize, triggers_llm_call=True

@@ -7,7 +7,7 @@ How it works:
 - **The World** holds the agent's state: a registry of typed entries, rendered into the model's prompt at every reasoning step.
 - **Inputs** bring perceptions in: speech, a camera frame or a sensor event updates a World entry.
 - **The Agent** wakes when the World changes, reasons over it, and decides what to do.
-- **Commands** carry its actions out: speech, movement, an API call, each tracked back in the World.
+- **Commands** carry its actions out: movement, an API call, and its speech through one output Command, each tracked back in the World.
 
 **Start here:**
 
@@ -27,7 +27,7 @@ The name is the model:
 ## Project status
 
 > [!WARNING]
-> **Under development: the API may change.** WICA is at version 0.1 and is being shaped as it is used. Classes, config fields and module layout can change between commits, without a deprecation period. If you depend on it, pin a commit (`wica[anthropic] @ git+https://github.com/funwithagents/wica-framework@<sha>`). The v1 Agent runs one reasoning step at a time and replies in complete text; the concurrency and streaming model is designed and deferred ([docs/guides/limits.md](docs/guides/limits.md)).
+> **Under development: the API may change.** WICA is at version 0.1 and is being shaped as it is used. Classes, config fields and module layout can change between commits, without a deprecation period. If you depend on it, pin a commit (`wica[anthropic] @ git+https://github.com/funwithagents/wica-framework@<sha>`). The v1 Agent runs one reasoning step at a time; the concurrency model is designed and deferred ([docs/guides/limits.md](docs/guides/limits.md)).
 
 > [!TIP]
 > **Feedback is welcome: open an issue.** Bug reports, questions, reports from models the author does not test on, and what you would want the API or the config to do differently all go to [the issue tracker](https://github.com/funwithagents/wica-framework/issues). The project is developed by one person and is not taking pull requests yet; [CONTRIBUTING.md](CONTRIBUTING.md) says why and how to help anyway.
@@ -40,10 +40,10 @@ The name is the model:
 | **Reactive by construction** | Marking an entry `triggers_llm_call=True` is all it takes to wake the Agent when a perception arrives; `update()` is callable from any thread. Bursts are coalesced into one step within a 200 ms window; an entry can bypass the window for a stop button or a barge-in |
 | **Multimodal in** | Inputs serialize through a neutral `Content` model (`TextPart`, `ImagePart`): a camera frame can be the inline image while fresh and a line of text afterwards, keeping the deep, cached part of the prompt small and stable ([specs/content.md](specs/content.md)) |
 | **Actions that run, and can be stopped** | A Command is a plain sync or async function (or an off-the-shelf LangChain tool) the Agent binds as a native tool call. Each runs as a cancellable task tracked as a World entry that reads `running` then `complete`, `failed` or `cancelled`, so a later step can see an action in flight and cancel it, by the model's own `cancel_command`. All the Commands of one response run concurrently ([docs/guides/commands.md](docs/guides/commands.md)) |
-| **Cancellable speech** | Set an output Command (your voice) and the model must address the user through it, its free text turning into private reasoning: speaking becomes a tracked action a new input can interrupt, and the model decides per step whether to say anything, or to `noop` |
+| **Streamed, cancellable speech** | Set one output Command (your voice) and the model speaks by writing a tag named after it in its response text: `<say emotion="happy">Hello there!</say>`. The words reach your function as the model writes them, text outside the tag stays private, and each utterance is a tracked action: speaking again cuts off the speech still running, and the model decides per step whether to say anything, or to write `<noop/>` ([docs/guides/commands.md](docs/guides/commands.md#make-your-agent-speak)) |
 | **Provider-agnostic** | Anthropic, OpenAI, Gemini, Mistral or the Hugging Face Hub is a config edit; LangChain is used only at the model-facing edge, and nothing else touches a provider SDK. A built-in scripted `fake` provider drives the whole loop with no key and no network ([docs/reference/configuration.md](docs/reference/configuration.md#providers)) |
 | **Bounded history** | History is re-renderable World snapshots, unbounded by default; `history_reactions` keeps the last N reactions and `history_budget` keeps the prompt under a fraction of the model's context window, using the usage each call reports, with hysteretic cuts that keep the cached prefix stable |
-| **Observable** | Eight Events surface every trigger, dropped trigger, rendered prompt, issued Command, Command end, text and reaction record; OpenTelemetry spans join your own components' traces; three Gradio panels show the World, the prompts and the transcript live ([docs/guides/latency-and-traces.md](docs/guides/latency-and-traces.md), [docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)) |
+| **Observable** | Nine Events surface every trigger, dropped trigger, rendered prompt, rejected response, issued Command, Command end, private text and reaction record; OpenTelemetry spans join your own components' traces; three Gradio panels show the World, the prompts and the transcript live ([docs/guides/latency-and-traces.md](docs/guides/latency-and-traces.md), [docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)) |
 | **Testable, measurable, comparable** | The `fake` provider pins exact Commands and utterances in your tests; `wica.testing` probes a running agent, waits for what you expect and reports its latencies and costs; `wica.benchmark` runs scripted sessions across a matrix of models ([docs/guides/testing.md](docs/guides/testing.md), [docs/guides/benchmarking.md](docs/guides/benchmarking.md)) |
 
 ## Install
@@ -69,7 +69,7 @@ Selecting a provider whose extra is not installed fails at `Wica.init` with an `
 
 ## Quick start
 
-Everything goes through one object, `Wica`. You build it from a config, wire an output, register the World entries and Commands, start it, and feed it perceptions; it runs on its own thread and the reply reaches your sink:
+Everything goes through one object, `Wica`. You build it from a config, set the output Command, register the World entries and Commands, start it, and feed it perceptions; it runs on its own thread and what the model says reaches your output Command:
 
 ```python
 import threading
@@ -87,14 +87,14 @@ config = WicaConfig(
 replied = threading.Event()
 
 
-async def speak(text: str) -> None:
-    """The output sink: receives the model's reply, once per reasoning step."""
-    print("robot says:", text)
+async def say(text: str) -> None:
+    """Speak out loud to the person in front of you."""  # the model reads this docstring
+    print("robot says:", text)  # your voice goes here
     replied.set()
 
 
 wica = Wica.init(config)  # owns the event loop, the World and the Agent
-wica.set_output_sink(speak)  # output wiring comes after init, before start
+wica.set_output_command(say)  # the model speaks by writing <say>…</say> in its text
 wica.world.register(
     "speech_input",
     str,
@@ -104,11 +104,11 @@ wica.world.register(
 wica.start()
 
 wica.world.update("speech_input", "Hello robot!")  # a perception arrives, from any thread
-replied.wait(timeout=30)  # the Agent wakes, reasons and replies on its own loop
+replied.wait(timeout=30)  # the Agent wakes, reasons and speaks on its own loop
 wica.close()
 ```
 
-Swap the `AgentConfig` for `provider="fake"` and a `script` in `model_kwargs` and the same program runs with no key and no network, the model answering as scripted. The complete first agent, with a Command the robot performs, the lifecycle in a host of your own and the config in a JSON file, continues in [docs/getting-started.md](docs/getting-started.md).
+`say` receives the whole text of each `<say>` tag once the tag closes; annotate its first parameter `OutputStream` instead of `str` and it receives the words as the model writes them ([docs/guides/commands.md](docs/guides/commands.md#make-your-agent-speak)). Swap the `AgentConfig` for `provider="fake"` and a `script` in `model_kwargs` and the same program runs with no key and no network, the model answering as scripted. The complete first agent, with a Command the robot performs, the lifecycle in a host of your own and the config in a JSON file, continues in [docs/getting-started.md](docs/getting-started.md).
 
 ## The conversation demo
 
@@ -128,7 +128,7 @@ Start at [docs/index.md](docs/index.md), the documentation by task. The pages a 
 | | |
 |---|---|
 | [docs/getting-started.md](docs/getting-started.md) | Your first agent on the scripted provider, then on a real model; the lifecycle in a host of your own |
-| [docs/reference/api.md](docs/reference/api.md) | What you import, the `Wica` surface, the World API, `Command`, the response guards, the nine Events, the errors, the contracts |
+| [docs/reference/api.md](docs/reference/api.md) | What you import, the `Wica` surface, the World API, `Command`, the output Command and `OutputStream`, the response guards, the nine Events, the errors, the contracts |
 | [docs/reference/configuration.md](docs/reference/configuration.md) | Every config field, the loaders, the API key and prompt rules, the history bounds, the providers |
 | [docs/guides/](docs/index.md#by-task) | The World and its Inputs, Commands, the Gradio panels, testing, latency and traces, benchmarking, limits, troubleshooting |
 

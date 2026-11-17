@@ -16,22 +16,22 @@ tests:
 
 # Instrumentation
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
-Measure and understand WICA's **latency and reactivity**: how long a reaction takes from the moment an input is written to the moment the person perceives the response, where that time goes inside the framework (coalescing, rendering, the model call, the output sink, Command dispatch), and when the Agent is busy and drops an input. Three questions, in order of importance:
+Measure and understand WICA's **latency and reactivity**: how long a reaction takes from the moment an input is written to the moment the person perceives the response, where that time goes inside the framework (coalescing, rendering, the model call up to the first words of the output, Command dispatch), and when the Agent is busy and drops an input. Three questions, in order of importance:
 
-1. **User-perceived latency** — input written → the output Command starts (or the free text is delivered). The number a person feels.
-2. **The internal breakdown** — which phase of a reaction costs what, so coalescing, rendering, the sink and the provider can be tuned separately.
+1. **User-perceived latency** — input written → the output Command receives the first words of the answer (or, for a reaction that only acts, its Commands are dispatched). The number a person feels.
+2. **The internal breakdown** — which phase of a reaction costs what, so coalescing, rendering and the provider can be tuned separately.
 3. **The global measure across components outside WICA** — a speech recognizer that finishes *before* it writes the input, a TTS engine that synthesizes *inside* the output Command before audio plays. WICA only sees the middle of that chain; the measurement has to let the ends join it without those components knowing WICA.
 
-The Agent already exposes instrumentation `Event`s (`on_trigger`, `on_prompt`, `on_command`, `on_text` — [agent.md](agent.md), "Instrumentation"), the World stamps every version with a wall-clock `timestamp` ([world.md](world.md)), and the Gradio transcript computes Command durations from its own monotonic stamps ([gradio-contrib.md](gradio-contrib.md)). What is **not** observable today, and cannot be reconstructed from outside the loop:
+The Agent already exposes instrumentation `Event`s (`on_trigger`, `on_prompt`, `on_command`, `on_private_text` — [agent.md](agent.md), "Instrumentation"), the World stamps every version with a wall-clock `timestamp` ([world.md](world.md)), and the Gradio transcript computes Command durations from its own monotonic stamps ([gradio-contrib.md](gradio-contrib.md)). What is **not** observable today, and cannot be reconstructed from outside the loop:
 
 - **The end of a reaction.** A reaction whose model call raises, or whose response carries neither text nor tool calls, emits nothing after `on_prompt`. Pure model latency and the *busy* interval are invisible, so a dropped input cannot be explained.
 - **A dropped trigger** is only an INFO log line.
 - **Reaction identity.** Consumers correlate `on_trigger` → `on_prompt` → `on_command` by call order on the loop thread; nothing on the payloads says which reaction they belong to.
-- **The sink's cost.** The output sink is awaited *before* the response's Commands are dispatched (`_run_step`), so a slow sink delays every Command of that reaction; nobody measures it.
+- **When the answer starts.** The model's speech is delivered to the output Command while the response is still being written ([agent.md](agent.md), "Output: tags in the model's text"), so the moment a person starts to hear the answer falls inside the model call, where no Event fires.
 - **Token usage.** LangChain returns `usage_metadata` on the response; the Agent drops it.
 
 This spec adds the measurement. It is **instrumentation only**: nothing here changes what the loop does, what the model sees, or World state — a reaction does not become a World entry (that is the deferred `agent:reaction` design in [agent.md](agent.md), "Future improvements"; the `reaction_id` introduced here is the identity such an entry would reuse).
@@ -40,7 +40,7 @@ This spec adds the measurement. It is **instrumentation only**: nothing here cha
 
 ### Vocabulary: a reaction and its phases
 
-A **reaction** is one turn of the Agent's loop — the trigger(s) that woke it, the model call, and the Commands it dispatches — what the transcript calls `reaction N`. The code calls running one reaction a *step* (`_run_step`, "single in flight"); this spec uses *reaction* for the concept and *step* only when naming that code. Its phases, and the stamp each one leaves:
+A **reaction** is one turn of the Agent's loop — the trigger(s) that woke it, the model call, the outputs it opens and the Commands it dispatches — what the transcript calls `reaction N`. The code calls running one reaction a *step* (`_run_step`, "single in flight"); this spec uses *reaction* for the concept and *step* only when naming that code. Its phases, and the stamp each one leaves:
 
 | Phase | Where it happens | Stamp |
 |---|---|---|
@@ -49,12 +49,12 @@ A **reaction** is one turn of the Agent's loop — the trigger(s) that woke it, 
 | Coalescing window | `_handle_trigger` → `_flush_window` | `window_opened_at`, `window_closed_at` |
 | Observation + rendering | `_run_step` before `on_prompt` | `prompt_ready_at` |
 | Model call | `astream`, chunks summed into one message ([agent.md](agent.md), "Streaming the model call") | `model_started_at`, `first_content_at` (the first chunk carrying text or a tool call), `model_ended_at` (the last chunk) |
-| Free text to the sink | `await self._output_sink(text)` | `sink_duration` |
+| First output opens | during the model call: the first words of the response's first output tag are handed to the output Command ([agent.md](agent.md), "Output: tags in the model's text") | `first_output_at` |
 | Command dispatch, reaction end | end of `_run_step` | `ended_at` |
 | Command running → terminal | the Command task | the entry's `running` and terminal version timestamps |
 | Follow-up reaction (re-trigger) | a new reaction | its own record |
 
-**Reaction latency** (the primary number) is `written_at` of the earliest *external* trigger of the reaction (a Command-completion trigger is not an input) → `ended_at` of a reaction that issued at least one Command or delivered text. With an output Command, `ended_at` is when the utterance starts; what the TTS does after that is the span layer's business (below).
+**Reaction latency** (the primary number) is `written_at` of the earliest *external* trigger of the reaction (a Command-completion trigger is not an input) → the moment the reaction first reached the outside: `first_output_at` when it opened an output, else `ended_at` when it dispatched at least one Command. A reaction that did neither (a `<noop/>`, private text only, a failure) has none. `first_output_at` is when the output Command has the first words; what the TTS does after that is the span layer's business (below).
 
 ### Two layers from one measurement
 
@@ -95,15 +95,15 @@ class ReactionTrace:
     model_ended_at: datetime | None           # None when cancelled before the response; the LAST attempt's end
     outcome: Literal["ok", "empty", "model_error", "model_timeout", "rejected", "cancelled"]
     error: str | None
-    text_length: int
-    sink_duration: float | None               # seconds; None when no text
-    command_call_ids: tuple[str, ...]         # dispatched Commands, in response order (noop excluded)
-    noop: bool
+    text_length: int                          # characters of the response's text as the model wrote it, tags included
+    command_call_ids: tuple[str, ...]         # the reaction's outputs, in the order they opened, then its dispatched Commands, in response order
+    noop: bool                                # the model declined: the response was `<noop/>`, or empty
     usage: TokenUsage | None                  # from AIMessage.usage_metadata, summed over attempts; None when absent
     attempts: int                             # model calls made: 1, or more after rejected responses
     rejections: tuple[str, ...]               # the combined guard feedback of each rejected attempt, in order
     guard_duration: float | None              # seconds spent in response guards over all attempts; None when none ran
     first_content_at: datetime | None         # the LAST attempt's first chunk carrying text or a tool call; None when none arrived
+    first_output_at: datetime | None          # when the reaction's first output opened (its first words handed to the output Command); None when it opened none
     ended_at: datetime
     trace_id: str | None                      # OpenTelemetry ids when an SDK is installed, else None
     span_id: str | None
@@ -118,13 +118,19 @@ class CommandTrace:
     state: Literal["complete", "failed", "cancelled"]
 ```
 
-Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `time_to_first_content`, `generation_time`, `busy_time`, `duration` on `CommandTrace`) are read-only properties over the stamps, so a record stays raw and a consumer never recomputes a subtraction differently.
+Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `time_to_first_content`, `time_to_first_output`, `generation_time`, `busy_time`, `duration` on `CommandTrace`) are read-only properties over the stamps, so a record stays raw and a consumer never recomputes a subtraction differently.
 
-**The first content.** The model call is streamed ([agent.md](agent.md), "Streaming the model call"), so the record stamps when the answer began to arrive: `first_content_at` is the first chunk carrying text or a tool call (its name or its arguments); reasoning and metadata chunks do not count. It splits `model_latency` in two: `time_to_first_content` (the wait before anything) and `generation_time` (the answer arriving). What it means depends on the provider and the output mode: free text arrives progressively everywhere measured, while a tool call's arguments arrive progressively on some providers and in one burst at the end on others, with only the call's name early. It is stamped when content arrived even if the call then failed or passed its deadline, and is `None` when nothing did. With retries it is the last attempt's, like `model_ended_at`.
+**The first content.** The model call is streamed ([agent.md](agent.md), "Streaming the model call"), so the record stamps when the answer began to arrive: `first_content_at` is the first chunk carrying text or a tool call (its name or its arguments); reasoning and metadata chunks do not count. It splits `model_latency` in two: `time_to_first_content` (the wait before anything) and `generation_time` (the answer arriving). What it means depends on the provider and on what the response holds: text arrives progressively everywhere measured, while a tool call's arguments arrive progressively on some providers and in one burst at the end on others, with only the call's name early. It is stamped when content arrived even if the call then failed or passed its deadline, and is `None` when nothing did. With retries it is the last attempt's, like `model_ended_at`.
+
+**The first output.** `first_output_at` is when the reaction's first output opened: the first words of an output tag's body handed to the output Command ([agent.md](agent.md), "Output: tags in the model's text"). It comes after `first_content_at` by the tag's opening and whatever private text precedes it; for text with no tag at all, which is delivered whole when the response ends, it is at `model_ended_at`. `time_to_first_output` is `model_started_at` → `first_output_at`: how long the model call took to give the voice its first words. It is `None` for a reaction that opened no output — one that only acted, declined, or has no output Command. A response that has started an output is not retried, so with retries it belongs to the last attempt.
+
+**A declined reaction.** `noop` is true when the model declined: its whole response was `<noop/>` (outcome `ok`), or it had neither text nor a tool call (outcome `empty`). Nothing else reports it: no `on_command` fires for it ([agent.md](agent.md), "The agent may choose not to act").
+
+**An output is a Command in the record.** Each output of a response is a Command execution with its own `call_id`, so it appears in `command_call_ids` and ends with a `CommandTrace` like any Command. Its `started_at` is when it opened, during the model call. Its terminal state is written only once the step that issued it is over, so the `ended_at` of an output shorter than its response is the end of that step, not the moment the output Command returned.
 
 **A reaction with retries.** When the response guards reject a response and the Agent calls the model again ([agent.md](agent.md), "Response guards"), the reaction stays **one** record: `model_started_at` is the first attempt's start and `model_ended_at` the last attempt's end, so `model_latency` covers the whole model phase — every attempt and the guards between them, which is what the user waits for; `guard_duration` separates the guards' share. `attempts` and `rejections` say what happened, `usage` adds up what it cost (`cache_read_tokens` summed when every attempt reported it, else `None`). A reaction that ran out of retries ends `rejected`, with `error` holding the last rejection's feedback.
 
-The Agent gains three `Event`s, surfaced on the facade like the existing ones ([wica.md](wica.md), "`Event`s are surfaced, not adapted"):
+The Agent gains these `Event`s, surfaced on the facade like the existing ones ([wica.md](wica.md), "`Event`s are surfaced, not adapted"):
 
 | Event | Type | Emitted |
 |---|---|---|
@@ -133,7 +139,7 @@ The Agent gains three `Event`s, surfaced on the facade like the existing ones ([
 | `on_trigger_dropped` / `wica.on_agent_trigger_dropped` | `Event[WorldEntry]` | once per trigger dropped because a reaction was in flight — the counterpart of `on_trigger`, which only fires for triggers a reaction observed. Replaces inference (pairing raw against observed triggers with a timeout) with a signal |
 | `on_command_ended` / `wica.on_agent_command_ended` | `Event[CommandTrace]` | once per dispatched Command when its terminal state is written, with the reaction that issued it. This is the generic "any Command finished" signal that [agent.md](agent.md) open question #5 asks for, without a broadcast World entry: a consumer no longer needs a per-`call_id` listener just to learn when and how a Command ended |
 
-All three follow the existing instrumentation rules: observation only, defensive payloads (the dataclasses are frozen), `Event.emit`'s per-subscriber isolation, emitted on the loop thread.
+All of them follow the existing instrumentation rules: observation only, defensive payloads (the dataclasses are frozen), `Event.emit`'s per-subscriber isolation, emitted on the loop thread.
 
 **One clock: wall-clock UTC.** Every stamp is a `datetime` from the World's own `_now()`, not `time.monotonic()`. The reason is correlation: the input-written stamp *is* the World version's timestamp, OpenTelemetry stamps spans in wall-clock time, and the log lines are wall-clock — a monotonic stamp could not be subtracted from any of them. The accepted cost is that a clock adjustment during a reaction distorts that one reaction's numbers; for latencies measured in tens of milliseconds to seconds this is the right trade.
 
@@ -147,17 +153,16 @@ The spans, all under the tracer named `wica`:
 |---|---|---|
 | `wica.world.update` | the **caller's** current context — a speech recognizer writing from inside its own span makes that span the ancestor of the whole reaction | `wica.key`, `wica.version_id`. Opened only for an update that **triggers** (qualifies to wake the Agent), so a 30 fps non-triggering sensor entry costs no span; every update still propagates context (below) |
 | `wica.agent.reaction` | the context captured with the reaction's **parent trigger** (rule below); the other coalesced triggers are span **links** | `wica.reaction_id`, `wica.trigger_count`, `wica.outcome`, `wica.text_length`, `wica.command_count`, `wica.noop`, `wica.attempts` |
-| `wica.agent.model` | the reaction | GenAI semantic conventions: `gen_ai.operation.name = chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`; a `wica.first_content` span event when the first content arrives |
+| `wica.agent.model` | the reaction | GenAI semantic conventions: `gen_ai.operation.name = chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`; a `wica.first_content` span event when the first content arrives, a `wica.first_output` one when the first output opens |
 | `wica.agent.guards` | the reaction; one per attempt | `wica.attempt`, `wica.rejected` |
-| `wica.agent.sink` | the reaction | — (its duration is the point) |
-| `wica.agent.command` | the reaction; **current inside the Command's task** from dispatch to terminal write | `wica.command.name`, `wica.call_id`, `wica.command.state` |
+| `wica.agent.command` | the reaction; **current inside the Command's task** from dispatch to terminal write. An output's span opens when the output opens, during the model call, as a child of the reaction and a sibling of `wica.agent.model` | `wica.command.name`, `wica.call_id`, `wica.command.state` |
 
-`noop` opens no span; it is an attribute of the reaction.
+A declined reaction (`<noop/>`) opens no span of its own; it is the `wica.noop` attribute of the reaction.
 
 **Propagation is what makes the ends join.** `contextvars` are the carrier:
 
 - `World.update()` captures `contextvars.copy_context()` under its lock and hands it to `loop.call_soon_threadsafe(..., context=ctx)` for the trigger emission and for each listener (a sync listener is run through `ctx.run` on the executor). The Agent's trigger shim `create_task`s inside that emission, and an asyncio task inherits the current context — so `_handle_trigger` runs in the writer's context, and the Agent keeps that context with the entry in the window batch.
-- A Command task is created inside its `wica.agent.command` span, so **any span an application or a third-party library opens inside the Command body nests under it with no WICA-specific API** — a TTS engine's synthesis and playback spans land under `say`. The Command's terminal `world.update` happens inside that span too, so the completion trigger carries it and the **follow-up reaction descends from the Command** (its parent is the completion's `wica.world.update` span, itself the command span's child): one trace runs recognizer → input write → reaction → `say` → synthesis → playback → follow-up reaction → `noop`.
+- A Command task is created inside its `wica.agent.command` span, so **any span an application or a third-party library opens inside the Command body nests under it with no WICA-specific API** — a TTS engine's synthesis and playback spans land under `say`. The Command's terminal `world.update` happens inside that span too, so when the completion wakes a step — a Command with `triggers_on_completion`, or the last output of a response that carried a `<next>` note ([agent.md](agent.md), "Continuing after an output") — the completion trigger carries it and the **follow-up reaction descends from the Command** (its parent is the completion's `wica.world.update` span, itself the command span's child): one trace runs recognizer → input write → reaction → `say` → synthesis → playback and, when the model asked to continue, → follow-up reaction.
 
 **Which trigger is the reaction's parent.** An OpenTelemetry span has exactly one parent, and a coalesced reaction has several triggers. The rule: **the earliest trigger in the batch that is not a Command completion; if every trigger is a completion, the earliest one.** The other triggers become links. Rationale: the earliest external input is the one that has waited longest, so the root-to-response distance in the trace is the *worst-case* user-perceived latency — the honest number, and the one the recognizer's span makes end-to-end. Parenting to the last trigger (the loop's `representative` for logging) would hide the coalescing tax; parenting to nothing and linking everything would break the trace into pieces that viewers do not join. When a user input joins a window a Command completion opened, the input still wins, so its trace is not buried under the previous reaction's; the completion becomes a link.
 
@@ -171,15 +176,15 @@ There is no enable/disable API. The cost per reaction is a handful of `datetime.
 
 | Measure | From |
 |---|---|
-| `reaction_latency` | earliest external `TriggerTrace.written_at` → `ReactionTrace.ended_at`, for reactions with `command_call_ids` or `text_length > 0` |
+| `reaction_latency` | earliest external `TriggerTrace.written_at` → `ReactionTrace.first_output_at`, or → `ended_at` for a reaction that opened no output; for reactions with `command_call_ids` |
 | `coalescing_wait` | `window_opened_at` → `window_closed_at` |
 | `hop` | per trigger, `written_at` → `arrived_at` (the cross-thread hop; a sanity number) |
 | `render_time` | `window_closed_at` → `prompt_ready_at` |
 | `model_latency` | `model_started_at` → `model_ended_at` (every attempt and the guards between them) |
 | `time_to_first_content` | `model_started_at` → `first_content_at`: how long before the model's answer began to arrive, rejected attempts included |
-| `generation_time` | `first_content_at` → `model_ended_at`: how long the used response took to arrive once it had begun — the most that streaming output could save on that reaction |
+| `time_to_first_output` | `model_started_at` → `first_output_at`: how long the model call took to give the output Command its first words |
+| `generation_time` | `first_content_at` → `model_ended_at`: how long the used response took to arrive once it had begun |
 | `guard_time` | `guard_duration` |
-| `sink_time` | `sink_duration` |
 | `busy_time` | `window_closed_at` → `ended_at` — the interval during which a new input is dropped |
 | `command_duration` | `CommandTrace.started_at` → `ended_at` |
 | `reactions_per_input` | reactions between two reactions whose parent trigger is external (the re-trigger chain's cost) |
@@ -200,7 +205,7 @@ Distributions (min, median, p95) and thresholds are the Harness's ([wica-tester.
 Deferrals; none blocks the design above.
 
 1. **A rolling/aggregate metrics view.** Presenter + panel like the others (`MetricsLog(wica)` + `metrics_panel`), or a strip inside the transcript? Distinct from the per-reaction "Instrumentation" tab in [gradio-contrib.md](gradio-contrib.md) ("Component 2"), which already lets a person inspect one reaction's numbers on demand — this item is about a rolling aggregate across many reactions. Wait for real traffic and look at real numbers first.
-2. **`reaction_id` on the existing Events.** `on_prompt`, `on_command`, `on_text` could carry the reaction id so a consumer correlates without relying on loop-thread ordering. Additive; do it when a consumer needs it rather than widen four payloads speculatively.
+2. **`reaction_id` on the existing Events.** `on_prompt`, `on_command`, `on_private_text` could carry the reaction id so a consumer correlates without relying on loop-thread ordering. Additive; do it when a consumer needs it rather than widen four payloads speculatively.
 3. **OpenTelemetry Metrics API.** Histograms of the measures above could be recorded through the Metrics API as well as derived from spans. The reaction record and the span layer cover the need; revisit if a backend wants native metrics.
 4. **An origin timestamp on `update()`.** A recognizer that is *not* OpenTelemetry-instrumented could still report when speech ended by passing an explicit origin time to `world.update`, which the record would carry as the true start of the reaction. A plain-timestamp fallback to the span layer; deferred until an input source needs it.
 5. **Span for non-triggering updates.** Only triggering updates open a `wica.world.update` span, to keep high-rate sensors quiet. If a trace ever needs to show a passive entry's write, a per-entry opt-in at `register()` is the likely shape.

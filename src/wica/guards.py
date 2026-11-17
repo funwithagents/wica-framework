@@ -2,8 +2,7 @@
 is retried within the same reaction, and only the accepted one enters history. See specs/agent.md
 ("Response guards").
 
-The default guards (`incomplete_response`, `unknown_command`, `invalid_args`,
-`output_command_required`) are supported;
+The default guards (`incomplete_response`, `unknown_command`, `invalid_args`) are supported;
 writing an application guard — `Agent.add_response_guard` / `Wica.add_response_guard` and the types
 here — is **experimental**: the shape may change without a deprecation period.
 
@@ -30,13 +29,8 @@ __all__ = [
     "combine",
     "incomplete_response",
     "invalid_args",
-    "output_command_required",
     "unknown_command",
 ]
-
-# The WICA-native "do nothing" Command, named in feedback. Duplicated from agent.py on purpose: this
-# module sits below the Agent and must not import it.
-_NOOP_COMMAND_NAME = "noop"
 
 
 @dataclass(frozen=True)
@@ -59,13 +53,13 @@ class MalformedCommand:
 
 @dataclass(frozen=True)
 class ModelResponse:
-    """What a guard sees: the response's free text and tool calls, plus the binding they were made
-    against."""
+    """What a guard sees: the response's text and tool calls, plus the binding they were made
+    against. Only a response that started no output is guarded (see specs/agent.md, "Response
+    guards")."""
 
-    text: str  # the free text, "" when none
+    text: str  # the text as the model wrote it, "" when none
     commands: tuple[ProposedCommand, ...]  # every well-formed tool call, in order
     bound: Mapping[str, Command]  # the Commands the model call was bound to
-    output_command_name: str | None  # the bound output Command, if any
     # Tool calls whose arguments could not be read, and whether the provider stopped the response
     # at its output cap. Defaulted so a response built by hand stays valid.
     malformed: tuple[MalformedCommand, ...] = ()
@@ -117,11 +111,10 @@ def combine(retries: Sequence[Retry]) -> Retry:
 def incomplete_response(response: ModelResponse) -> Retry | None:
     """A response that did not arrive whole where it matters: a tool call whose arguments could
     not be read, or a response the provider cut at its output cap while it held a tool call (the
-    last one is incomplete, however well-formed it looks) or before it made the call an output
-    Command requires. Nothing of it is executed and the model is asked again. A reminder, never
-    shown: a broken or cut response cannot be replayed. The feedback gives a length to stay
-    under where one is known — "be shorter" alone does not make a model shorten. Free text cut
-    at the cap with no output Command is accepted: it is the reply, delivered as far as it got."""
+    last one is incomplete, however well-formed it looks). Nothing of it is executed and the model
+    is asked again. A reminder, never shown: a broken or cut response cannot be replayed. The
+    feedback gives a length to stay under where one is known — "be shorter" alone does not make
+    a model shorten. Text cut at the cap is accepted: an output is delivered as far as it got."""
     parts = []
     for call in response.malformed:
         name = f"`{call.name}`" if call.name else "a command"
@@ -152,13 +145,6 @@ def incomplete_response(response: ModelResponse) -> Retry | None:
             "Your response was cut off at the output length limit while you were writing the "
             f"call to `{last}`, so that call is incomplete and nothing was executed. Respond "
             f"again with much less in it. {limit}",
-            show_response=False,
-        )
-    if response.output_command_name is not None:
-        return Retry(
-            "Your response was cut off at the output length limit before you called any "
-            "command, so the user heard nothing. Respond again and call "
-            f"`{response.output_command_name}` (or `{_NOOP_COMMAND_NAME}`) right away. {limit}",
             show_response=False,
         )
     return None
@@ -217,27 +203,11 @@ def _describe_validation_error(exc: ValueError) -> str:
     return ", ".join(parts) or str(exc)
 
 
-def output_command_required(response: ModelResponse) -> Retry | None:
-    """An output Command is bound and the response calls no tool at all: its free text, if any, is
-    private reasoning the user never hears. A response whose only call is malformed, or that was
-    cut at the output cap, is incomplete_response's case."""
-    name = response.output_command_name
-    if name is None or response.commands or response.malformed or response.truncated:
-        return None
-    return Retry(
-        "Your response called no command, so the user heard nothing: your free text is private. "
-        f"Call `{name}` to reply to the user, or `{_NOOP_COMMAND_NAME}` to do nothing.",
-        # An empty response cannot be shown (providers reject an empty assistant message).
-        show_response=bool(response.text),
-    )
-
-
 # Installed at Agent construction, in this order, before any application guard.
 DEFAULT_GUARDS: tuple[tuple[str, ResponseGuard], ...] = (
     ("incomplete_response", incomplete_response),
     ("unknown_command", unknown_command),
     ("invalid_args", invalid_args),
-    ("output_command_required", output_command_required),
 )
 
 # --- The correction frames ---------------------------------------------------------------------

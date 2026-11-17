@@ -56,13 +56,14 @@ _COMMAND_KEY_PREFIX = "agent:command:"
 
 def _busy_reasons(
     timeline: list[SutEvent],
-    retriggers: Callable[[str], bool],
+    wakes: Callable[[str, str], bool],
     triggers: Callable[[str], bool],
     *,
     running: bool = True,
 ) -> list[str]:
     """Why the SUT is not idle yet, as short reasons; empty when it is. See `wait_for`. With
-    *running* false a Command still running is not a reason: the `"ready"` condition."""
+    *running* false a Command or an output still running is not a reason: the `"ready"`
+    condition. *wakes(call_id, name)* says whether that call's completion wakes a step."""
     arrived = {
         (e.key, e.version_id)
         for e in timeline
@@ -93,7 +94,7 @@ def _busy_reasons(
     issued = {
         e.call_id: e.name
         for e in timeline
-        if e.kind == "command_issued" and e.name != "noop" and e.call_id
+        if e.kind == "command_issued" and e.name and e.call_id
     }
     terminal_at = {
         e.call_id: e.t
@@ -106,7 +107,7 @@ def _busy_reasons(
         ]
     for call_id, t in terminal_at.items():
         name = issued.get(call_id)
-        if name is None or not retriggers(name):
+        if name is None or not wakes(call_id, name):
             continue
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         if not any(
@@ -156,6 +157,8 @@ class TestRun:
         self._cond = threading.Condition()
         self._timeline: list[SutEvent] = []
         self._watermark = 0
+        # Outputs that reached a terminal state → whether their end wakes a step (see _record).
+        self._output_wakes: dict[str, bool] = {}
         self._findings: list[Finding] = []
         self._issues: list[Issue] = []
         self._notes: list[str] = []
@@ -172,7 +175,22 @@ class TestRun:
     # --- the timeline ----------------------------------------------------------------------------
 
     def _record(self, event: SutEvent) -> None:
+        wakes: bool | None = None
+        if (
+            event.kind == "command_state"
+            and event.state in _TERMINAL
+            and event.call_id is not None
+        ):
+            # An output's end wakes a step only when its response asked for one (a `<next>` note,
+            # under `max_next_steps`) — a per-response decision no Event carries, so the Agent is
+            # asked as the terminal state arrives. None: the call is not an output, and the
+            # Command's own `triggers_on_completion` decides. A cancelled output wakes nothing.
+            granted = self._sut.agent.output_wakes(event.call_id)
+            if granted is not None:
+                wakes = granted and event.state != "cancelled"
         with self._cond:
+            if wakes is not None and event.call_id is not None:
+                self._output_wakes[event.call_id] = wakes
             self._timeline.append(event)
             self._cond.notify_all()
 
@@ -292,12 +310,13 @@ class TestRun:
         arg: str | None = None,
         within: float = 5.0,
     ) -> Finding:
-        """The next call of the SUT's output Command, whatever its name; *contains* is matched
-        against `args[arg]` when *arg* is given, else against every string-valued arg. Fails at
-        once when the SUT has no output Command."""
+        """The next output the SUT reports (one tag of its output Command, whatever its name),
+        which it does once the output's body is complete; *contains* is matched against the
+        output's `text`, or against the attribute *arg* names when given. Fails at once when the
+        SUT has no output Command."""
         label = _describe("expect_output", contains=contains, arg=arg)
         self._action("expect_output", contains=contains, arg=arg, within=within)
-        name = self.probe.output_command_name
+        name = self.probe.output_command
         if name is None:
             return self._finding(label, False, "the SUT has no output Command")
 
@@ -306,33 +325,31 @@ class TestRun:
                 return False
             if contains is None:
                 return True
-            args = event.args or {}
-            if arg is not None:
-                return contains in str(args.get(arg, ""))
-            return any(
-                contains in value for value in args.values() if isinstance(value, str)
-            )
+            return contains in str((event.args or {}).get(arg or "text", ""))
 
         event = self._wait_for(matches, within)
         if event is None:
-            return self._finding(label, False, f"no {name} call within {within}s")
+            return self._finding(label, False, f"no {name} output within {within}s")
         return self._finding(label, True, f"{name}({event.args})", event)
 
-    def expect_text(
+    def expect_private_text(
         self, *, contains: str | None = None, within: float = 5.0
     ) -> Finding:
-        """The next non-empty free text (the output sink's), containing *contains* when given."""
-        label = _describe("expect_text", contains=contains)
-        self._action("expect_text", contains=contains, within=within)
+        """The next non-empty private text — what the model wrote outside its output tags, all of
+        its text when the SUT has no output Command — containing *contains* when given."""
+        label = _describe("expect_private_text", contains=contains)
+        self._action("expect_private_text", contains=contains, within=within)
 
         def matches(event: SutEvent) -> bool:
-            if event.kind != "output_text" or not (event.text or "").strip():
+            if event.kind != "private_text" or not (event.text or "").strip():
                 return False
             return contains is None or contains in (event.text or "")
 
         event = self._wait_for(matches, within)
         if event is None:
-            return self._finding(label, False, f"no matching text within {within}s")
+            return self._finding(
+                label, False, f"no matching private text within {within}s"
+            )
         return self._finding(label, True, repr(event.text), event)
 
     def expect_no_action(self, name: str, *, for_: float = 2.0) -> Finding:
@@ -365,11 +382,15 @@ class TestRun:
 
         - `"idle"` — the SUT has finished reacting: every write to a triggering Input seen (or
           dropped) by the Agent, every observed trigger consumed by a reaction that ended, every
-          issued Command terminal, and every completed Command whose completion re-triggers a
-          step has had that trigger arrive (so the step it wakes is not missed in the gap).
+          issued Command and output terminal, and every completion that wakes a step has had
+          that trigger arrive (so the step it wakes is not missed in the gap). A Command's
+          completion wakes a step when it was registered with `triggers_on_completion`; an
+          output's only when it was granted a wake (`agent.output_wakes`) and was not cancelled
+          — so after a plain spoken reply, idle holds as soon as the speech is over.
         - `"ready"` — the Agent can take an input now: `"idle"` without waiting for running
           Commands. An input written then is not dropped as busy, even over a dance or a speech.
-        - `"speaking"` — the output Command has started since the last input.
+        - `"speaking"` — an output has been reported since the last input: its text is complete
+          and it is being delivered.
         - `{"running": name}` — that Command has started since the last input.
         - `{"seconds": n}` — *n* seconds pass."""
         label = _describe("wait_for", condition=condition, within=within)
@@ -398,12 +419,12 @@ class TestRun:
         if condition in ("idle", "ready"):
             return _busy_reasons(
                 self._timeline,
-                self._retriggers,
+                self._wakes,
                 self._triggers_input,
                 running=condition == "idle",
             )
         if condition == "speaking":
-            name = self.probe.output_command_name
+            name = self.probe.output_command
             if name is None:
                 return ["the SUT has no output Command"]
         elif isinstance(condition, dict) and isinstance(condition.get("running"), str):
@@ -417,9 +438,14 @@ class TestRun:
         )
         return [] if started else [f"{name} has not started since the last input"]
 
-    def _retriggers(self, name: str) -> bool:
-        """Whether *name*'s completion wakes a step (the Agent's rule for an unknown name is
-        True; `noop` never dispatches, so it never reaches here)."""
+    def _wakes(self, call_id: str, name: str) -> bool:
+        """Whether the completion of the call *call_id* (of *name*) wakes a step. An output: what
+        the Agent answered when its terminal state arrived. A Command issued as a tool call: its
+        `triggers_on_completion` (the Agent's rule for an unknown name is True). Called under the
+        lock."""
+        granted = self._output_wakes.get(call_id)
+        if granted is not None:
+            return granted
         command = self._sut.agent.commands.get(name)
         return command.triggers_on_completion if command is not None else True
 
@@ -504,7 +530,7 @@ class TestRun:
 
     def metrics(self) -> tuple[dict[str, MetricSummary], int]:
         return compute_metrics(
-            self.timeline(), output_command_name=self.probe.output_command_name
+            self.timeline(), output_command_name=self.probe.output_command
         )
 
     def findings(self) -> list[Finding]:

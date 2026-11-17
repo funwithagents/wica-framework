@@ -2,7 +2,7 @@
 Implements specs/benchmark.md, "The reference benchmark: the conversation demo".
 
 Run from the repo root (it imports the demo, `examples.conversation_demo.app`, and needs the
-`demo` group for the presenters the demo wires):
+`demo` group: the demo imports the Gradio contrib):
 
     uv run --group demo python -m benchmarks.bench --k 5
     uv run --group demo python -m benchmarks.bench --only 'openai/*' --scenario greeting --k 3
@@ -21,12 +21,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from examples.conversation_demo.app import build_system, display_entry, wire
+from examples.conversation_demo.app import build_system, wire
 from examples.conversation_demo.speaking import SpeakingSlot
 from wica import Wica
 from wica.benchmark import Entry, Skip, cli
 from wica.config import WicaConfig
-from wica.contrib.gradio import TranscriptLog
 from wica.testing import Scenario
 
 BENCH_DIR = Path(__file__).parent
@@ -38,7 +37,8 @@ RESULTS_DIR = BENCH_DIR / "results"
 
 class DemoTarget:
     """The demo stood up as its `main()` does minus the page: `build_system`, `wire` over a
-    transcript and a Speaking slot of our own, `start`. `label` is the matrix entry's id."""
+    Speaking slot of our own (the robot's Commands and its `say` output Command; no transcript,
+    since nothing in a benchmark reads one), `start`. `label` is the matrix entry's id."""
 
     def __init__(self, entry: Entry) -> None:
         self.entry = entry
@@ -59,7 +59,7 @@ class DemoTarget:
         if wica is None:
             raise Skip(config_error or "the demo could not build its Wica")
         self._wica = wica
-        wire(wica, TranscriptLog(wica, display_entry), SpeakingSlot())
+        wire(wica, SpeakingSlot())
         wica.start()
         return wica
 

@@ -575,30 +575,41 @@ def test_max_retries_rejects_anything_but_a_non_negative_integer(value: Any):
         AgentConfig(provider="fake", model="x", system_prompt="p", max_retries=value)
 
 
-# --- force_tool_call field ---------------------------------------------------------------
+# --- max_next_steps field -----------------------------------------------------------------
 
 
-def test_force_tool_call_defaults_to_true():
-    assert AgentConfig.from_dict(_agent_dict()).force_tool_call is True
+def test_max_next_steps_defaults_to_one():
+    assert AgentConfig.from_dict(_agent_dict()).max_next_steps == 1
     assert (
-        AgentConfig(provider="fake", model="x", system_prompt="p").force_tool_call
-        is True
+        AgentConfig(provider="fake", model="x", system_prompt="p").max_next_steps == 1
     )
 
 
-def test_force_tool_call_false_is_parsed():
-    cfg = WicaConfig.from_json(json.dumps(_wica_dict(force_tool_call=False))).agent
-    assert cfg.force_tool_call is False
+def test_max_next_steps_parsed_zero_turns_it_off_and_null_removes_the_cap():
+    cfg = WicaConfig.from_json(json.dumps(_wica_dict(max_next_steps=3))).agent
+    assert cfg.max_next_steps == 3
+    assert AgentConfig.from_dict(_agent_dict(max_next_steps=0)).max_next_steps == 0
+    assert (
+        AgentConfig.from_dict(_agent_dict(max_next_steps=None)).max_next_steps is None
+    )
 
 
-@pytest.mark.parametrize("value", [1, 0, "yes", None])
-def test_force_tool_call_rejects_non_booleans(value: Any):
+@pytest.mark.parametrize("value", [-1, True, 1.5, "1"])
+def test_max_next_steps_rejects_anything_but_a_non_negative_integer_or_null(
+    value: Any,
+):
+    with pytest.raises(ConfigError, match="max_next_steps"):
+        AgentConfig.from_dict(_agent_dict(max_next_steps=value))
+    with pytest.raises(ConfigError, match="max_next_steps"):
+        AgentConfig(provider="fake", model="x", system_prompt="p", max_next_steps=value)
+
+
+def test_force_tool_call_is_no_longer_a_config_key():
+    """The forced tool call is gone: the strict loader refuses its key like any unknown one."""
     with pytest.raises(ConfigError, match="force_tool_call"):
-        AgentConfig.from_dict(_agent_dict(force_tool_call=value))
+        AgentConfig.from_dict(_agent_dict(force_tool_call=True))
     with pytest.raises(ConfigError, match="force_tool_call"):
-        AgentConfig(
-            provider="fake", model="x", system_prompt="p", force_tool_call=value
-        )
+        WicaConfig.from_json(json.dumps(_wica_dict(force_tool_call=False)))
 
 
 # --- build_chat_model: provider construction branch ---------------------------------------

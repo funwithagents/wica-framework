@@ -3,7 +3,8 @@ whole two-loop wiring of specs/wica-tester.md (phase 1, driver (b)), key-less an
 so it **always runs**; `pytest tests-e2e -k tester` selects it.
 
 The SUT is the shape of an interaction app in miniature: a triggering `speech_input`, a passive
-`closest_user`, and a `say` output Command. The tester's JSON script is the scenario.
+`closest_user`, and a `say` output Command the model speaks through by writing its tag. The
+tester's JSON script is the scenario.
 """
 
 from __future__ import annotations
@@ -30,10 +31,9 @@ def _sut() -> Wica:
                 "model_kwargs": {
                     "delay_s": 0,
                     "script": [
-                        {"tool_calls": [{"name": "say", "args": {"text": "hi there"}}]},
-                        {"tool_calls": [{"name": "noop", "args": {}}]},
+                        {"text": "A greeting. <say>hi there</say>"},
                     ],
-                    "default": {"text": ""},
+                    "default": {"text": "<noop/>"},
                 },
             }
         }
@@ -59,6 +59,8 @@ def _step(command: str, /, **args: Any) -> dict[str, Any]:
 SCRIPT = [
     _step("set_speech_input", value="hello"),
     _step("expect_output", contains="hi", within=5),
+    _step("expect_private_text", contains="greeting", within=5),
+    _step("wait_for", condition="idle", within=5),
     _step("set_closest_user", value="u2"),
     _step("expect_world", key="closest_user", equals="u2"),
     _step("expect_no_action", name="say", for_=0.5),
@@ -81,13 +83,26 @@ def test_fake_tester_drives_a_fake_sut():
     report = _run()
     assert report.ok, [f for f in report.findings if not f.ok]
     assert report.verdict == "pass" and report.tester_label == "fake"
-    assert [f.ok for f in report.findings] == [True, True, True]
-    assert (
-        report.metrics["reaction_latency"].count == 1
-    )  # the greeting; the noop step has none
-    assert (
-        report.metrics["reactions_per_input"].min == 2
-    )  # say's completion woke the noop step
+    assert [f.expectation.split("(")[0] for f in report.findings] == [
+        "expect_output",
+        "expect_private_text",
+        "wait_for",
+        "expect_world",
+        "expect_no_action",
+    ]
+    assert all(f.ok for f in report.findings)
+    # One reaction, the greeting: the end of `say` woke no step (no `<next>` note), so the
+    # idle wait held as soon as the speech was over.
+    assert [e.reaction.noop for e in report.timeline if e.reaction is not None] == [
+        False
+    ]
+    assert report.metrics["reaction_latency"].count == 1
+    assert report.metrics["time_to_first_output"].count == 1
+    assert report.metrics["reactions_per_input"].max == 1
+    outputs = [e for e in report.timeline if e.kind == "command_issued"]
+    assert [(e.name, e.args) for e in outputs] == [("say", {"text": "hi there"})]
+    states = [e.state for e in report.timeline if e.kind == "command_state"]
+    assert states == ["running", "complete"]
     assert report.dropped_inputs == 0
     assert "say" in report.to_markdown()
 
@@ -105,5 +120,7 @@ def test_report_is_written_when_a_directory_is_given(
     assert {e["kind"] for e in parsed["timeline"]} >= {
         "input_written",
         "command_issued",
+        "command_state",
+        "private_text",
         "reaction_ended",
     }

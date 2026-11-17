@@ -19,7 +19,7 @@ it uses is `wica.benchmark`, the scenario format and checks are `wica.testing`'s
 
 ## Running
 
-From the repo root, with the `demo` group (the demo's presenters):
+From the repo root, with the `demo` group (the demo imports the Gradio contrib):
 
 ```bash
 # the whole matrix, five repetitions per (configuration, scenario); a provider whose key is unset skips
@@ -75,3 +75,9 @@ quotes the result id (the folder name), never a batch.
 ## Results
 
 None yet.
+
+Answer latency is timed to the moment the answer's first output opened — the first words the
+model wrote inside its output tag, handed to the output Command while the response was still
+being written. A result kept before the tag output timed an answer to the dispatch of the output
+Command's tool call, at the end of the model call: its `answer_latency` is not comparable with
+later ones.

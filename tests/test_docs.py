@@ -171,7 +171,7 @@ def test_the_readme_quick_start_runs(monkeypatch: pytest.MonkeyPatch, capsys) ->
         wica.agent,
         "build_chat_model",
         lambda config: FakeChatModel(
-            script=[{"text": "Hello! Nice to meet you."}], delay_s=0
+            script=[{"text": "<say>Hello! Nice to meet you.</say>"}], delay_s=0
         ),
     )
     _run(_REPO_ROOT / "README.md", "Quick start")
@@ -191,7 +191,7 @@ def test_the_testing_guide_fake_provider_example_passes() -> None:
 
 
 def test_the_testing_guide_harness_example_passes(capsys) -> None:
-    script = [{"tool_calls": [{"name": "say", "args": {"text": "hi there"}}]}]
+    script = [{"text": "<say>hi there</say>"}]
     _run(
         _DOCS / "guides" / "testing.md",
         "The harness: `TestRun`",
@@ -202,7 +202,7 @@ def test_the_testing_guide_harness_example_passes(capsys) -> None:
 
 def test_the_testing_guide_scripted_tester_example_passes() -> None:
     agent = _fake_agent(
-        [{"tool_calls": [{"name": "say", "args": {"text": "hi there"}}]}],
+        [{"text": "<say>hi there</say>"}],
         output_command=True,
     )
     namespace: dict[str, Any] = {"wica": agent}

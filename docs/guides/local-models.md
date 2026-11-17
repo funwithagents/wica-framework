@@ -6,7 +6,7 @@ On this page: [Why a server](#why-a-server) · [Start a server](#start-a-server)
 
 ## Why a server
 
-An engine running inside the WICA process (llama.cpp's bindings, mlx-lm, `transformers`) generates in a blocking call: cancelling a reaction would free the Agent while the generation kept the GPU. With the engine in its own process, cancelling the call closes the connection and the server stops. Chat templates, tool-call parsing, forced tool choice, token usage and prompt caching are the server's job, and the engine becomes a deployment choice: the same config covers a laptop, a GPU box and a managed endpoint.
+An engine running inside the WICA process (llama.cpp's bindings, mlx-lm, `transformers`) generates in a blocking call: cancelling a reaction would free the Agent while the generation kept the GPU. With the engine in its own process, cancelling the call closes the connection and the server stops. Chat templates, tool-call parsing, token usage and prompt caching are the server's job, and the engine becomes a deployment choice: the same config covers a laptop, a GPU box and a managed endpoint.
 
 | Engine | Server | Runs on | Best for |
 |---|---|---|---|
@@ -18,7 +18,7 @@ An engine running inside the WICA process (llama.cpp's bindings, mlx-lm, `transf
 
 Two servers were tried with WICA, with Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Instruct on an Apple M5 Pro:
 
-- **`llama-server`, recommended.** Forcing a tool call and cancellation both work. Start it with `--jinja`, which enables tool calling through the model's chat template:
+- **`llama-server`, recommended.** Tool calling and cancellation both work. Start it with `--jinja`, which enables tool calling through the model's chat template:
 
   ```
   llama-server -m qwen2.5-7b-instruct-q4_k_m.gguf --jinja -np 1 -c 8192 --port 8080
@@ -26,13 +26,15 @@ Two servers were tried with WICA, with Qwen2.5-7B-Instruct and Qwen2.5-1.5B-Inst
 
   `-c` is the context size, `-np` the number of requests served at once.
 
-- **`mlx_lm.server`, works with one limit.** It ignores `tool_choice`, so forcing a tool call has no effect. It downloads and loads the model on the first request that names it:
+- **`mlx_lm.server`, works.** It ignores `tool_choice`, which WICA does not send. It downloads and loads the model on the first request that names it:
 
   ```
   mlx_lm.server --model mlx-community/Qwen2.5-7B-Instruct-4bit --port 8080
   ```
 
-Ollama (on its `/v1` address), LM Studio and vLLM implement the same API but were not tried: check forcing and cancellation on them before relying on either.
+Ollama (on its `/v1` address), LM Studio and vLLM implement the same API but were not tried: check tool calling and cancellation on them before relying on either.
+
+**Speaking does not depend on `tool_choice`, or on tool calling at all.** The model speaks by writing the output Command's tag in its text ([commands.md](commands.md#make-your-agent-speak)), and stays silent by writing `<noop/>`; WICA forces no tool call. A server that ignores or rejects `tool_choice` therefore speaks like any other. Tool calling is still what the other Commands need.
 
 ## Point WICA at it
 
@@ -62,15 +64,14 @@ uv add "wica[openai-compatible] @ git+https://github.com/funwithagents/wica-fram
 
 ## Which model size works
 
-The model matters more than the server. In a session with a speech Input, a `say` output Command and a `set_light` Command:
+The model matters more than the server. In a session with a speech Input and a `set_light` Command:
 
 | Model | Result |
 |---|---|
-| Qwen2.5-7B-Instruct | Every reaction right: `say` to greet, `set_light("red")` on request, `noop` after each. About 0.5 s per reaction (1.1 s for the first), on both servers |
-| Qwen2.5-1.5B-Instruct, no output Command | Sensible one-line replies in 0.07 to 0.25 s, but it said it set the light without calling `set_light` |
-| Qwen2.5-1.5B-Instruct, output Command | Forced: every call ran to the deadline, writing text without ever calling a tool. Unforced: plain text every time, which nobody hears |
+| Qwen2.5-7B-Instruct | Called `set_light("red")` on request. About 0.5 s per reaction (1.1 s for the first), on both servers |
+| Qwen2.5-1.5B-Instruct | Sensible one-line replies in 0.07 to 0.25 s, but it said it set the light without calling `set_light` |
 
-Expect a 7B-class model to drive Commands, and a model under about 3B not to. The floor between them was not measured.
+Expect a 7B-class model to drive Commands, and a model under about 3B not to. The floor between them was not measured. Speaking asks less of a model than acting: it is text with a tag, and text with no tag at all is still delivered, so a model too small to call tools can still talk. These sessions were measured when speech was itself a tool call; the timings of a spoken reply were not measured again with the tag.
 
 ## What to tune
 
@@ -78,8 +79,8 @@ Expect a 7B-class model to drive Commands, and a model under about 3B not to. Th
 |---|---|
 | `context_window` | A local model has no LangChain profile, so `history_budget` needs it. Match the server's context size (`-c`) |
 | `model_timeout` | The default 10 s fails a cold start (48 s on `mlx_lm.server` with a download) or a long prompt on a small machine. Raise it, or warm the server with one request before `start()` |
-| `model_kwargs.max_tokens` | An output cap. A model too small for forced tool calls writes until the deadline on every reaction; a cap bounds the damage |
-| `force_tool_call` | Read only with an output Command. `llama-server` honours `tool_choice: "required"`, `mlx_lm.server` ignores it; set `false` for a server that rejects it (every call then fails `model_error`) |
+| `model_kwargs.max_tokens` | An output cap. A small model can write until the deadline; a cap bounds the damage. Speech cut at the cap is delivered as far as it got |
+| `max_next_steps` | How many steps in a row the model's `<next>` note may wake after it speaks (default `1`). Set `0` for a small model that chains utterances ([../reference/configuration.md](../reference/configuration.md#the-agent-block)) |
 
 Token usage and prompt-prefix reuse are reported by both servers tried: `history_budget` works, and `cache_read_tokens` in the reaction record shows the reused prefix ([latency-and-traces.md](latency-and-traces.md)).
 
