@@ -65,7 +65,7 @@ async def say(text: str) -> str:
 wica.set_output_command(say)
 ```
 
-Annotated `OutputStream`, the function is called at the output's first words and receives them as the model writes them, so a voice can start before the response is complete. It must be `async def`:
+Annotated `OutputStream`, the function is called at the output's first words and receives them as the model writes them, so a voice can start before the response is complete. The first words come once the output's first 80 characters are written and checked for garbled text (or at its end, if shorter), then the rest as it arrives ([../reference/api.md](../reference/api.md#response-guards)). It must be `async def`:
 
 ```python
 from wica import OutputStream
@@ -107,7 +107,7 @@ The model is not obliged to tag: a response with text and no tag at all is deliv
 
 ### Interruption and what was heard
 
-There is one voice. When a response speaks, every output still running or waiting from an earlier response is cancelled: the person says "Stop, please", the model answers "Okay", and the story it was telling is cut off. Other Commands are left alone, since speaking is not a request to stop acting. The model can also stop its own speech without saying anything, with `cancel_command` on the output's `call_id`.
+There is one voice. When a response speaks, every output still running or waiting from an earlier response is cancelled: the person says "Stop, please", the model answers "Okay", and the story it was telling is cut off as soon as the model writes "Okay", before "Okay" itself is delivered. Other Commands are left alone, since speaking is not a request to stop acting. The model can also stop its own speech without saying anything, with `cancel_command` on the output's `call_id`.
 
 A cancelled output raises `asyncio.CancelledError` in your function at its next `await`. Set `text.heard` there to what was actually delivered, and the model's history keeps that instead of the whole body, so the model does not believe it said what nobody heard:
 

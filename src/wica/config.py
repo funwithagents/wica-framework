@@ -90,6 +90,11 @@ class AgentConfig:
     # How many times one reaction may call the model again after its response guards reject a
     # response (0 = never retry). See specs/agent.md ("Response guards").
     max_retries: int = DEFAULT_MAX_RETRIES
+    # Whether an output is delivered while the response streams (True) or only once the whole
+    # response has passed the response guards (False); None for the output mode's default: True
+    # with tags, False with the output Command as a tool (where True is not supported yet). See
+    # specs/agent.md ("When an output is delivered").
+    stream_output: bool | None = None
 
     def __post_init__(self) -> None:
         # The structural invariants the loaders enforce, applied to direct construction too, so
@@ -123,6 +128,7 @@ class AgentConfig:
         _validate_model_timeout(self.model_timeout, block="agent")
         _validate_max_next_steps(self.max_next_steps, block="agent")
         _validate_max_retries(self.max_retries, block="agent")
+        _validate_stream_output(self.stream_output, block="agent")
 
     @classmethod
     def from_dict(
@@ -188,6 +194,7 @@ _AGENT_OPTIONAL_COMMON = {
     "model_timeout",
     "max_next_steps",
     "max_retries",
+    "stream_output",
 }
 _AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
 _WICA_ALLOWED = {"agent"}
@@ -299,6 +306,15 @@ def _validate_max_retries(value: Any, *, block: str) -> int:
     return value
 
 
+def _validate_stream_output(value: Any, *, block: str) -> bool | None:
+    """A boolean, or None for the output mode's default. See specs/config.md."""
+    if value is not None and not isinstance(value, bool):
+        raise ConfigError(
+            f"{block}: 'stream_output' must be true, false or null, got {value!r}"
+        )
+    return value
+
+
 def _require_str(data: dict[str, Any], key: str, *, block: str) -> str:
     if key not in data:
         raise ConfigError(f"{block}: missing required key {key!r}")
@@ -406,6 +422,7 @@ def _parse_agent_block(
     max_retries = _validate_max_retries(
         data.get("max_retries", DEFAULT_MAX_RETRIES), block=block
     )
+    stream_output = _validate_stream_output(data.get("stream_output"), block=block)
 
     return {
         "provider": provider,
@@ -423,6 +440,7 @@ def _parse_agent_block(
         "model_timeout": model_timeout,
         "max_next_steps": max_next_steps,
         "max_retries": max_retries,
+        "stream_output": stream_output,
     }
 
 

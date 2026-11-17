@@ -43,6 +43,7 @@ from wica.config import AgentConfig, ConfigError
 from wica.content import Content, TextPart
 from wica.text_output import OutputStream
 from wica.guards import (
+    GARBLED_MIN_CHARS,
     REJECTED_TOOL_RESULT,
     ModelResponse,
     ResponseRejection,
@@ -217,6 +218,7 @@ def make_agent(
     model_timeout: float | None = 10.0,
     max_retries: int = 1,
     max_next_steps: int | None = 1,
+    stream_output: bool | None = None,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
@@ -235,6 +237,7 @@ def make_agent(
         model_timeout=model_timeout,
         max_retries=max_retries,
         max_next_steps=max_next_steps,
+        stream_output=stream_output,
     )
     agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
     if private_text is not None:
@@ -3768,7 +3771,9 @@ def test_a_reminder_retry_hides_the_response_and_extends_the_newest_observation(
     agent.stop()
 
 
-def test_several_rejections_make_one_correction_shown_if_any_asks(loop, world, private):
+def test_several_rejections_make_one_correction_hidden_if_any_asks(
+    loop, world, private
+):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -3784,8 +3789,8 @@ def test_several_rejections_make_one_correction_shown_if_any_asks(loop, world, p
     assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     retry = model.calls[1]
-    assert isinstance(retry[-2], AIMessage) and retry[-2].text == "bad and ugly"
-    assert "- never say bad\n- never say ugly" in retry[-1].text
+    assert not any(isinstance(m, AIMessage) for m in retry)
+    assert "- never say bad\n- never say ugly" in _texts(retry[-1])[-1]
     agent.stop()
 
 
@@ -3935,6 +3940,7 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
         "unknown_command",
         "invalid_args",
         "output_command_required",
+        "garbled_text",
     ]
 
     agent.add_response_guard(lambda r: None, name="mine")
@@ -3943,6 +3949,7 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
         "incomplete_response",
         "unknown_command",
         "output_command_required",
+        "garbled_text",
         "mine",
     ]
     with pytest.raises(ValueError, match="already added"):
@@ -4237,6 +4244,9 @@ def test_an_output_is_delivered_while_the_response_is_still_streaming(
         private,
         output_command=say,
     )
+    # Without the garbled check nothing is held back: delivery starts at the first words. (With
+    # it, the default, an output waits for its first GARBLED_MIN_CHARS characters.)
+    agent.remove_response_guard("garbled_text")
     issued: list[CommandIssued] = []
     ended: list[CommandTrace] = []
     agent.on_command.subscribe(issued.append)
@@ -4871,6 +4881,91 @@ def test_tool_mode_rejects_an_attribute_outside_its_values(loop, world):
     agent.stop()
 
 
+TOOL_GARBAGE = "……  …  ………  </… …  …… ....……  " * 4
+
+
+def test_tool_mode_a_garbled_call_is_never_said_and_is_retried_with_a_reminder(
+    loop, world
+):
+    """Tool mode: the output starts only once the response is complete, so a garbled call's text
+    is caught by the guard before anything is said (specs/agent.md, "Garbled text")."""
+    spoken: list[tuple[str, str]] = []
+    model = ProgrammableChatModel(
+        respond=sequence(
+            tool_call_response([("say", {"text": TOOL_GARBAGE}, "t1")]),
+            tool_call_response([("say", {"text": "Hello there!"}, "t2")]),
+            tool_call_response([("noop", {}, "t3")]),
+        )
+    )
+    agent = _tool_mode_agent(model, loop, world, _emotional_say(spoken))
+    rejections: list[ResponseRejection] = []
+    traces: list[ReactionTrace] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.on_reaction_ended.subscribe(traces.append)
+    agent.start()
+    world.update("input", "hello")
+    wait_until(lambda: spoken == [("Hello there!", "neutral")] and len(traces) == 2)
+
+    [rejection] = rejections
+    assert rejection.response.outputs == (TOOL_GARBAGE,)
+    assert "garbled" in rejection.feedback
+    assert not rejection.show_response and not rejection.output_started
+    assert (traces[0].attempts, traces[0].garbled_attempts) == (2, 1)
+    # The retry only reminds: the garbage is never shown back to the model.
+    retry = model.calls[1]
+    assert not any(isinstance(m, AIMessage) for m in retry)
+    assert all(TOOL_GARBAGE not in t for m in retry for t in _texts(m))
+    agent.stop()
+
+
+def test_tool_mode_garbled_free_text_without_a_call_is_hidden_whatever_the_other_guards(
+    loop, world
+):
+    """Garbled free text with no call fails output_command_required too, which would show the
+    response: the garbled guard's reminder wins, so the garbage is not replayed."""
+    spoken: list[tuple[str, str]] = []
+    model = ProgrammableChatModel(
+        respond=sequence(
+            text_response(TOOL_GARBAGE),
+            tool_call_response([("say", {"text": "Hello there!"}, "t1")]),
+            tool_call_response([("noop", {}, "t2")]),
+        )
+    )
+    agent = _tool_mode_agent(model, loop, world, _emotional_say(spoken))
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+    world.update("input", "hello")
+    wait_until(lambda: spoken == [("Hello there!", "neutral")])
+
+    [rejection] = rejections
+    assert "called no command" in rejection.feedback and "garbled" in rejection.feedback
+    assert not rejection.show_response
+    assert not any(isinstance(m, AIMessage) for m in model.calls[1])
+    agent.stop()
+
+
+def test_tool_mode_does_not_stream_its_output(loop, world):
+    """A tool call's text is delivered once the response is complete: stream_output true is not
+    supported in tool mode, while false or unset is."""
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    streaming = make_agent(
+        ProgrammableChatModel(), world=world, loop=loop, stream_output=True
+    )
+    with pytest.raises(ValueError, match="stream_output"):
+        streaming.set_output_command(_emotional_say([]), as_tool=True)
+    assert streaming.output_command_name is None  # nothing changed
+    streaming.set_output_command(_emotional_say([]))  # tag mode streams
+
+    held = make_agent(
+        ProgrammableChatModel(), world=world, loop=loop, stream_output=False
+    )
+    held.set_output_command(_emotional_say([]), as_tool=True)
+    assert held.output_command_name == "say"
+
+
 def test_tool_mode_cut_off_output_keeps_what_was_heard_in_its_call(loop, world):
     spoken: list[tuple[str, str]] = []
     model = ProgrammableChatModel(
@@ -4922,3 +5017,450 @@ def test_switching_the_output_mode_while_running_rebinds_the_model(loop, world):
     assert "say" in model.bindings[1]["tools"]
     assert model.bindings[1]["tool_choice"] == "any"
     agent.stop()
+
+
+# --- Garbled text (specs/agent.md "Garbled text") -------------------------------------------------
+
+CLEAN = (
+    "I can tell jokes, give the time, share a fun fact, play a short tune, or dance again. "
+    "Just let me know what you would like."
+)
+GARBAGE = "……  …  ………  </… …  …… ....……  " * 4
+
+
+class Voice:
+    """A streaming output Command `say` recording what it received, piece by piece, and whether it
+    was cut off."""
+
+    def __init__(self, *, hold: float = 0.0) -> None:
+        self.pieces: list[list[str]] = []
+        self.cancelled: list[str] = []
+        self.hold = hold  # seconds it keeps "speaking" after its text ends
+
+    def command(self) -> Command:
+        async def say(text: OutputStream) -> str:
+            """Speak out loud."""
+            pieces: list[str] = []
+            self.pieces.append(pieces)
+            try:
+                async for piece in text:
+                    pieces.append(piece)
+                await asyncio.sleep(self.hold)
+            except asyncio.CancelledError:
+                self.cancelled.append("".join(pieces))
+                raise
+            return "said"
+
+        return Command(say)
+
+    @property
+    def said(self) -> list[str]:
+        return ["".join(p) for p in self.pieces]
+
+
+def _chunks(text: str, size: int) -> list[AIMessageChunk]:
+    return [
+        AIMessageChunk(content=text[i : i + size]) for i in range(0, len(text), size)
+    ]
+
+
+def _consumed_stream(chunks: list[AIMessageChunk], consumed: list[int]) -> Stream:
+    """A stream recording how many chunks the Agent took from it."""
+
+    async def stream() -> AsyncIterator[AIMessageChunk]:
+        for index, chunk in enumerate(chunks):
+            await asyncio.sleep(0)
+            consumed.append(index)
+            yield chunk
+
+    return stream
+
+
+def _all_prompt_text(messages: list[BaseMessage]) -> str:
+    return "\n".join(str(m.content) for m in messages)
+
+
+def test_a_garbled_start_is_never_delivered_and_the_response_is_retried(
+    loop, world, private
+):
+    """The incident: garbage from the first words. The output is held back until its first
+    GARBLED_MIN_CHARS characters, found garbled, never delivered; the model stream is stopped
+    there and the model asked again with a reminder; only the clean answer is said and kept."""
+    voice = Voice()
+    consumed: list[int] = []
+    garbled = _chunks("<say>I'm   " + GARBAGE * 3 + "</say>", 8)
+    agent, model, traces, done = _streaming_agent(
+        [
+            _consumed_stream(garbled, consumed),
+            chunks_stream(AIMessageChunk(content=f"<say>{CLEAN}</say>")),
+        ],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+    )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+    world.update("input", "what can you do?")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: voice.said == [CLEAN])
+    agent.stop()
+
+    assert voice.said == [CLEAN]  # the garbage reached no voice
+    assert len(consumed) < len(garbled)  # the model was stopped part-way
+    trace = traces[0]
+    assert (trace.outcome, trace.attempts, trace.garbled_attempts) == ("ok", 2, 1)
+    [rejection] = rejections
+    assert rejection.output_started is False
+    assert rejection.show_response is False
+    assert rejection.feedback.startswith("Your previous response was garbled")
+    assert agent._history[1:] == [AssistantTextRecord(f"<say>{CLEAN}</say>")]
+    retry_prompt = model.calls[1]
+    assert "…" not in _all_prompt_text(retry_prompt)
+    assert "Your previous response was garbled" in human_texts(retry_prompt[-1])
+
+
+def test_a_short_output_without_words_is_judged_whole_and_never_delivered(
+    loop, world, private
+):
+    """The second reproduction: a whole <say> body of dots and ellipses, shorter than
+    GARBLED_MIN_CHARS. It is held until it ends, judged whole, never delivered, and retried."""
+    voice = Voice()
+    agent, _, traces, done = _streaming_agent(
+        [
+            chunks_stream(*_chunks("<say>……………… ... ... ...</...></say>", 4)),
+            chunks_stream(AIMessageChunk(content="<noop/>")),
+        ],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+    )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+    world.update("input", "the emotion finished")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert voice.said == []
+    [rejection] = rejections
+    assert "no words" in rejection.feedback
+    assert rejection.output_started is False
+    trace = traces[0]
+    assert (trace.outcome, trace.attempts, trace.garbled_attempts, trace.noop) == (
+        "ok",
+        2,
+        1,
+        True,
+    )
+    assert agent._history[1:] == [AssistantTextRecord("<noop/>")]
+
+
+def test_an_output_is_held_back_until_its_first_characters_are_checked(
+    loop, world, private
+):
+    """Delivery waits for GARBLED_MIN_CHARS characters, then hands over everything written so
+    far in the pieces it arrived in, and streams on; a shorter output is delivered when it ends."""
+    voice = Voice()
+    first_piece_at: list[Any] = []
+    written_at: list[Any] = []
+
+    async def say(text: OutputStream) -> str:
+        """Speak out loud."""
+        async for _ in text:
+            if not first_piece_at:
+                first_piece_at.append(now())
+        voice.pieces.append([text.text])
+        return "said"
+
+    head = "One two three four five six seven eight nine ten eleven twelve. "
+    tail = "Thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty."
+    assert len(head) < GARBLED_MIN_CHARS < len(head + tail)
+
+    async def stream() -> AsyncIterator[AIMessageChunk]:
+        yield AIMessageChunk(content="<say>" + head)
+        await asyncio.sleep(0.15)
+        written_at.append(now())
+        yield AIMessageChunk(content=tail)
+        yield AIMessageChunk(content="</say><say>Short.</say>")
+
+    agent, _, traces, done = _streaming_agent(
+        [stream], loop, world, private, output_command=say
+    )
+    agent.start()
+    world.update("input", "count to twenty")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: len(voice.pieces) == 2)
+    agent.stop()
+
+    assert voice.said == [(head + tail).strip(), "Short."]
+    assert (
+        first_piece_at[0] >= written_at[0]
+    )  # nothing before the 80th character was written
+    assert traces[0].first_output_at is not None
+    assert traces[0].first_output_at >= written_at[0]
+    assert traces[0].garbled_attempts == 0
+
+
+def test_garbage_after_a_clean_start_cancels_the_output_and_keeps_none_of_it(
+    loop, world, private
+):
+    """Garbage after delivery has started: the model is stopped, the output cut off, the
+    response kept out of history, the output's entry failed without its text, then a retry
+    speaks. The next step's prompt holds none of the garbage."""
+    voice = Voice()
+    garbled = _chunks(f"<say>{CLEAN} " + GARBAGE * 3 + "</say>", 6)
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(*garbled),
+            chunks_stream(
+                AIMessageChunk(content="<say>Sorry, let me say that again.</say>")
+            ),
+            chunks_stream(AIMessageChunk(content="<noop/>")),
+        ],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+    )
+    rejections: list[ResponseRejection] = []
+    ended: list[CommandTrace] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.on_command_ended.subscribe(ended.append)
+    agent.start()
+    world.update("input", "what can you do?")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: len(ended) == 2)
+    failed = world.get("agent:command:c1")
+    done.clear()
+    world.update("input", "and now?")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: len(traces) == 2)
+    agent.stop()
+
+    assert voice.cancelled and voice.cancelled[0].startswith(CLEAN[:40])
+    assert voice.said[-1] == "Sorry, let me say that again."
+    assert [(t.call_id, t.state) for t in ended] == [
+        ("c1", "failed"),
+        ("c2", "complete"),
+    ]
+    assert failed.state == "failed"
+    assert failed.args == {"text": ""}
+    assert failed.error is not None and "garbled" in failed.error
+    [rejection] = rejections
+    assert rejection.output_started is True
+    assert traces[0].garbled_attempts == 1
+    assert traces[0].command_call_ids == ("c2",)
+    assert agent._history[1] == AssistantTextRecord(
+        "<say>Sorry, let me say that again.</say>"
+    )
+    next_prompt = _all_prompt_text(model.calls[2])
+    assert "…" not in next_prompt and CLEAN[:40] not in next_prompt
+    assert "garbled and was cut off" in next_prompt
+
+
+def test_a_loop_shows_at_the_end_of_the_response_and_is_retracted(loop, world, private):
+    """A phrase repeated until the output cap: no filler, so nothing trips while it streams; the
+    whole-response check at the end finds the loop and retracts what was said."""
+    voice = Voice(hold=0.05)
+    loop_text = "I can help with that. " * 30
+    agent, _, traces, done = _streaming_agent(
+        [
+            chunks_stream(*_chunks(f"<say>{loop_text}", 20), _cut_at_the_cap(150)),
+            chunks_stream(AIMessageChunk(content="<say>I can help.</say>")),
+        ],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+    )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+    world.update("input", "help")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: voice.said[-1:] == ["I can help."])
+    agent.stop()
+
+    [rejection] = rejections
+    assert rejection.output_started is True
+    assert "repeating itself" in rejection.feedback
+    assert traces[0].garbled_attempts == 1
+    assert agent._history[1:] == [AssistantTextRecord("<say>I can help.</say>")]
+
+
+def test_garbled_private_text_beside_a_clean_output_is_left_out_of_history(
+    loop, world, private
+):
+    voice = Voice()
+    agent, _, traces, done = _streaming_agent(
+        [chunks_stream(AIMessageChunk(content=f"{GARBAGE}<say>{CLEAN}</say>"))],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+    )
+    agent.start()
+    world.update("input", "what can you do?")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: voice.said == [CLEAN])
+    agent.stop()
+
+    assert private.texts == []
+    assert agent._history[1:] == [AssistantTextRecord(f"<say>{CLEAN}</say>")]
+    assert traces[0].garbled_attempts == 0
+
+
+def test_out_of_retries_a_garbled_reaction_says_nothing_and_records_nothing(
+    loop, world, private
+):
+    voice = Voice()
+    agent, _, traces, done = _streaming_agent(
+        [chunks_stream(AIMessageChunk(content=f"<say>{GARBAGE}</say>"))],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+    )
+    agent.start()
+    world.update("input", "what can you do?")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    agent.stop()
+
+    assert voice.said == []
+    assert (traces[0].outcome, traces[0].attempts, traces[0].garbled_attempts) == (
+        "rejected",
+        2,
+        2,
+    )
+    assert [type(r) for r in agent._history] == [ObservationRecord]
+
+
+def test_without_the_garbled_text_guard_garbage_is_delivered_as_written(
+    loop, world, private
+):
+    voice = Voice()
+    agent, _, traces, done = _streaming_agent(
+        [chunks_stream(AIMessageChunk(content=f"<say>{GARBAGE}</say>"))],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+    )
+    agent.remove_response_guard("garbled_text")
+    agent.start()
+    world.update("input", "what can you do?")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: len(voice.said) == 1)
+    agent.stop()
+
+    assert [text.strip() for text in voice.said] == [GARBAGE.strip()]
+    assert traces[0].attempts == 1
+
+
+# --- stream_output false (specs/agent.md "Output: tags in the model's text") ----------------------
+
+
+def test_with_stream_output_false_a_speaking_response_is_guarded_before_anything_is_said(
+    loop, world, private
+):
+    """The whole response passes the guards first: an unknown Command beside a <say> is now
+    rejected, and nothing of the rejected attempt is said."""
+    voice = Voice()
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                AIMessageChunk(content="<say>On my way.</say>"),
+                _tool_chunk(0, "{}", name="teleport", call_id="t1"),
+            ),
+            chunks_stream(AIMessageChunk(content="<say>I cannot teleport.</say>")),
+        ],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+        stream_output=False,
+    )
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+    world.update("input", "teleport to the kitchen")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: voice.said == ["I cannot teleport."])
+    agent.stop()
+
+    [rejection] = rejections
+    assert "no command named 'teleport'" in rejection.feedback
+    assert rejection.output_started is False
+    assert voice.said == ["I cannot teleport."]
+    trace = traces[0]
+    assert trace.first_output_at is not None and trace.model_ended_at is not None
+    assert trace.first_output_at >= trace.model_ended_at
+    assert agent._history[1:] == [AssistantTextRecord("<say>I cannot teleport.</say>")]
+
+
+def test_with_stream_output_false_a_whole_output_keeps_its_pieces_and_order(
+    loop, world, private
+):
+    voice = Voice()
+    agent, _, _, done = _streaming_agent(
+        [
+            chunks_stream(
+                AIMessageChunk(content="<say>Hello "),
+                AIMessageChunk(content="there.</say><say>Bye.</say>"),
+            )
+        ],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+        stream_output=False,
+    )
+    agent.start()
+    world.update("input", "hi")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: len(voice.said) == 2)
+    agent.stop()
+
+    assert voice.pieces == [["Hello ", "there."], ["Bye."]]
+
+
+def test_a_new_response_cuts_the_old_output_at_its_first_words_before_the_guards(
+    loop, world, private
+):
+    """One voice, with delivery held back: the earlier output stops as soon as the new response
+    writes its first words, not once the new output is delivered: here, before the guards run."""
+    voice = Voice(hold=5.0)  # the first answer keeps "speaking"
+    cut_before_guard: list[bool] = []
+
+    def watch(response: ModelResponse) -> Retry | None:
+        if response.outputs == ("Stopping.",):
+            cut_before_guard.append(bool(voice.cancelled))
+        return None
+
+    agent, _, traces, done = _streaming_agent(
+        [
+            chunks_stream(AIMessageChunk(content="<say>A long story begins.</say>")),
+            chunks_stream(AIMessageChunk(content="<say>Stopping.</say>")),
+        ],
+        loop,
+        world,
+        private,
+        output_command=voice.command(),
+        stream_output=False,
+    )
+    agent.add_response_guard(watch)
+    agent.start()
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: voice.said == ["A long story begins."])
+    done.clear()
+    world.update("input", "stop, please")
+    wait_until(lambda: len(traces) == 2)
+    wait_until(lambda: len(voice.said) == 2)
+    agent.stop()
+
+    assert cut_before_guard == [True]
+    assert voice.cancelled[0] == "A long story begins."
