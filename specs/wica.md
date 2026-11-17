@@ -9,7 +9,7 @@ tests:
 
 # Wica (the facade)
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 

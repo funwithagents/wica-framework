@@ -67,6 +67,11 @@ KNOWN_FLAKY: dict[tuple[str, str], str] = {
         "ministral-14b says the note is saved without calling write_note, or writes it as a "
         "tag in its text (6 of 12 attempts, 2026-11-17, speech as a tag in the text)"
     ),
+    ("e2e.openai.config", "long_answer"): (
+        "gpt-4o sometimes writes the note as a tag in its text (`<functions.write_note …>`) or "
+        "speaks the story instead of calling write_note (2 of 28 attempts, 2026-11-17, speech "
+        "as a tag in the text)"
+    ),
     ("e2e.openai.config", "background"): (
         "gpt-4o speaks when a background sound wakes a fresh robot (1 of 3 attempts, "
         "2026-11-17, speech as a tag in the text)"
