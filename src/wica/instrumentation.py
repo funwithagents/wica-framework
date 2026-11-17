@@ -87,6 +87,8 @@ class ReactionTrace:
     # When the reaction's first output opened: its first words handed to the output Command. None
     # when it delivered nothing. See specs/agent.md ("Output: tags in the model's text").
     first_output_at: datetime | None = None
+    # The reaction's outputs alone, in the order they opened (a subset of command_call_ids).
+    output_call_ids: tuple[str, ...] = ()
 
     @property
     def coalescing_wait(self) -> float:
@@ -135,6 +137,11 @@ class CommandTrace:
     started_at: datetime
     ended_at: datetime
     state: Literal["complete", "failed", "cancelled"]
+    # An output (a tag of the output Command), not a tool call; and whether this terminal write
+    # triggers a step — the Agent's own decision, so no consumer has to reproduce it. See
+    # specs/instrumentation.md ("Whether a Command's end triggers a step").
+    is_output: bool = False
+    triggers_step: bool = False
 
     @property
     def duration(self) -> float:

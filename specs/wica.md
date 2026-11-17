@@ -39,6 +39,7 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 | `wica.on_agent_prompt` | `Event[list[BaseMessage]]` | Fires with the exact rendered messages before each reaction's first model call (= `agent.on_prompt`). |
 | `wica.on_agent_response_rejected` | `Event[ResponseRejection]` | Fires once per response attempt the response guards reject (= `agent.on_response_rejected`; see [agent.md](agent.md), "Response guards"). |
 | `wica.on_agent_command` | `Event[CommandIssued]` | Fires with each Command the model issues, at dispatch time, and with each output once its body is complete (= `agent.on_command`). |
+| `wica.on_agent_output_started` | `Event[CommandIssued]` | Fires once per output when it opens, at its first words, with its attributes and `is_output` set (= `agent.on_output_started`). |
 | `wica.on_agent_private_text` | `Event[str]` | Fires with the text the model wrote outside its output tags in a step, when non-empty: its private notes, which nobody hears (= `agent.on_private_text`). |
 | `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | Fires once at the end of every reaction that started, whatever its outcome (= `agent.on_reaction_ended`; see [instrumentation.md](instrumentation.md)). |
 | `wica.on_agent_trigger_dropped` | `Event[WorldEntry]` | Fires once per trigger dropped because a reaction was already in flight (= `agent.on_trigger_dropped`). |
@@ -119,6 +120,7 @@ The World and the Agent each own their instrumentation as `Event`s (see [world.m
 | `wica.on_agent_prompt` | `agent.on_prompt` | `Event[list[BaseMessage]]` — the rendered messages before each reaction's first model call |
 | `wica.on_agent_response_rejected` | `agent.on_response_rejected` | `Event[ResponseRejection]` — once per response attempt the response guards reject |
 | `wica.on_agent_command` | `agent.on_command` | `Event[CommandIssued]` — each Command issued, at dispatch; each output, once its body is complete |
+| `wica.on_agent_output_started` | `agent.on_output_started` | `Event[CommandIssued]` — once per output when it opens |
 | `wica.on_agent_private_text` | `agent.on_private_text` | `Event[str]` — the text the model wrote outside its output tags in a step, when non-empty |
 | `wica.on_agent_reaction_ended` | `agent.on_reaction_ended` | `Event[ReactionTrace]` — once at the end of every reaction that started, whatever its outcome |
 | `wica.on_agent_trigger_dropped` | `agent.on_trigger_dropped` | `Event[WorldEntry]` — once per trigger dropped because a reaction was in flight |

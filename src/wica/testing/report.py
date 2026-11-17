@@ -64,6 +64,10 @@ class SutEvent:
         None  # reaction_ended: the framework's record, whole
     )
     command: CommandTrace | None = None  # command_ended: likewise
+    # command_issued / command_state: the call is an output (a tag of the output Command), as the
+    # framework reports it (CommandIssued.is_output) — never inferred from the name. command_ended
+    # carries it, and whether the end triggers a step, on its CommandTrace.
+    is_output: bool = False
 
 
 FindingKind = Literal["expect", "wait", "check", "other"]
@@ -120,9 +124,7 @@ def summarize(samples: list[float]) -> MetricSummary | None:
     )
 
 
-def metric_samples(
-    timeline: list[SutEvent], *, output_command_name: str | None
-) -> dict[str, list[float]]:
+def metric_samples(timeline: list[SutEvent]) -> dict[str, list[float]]:
     """The raw samples behind `compute_metrics`, by metric key — what a benchmark pools across
     runs before summarizing (specs/benchmark.md, "The summary"). See the module docstring for
     which come from the framework's records and which are timeline heuristics."""
@@ -163,24 +165,23 @@ def metric_samples(
     # barge_in: an input written while an output runs → that output's `cancelled` state, whether
     # `cancel_command` or a new utterance cut it off. One sample per output cut off, from the
     # first input written while it ran.
-    if output_command_name is not None:
-        talked_over: dict[
-            str, float | None
-        ] = {}  # running output → that first input's time
-        for event in timeline:
-            if event.kind == "command_state" and event.name == output_command_name:
-                if event.call_id is None:
-                    continue
-                if event.state == "running":
-                    talked_over.setdefault(event.call_id, None)
-                    continue
-                written = talked_over.pop(event.call_id, None)
-                if event.state == "cancelled" and written is not None:
-                    add("barge_in", event.t - written)
-            elif event.kind == "input_written":
-                for call_id, written in talked_over.items():
-                    if written is None:
-                        talked_over[call_id] = event.t
+    talked_over: dict[
+        str, float | None
+    ] = {}  # running output → that first input's time
+    for event in timeline:
+        if event.kind == "command_state" and event.is_output:
+            if event.call_id is None:
+                continue
+            if event.state == "running":
+                talked_over.setdefault(event.call_id, None)
+                continue
+            written = talked_over.pop(event.call_id, None)
+            if event.state == "cancelled" and written is not None:
+                add("barge_in", event.t - written)
+        elif event.kind == "input_written":
+            for call_id, written in talked_over.items():
+                if written is None:
+                    talked_over[call_id] = event.t
 
     return samples
 
@@ -190,11 +191,11 @@ def dropped_inputs(timeline: list[SutEvent]) -> int:
 
 
 def compute_metrics(
-    timeline: list[SutEvent], *, output_command_name: str | None
+    timeline: list[SutEvent],
 ) -> tuple[dict[str, MetricSummary], int]:
     """The metrics of a timeline, as `(summaries by key, dropped-input count)`. A metric with no
     sample is omitted from the dict."""
-    samples = metric_samples(timeline, output_command_name=output_command_name)
+    samples = metric_samples(timeline)
     metrics = {
         key: summary
         for key, values in samples.items()

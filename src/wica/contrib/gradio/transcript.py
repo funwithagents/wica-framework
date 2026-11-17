@@ -6,14 +6,16 @@ Commands do, or what the agent is called. It consumes
 
   - `on_agent_trigger`  → the World entry a step observed, shown on the input (right) side;
   - `on_agent_prompt`   → the opening of the step's **reaction group** in the transcript;
-  - `on_agent_command`  → each Command and each output the model issued, shown as an item
-                          under the reaction, **with its live execution state**: the log listens
-                          to the Command's `agent:command:<call_id>` World entry (the seam
+  - `on_agent_command`  → each Command the model issued as a tool call, shown as an item under
+                          the reaction, **with its live execution state**: the log listens to
+                          the Command's `agent:command:<call_id>` World entry (the seam
                           `CommandIssued.call_id` exists for — see specs/agent.md
                           "Instrumentation") and updates the item in place as it goes running →
-                          complete / failed / cancelled. An output is reported once its text is
-                          complete, its entry by then already `running` (or over), so the log
-                          also reads the entry's current state when it attaches;
+                          complete / failed / cancelled;
+  - `on_agent_output_started` → each output (a `CommandIssued` with `is_output` set), from its
+                          first words: its item opens then and is followed the same way, its text
+                          filling in when the body is complete. Its later `on_agent_command`
+                          report adds nothing;
   - `on_agent_private_text` → what the model wrote outside its output tags in the step (💭);
   - `on_agent_reaction_ended` → the end of the reaction group, and a declined reaction (🚫): a
                           record whose `noop` flag is set. No Command is issued for it.
@@ -26,7 +28,8 @@ The only application-specific knowledge — which icon and wording a given entry
 through the `display_entry` hook (see display.py). The log itself only knows the configured
 output Command (read live from the Agent, labelled 🗣️ by default — live, so the log may be built
 before `set_output_command` runs); a declined reaction has no World entry, so it never goes
-through the hook and its label is the log's own.
+through the hook and its label is the log's own. Items opened from an Event are told apart by
+the Event's `is_output` field (🗣️ for an output), never by the Command's name.
 
 Threading: the handlers run on the agent loop (Events and listeners are dispatched there), the
 UI reads through `snapshot()` on its own thread. Everything shared sits behind this object: a
@@ -112,10 +115,11 @@ class TranscriptLog:
         self._current_reaction_id: str | None = None
         # Command items by call_id, so the execution listener can edit them in place, and when
         # each started (wall clock, as the World stamps its versions) for the duration shown on
-        # completion: when it was issued, or — for an output, already running by then — the
-        # timestamp of the version read on attaching.
+        # completion: when it was issued, or for an output when it opened.
         self._command_items: dict[str, dict[str, Any]] = {}
         self._command_started: dict[str, datetime] = {}
+        # Outputs followed since they opened, until on_command reports them (once each).
+        self._opened_outputs: set[str] = set()
         # Reaction group items by reaction_id, so on_reaction_ended can drop the spinner and add
         # the duration once the reaction finishes. See specs/instrumentation.md.
         self._reaction_items: dict[int, dict[str, Any]] = {}
@@ -127,6 +131,7 @@ class TranscriptLog:
             wica.on_agent_trigger.subscribe(self.on_trigger)
             wica.on_agent_prompt.subscribe(self.on_prompt)
             wica.on_agent_command.subscribe(self.on_command)
+            wica.on_agent_output_started.subscribe(self.on_output_started)
             wica.on_agent_private_text.subscribe(self.on_private_text)
             wica.on_agent_reaction_ended.subscribe(self.on_reaction_ended)
 
@@ -145,8 +150,9 @@ class TranscriptLog:
             entry, self._display_entry, self.output_command_name
         )
 
-    def _command_icon(self, name: str) -> str:
-        return "🗣️" if name == self.output_command_name else "🦾"
+    @staticmethod
+    def _command_icon(command: CommandIssued) -> str:
+        return "🗣️" if command.is_output else "🦾"
 
     def _reaction_child(
         self, title: str, content: str, parent_id: str | None = None
@@ -185,14 +191,30 @@ class TranscriptLog:
         self._last_trigger_label = display.label
         self._items.put({"role": "user", "content": display.label})
 
+    def on_output_started(self, command: CommandIssued) -> None:
+        """An output opened, at its first words: create its item under the current reaction and
+        follow its execution entry from there. The Agent fires this once the entry is registered
+        and before its `running` value lands (specs/agent.md, "Instrumentation"), so the listener
+        sees the output's whole life — running with no text yet, running with its whole text,
+        then its outcome."""
+        with self._lock:
+            self._opened_outputs.add(command.call_id)
+        self._open_item(command)
+
     def on_command(self, command: CommandIssued) -> None:
-        """The model issued a Command, or an output whose text is now complete — create its item
-        under the current reaction right away (pinning its position in arrival order) marked in
-        progress, and follow its execution entry so on_command_update can flip the item to its
-        outcome. An output's entry is already `running` (or over, for a short one) when the Event
-        fires, so its current state is applied at once: the listener alone would miss it."""
+        """The model issued a Command — create its item under the current reaction right away
+        (pinning its position in arrival order) marked in progress, and follow its execution entry
+        so on_command_update can flip the item to its outcome. An output followed since it opened
+        is already there: its report here, once its text is complete, adds nothing."""
+        with self._lock:
+            if command.call_id in self._opened_outputs:
+                self._opened_outputs.discard(command.call_id)
+                return
+        self._open_item(command)
+
+    def _open_item(self, command: CommandIssued) -> None:
         item = self._reaction_child(
-            f"{self._command_icon(command.name)} {command.name}",
+            f"{self._command_icon(command)} {command.name}",
             f"{command.name}({format_args(command.args)})",
         )
         item["metadata"]["status"] = "pending"
@@ -201,25 +223,11 @@ class TranscriptLog:
             self._command_started[command.call_id] = datetime.now(timezone.utc)
         self._items.put(item)
         if self._world is not None:
-            # For a Command issued as a tool call the Event fires once the entry is registered
-            # and before its running value lands (specs/agent.md, "Instrumentation"), so the
-            # listener sees the whole life. It must be async: a sync listener is offloaded to a
-            # thread pool, which could deliver a terminal state before `running`; an async one
-            # runs on the loop in version order.
+            # It must be async: a sync listener is offloaded to a thread pool, which could
+            # deliver a terminal state before `running`; an async one runs on the loop in version
+            # order.
             key = f"{_COMMAND_KEY_PREFIX}{command.call_id}"
             self._world.add_listener(key, self.on_command_update)
-            # An output has run since its first words: take the state it is in now, and its
-            # start from that version's timestamp. Handlers and listeners both run on the agent
-            # loop, so no later version can be delivered before this one is applied.
-            entry = self._world.get_entry(key)
-            if isinstance(entry.current.value, CommandExecution):
-                # Already over (a short output): the version before it is the running one.
-                over = entry.current.value.is_terminal() and entry.previous is not None
-                version = entry.previous if over else entry.current
-                assert version is not None
-                with self._lock:
-                    self._command_started[command.call_id] = version.timestamp
-                self._apply_command_state(entry)
 
     async def on_command_update(self, entry: WorldEntry) -> None:
         """World listener on a Command's execution entry: re-render its item through the hook on

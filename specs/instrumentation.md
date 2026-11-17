@@ -97,7 +97,8 @@ class ReactionTrace:
     error: str | None
     text_length: int                          # characters of the response's text as the model wrote it, tags included
     command_call_ids: tuple[str, ...]         # the reaction's outputs, in the order they opened, then its dispatched Commands, in response order
-    noop: bool                                # the model declined: the response was `<noop/>`, or empty
+    output_call_ids: tuple[str, ...]          # the reaction's outputs alone, in the order they opened (a subset of command_call_ids)
+    noop: bool                                # the model declined: it delivered no output and issued no tool call
     usage: TokenUsage | None                  # from AIMessage.usage_metadata, summed over attempts; None when absent
     attempts: int                             # model calls made: 1, or more after rejected responses
     rejections: tuple[str, ...]               # the combined guard feedback of each rejected attempt, in order
@@ -116,6 +117,8 @@ class CommandTrace:
     started_at: datetime                      # the running version's timestamp
     ended_at: datetime                        # the terminal version's timestamp
     state: Literal["complete", "failed", "cancelled"]
+    is_output: bool = False                   # an output (a tag of the output Command), not a tool call
+    triggers_step: bool = False               # whether this terminal write triggers a step (see below)
 ```
 
 Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `time_to_first_content`, `time_to_first_output`, `generation_time`, `busy_time`, `duration` on `CommandTrace`) are read-only properties over the stamps, so a record stays raw and a consumer never recomputes a subtraction differently.
@@ -124,9 +127,11 @@ Derived durations (`coalescing_wait`, `render_time`, `model_latency`, `time_to_f
 
 **The first output.** `first_output_at` is when the reaction's first output opened: the first words of an output tag's body handed to the output Command ([agent.md](agent.md), "Output: tags in the model's text"). It comes after `first_content_at` by the tag's opening and whatever private text precedes it; for text with no tag at all, which is delivered whole when the response ends, it is at `model_ended_at`. `time_to_first_output` is `model_started_at` → `first_output_at`: how long the model call took to give the voice its first words. It is `None` for a reaction that opened no output — one that only acted, declined, or has no output Command. A response that has started an output is not retried, so with retries it belongs to the last attempt.
 
-**A declined reaction.** `noop` is true when the model declined: its whole response was `<noop/>` (outcome `ok`), or it had neither text nor a tool call (outcome `empty`). Nothing else reports it: no `on_command` fires for it ([agent.md](agent.md), "The agent may choose not to act").
+**A declined reaction.** `noop` is true when the model declined: it delivered no output and issued no tool call. That covers a `<noop/>`, with or without private text before it (outcome `ok`), and a response with nothing in it (outcome `empty`). Nothing else reports it: no `on_command` fires for it ([agent.md](agent.md), "The agent may choose not to act").
 
-**An output is a Command in the record.** Each output of a response is a Command execution with its own `call_id`, so it appears in `command_call_ids` and ends with a `CommandTrace` like any Command. Its `started_at` is when it opened, during the model call. Its terminal state is written only once the step that issued it is over, so the `ended_at` of an output shorter than its response is the end of that step, not the moment the output Command returned.
+**An output is a Command in the record.** Each output of a response is a Command execution with its own `call_id`, so it appears in `command_call_ids` — and in `output_call_ids`, so a consumer never tells outputs apart by name or by position — and ends with a `CommandTrace` like any Command, with `is_output` set. Its `started_at` is when it opened, during the model call. Its terminal state is written only once the step that issued it is over, so the `ended_at` of an output shorter than its response is the end of that step, not the moment the output Command returned.
+
+**Whether a Command's end triggers a step.** `CommandTrace.triggers_step` is the Agent's own decision, recorded so no consumer has to reproduce it: for a Command issued as a tool call, its `triggers_on_completion`, whatever its terminal state (a cancelled `dance` wakes a step like a finished one); for an output, whether its response carried a `<next>` note that was granted a wake under `max_next_steps` ([agent.md](agent.md), "Continuing after an output"), and never when the output was cancelled. It says the terminal write produced a trigger, not that a step ran for it: a trigger arriving while a reaction is in flight is dropped, and the completion is then observed by the next step. A test harness waiting for the Agent to settle reads it ([wica-tester.md](wica-tester.md), "idle").
 
 **A reaction with retries.** When the response guards reject a response and the Agent calls the model again ([agent.md](agent.md), "Response guards"), the reaction stays **one** record: `model_started_at` is the first attempt's start and `model_ended_at` the last attempt's end, so `model_latency` covers the whole model phase — every attempt and the guards between them, which is what the user waits for; `guard_duration` separates the guards' share. `attempts` and `rejections` say what happened, `usage` adds up what it cost (`cache_read_tokens` summed when every attempt reported it, else `None`). A reaction that ran out of retries ends `rejected`, with `error` holding the last rejection's feedback.
 
@@ -137,7 +142,7 @@ The Agent gains these `Event`s, surfaced on the facade like the existing ones ([
 | `on_reaction_ended` / `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | **once at the end of every reaction that started**, whatever its outcome — a normal one, an empty response, a model error, a model call past its deadline (`model_timeout`, see [agent.md](agent.md), "Model-call deadline"), a response the guards still rejected after the last retry (`rejected`, see [agent.md](agent.md), "Response guards"), a cancellation by `stop()`. Emitted from `_run_batch`'s `finally`, after `_busy` is cleared, so a subscriber sees "the Agent is free again" and the record at the same moment |
 | `on_response_rejected` / `wica.on_agent_response_rejected` | `Event[ResponseRejection]` | once per response attempt the response guards reject, with the attempt number, the response, the combined feedback and whether a retry follows — see [agent.md](agent.md), "Response guards". Each reaction's prompt still arrives once, on `on_prompt` |
 | `on_trigger_dropped` / `wica.on_agent_trigger_dropped` | `Event[WorldEntry]` | once per trigger dropped because a reaction was in flight — the counterpart of `on_trigger`, which only fires for triggers a reaction observed. Replaces inference (pairing raw against observed triggers with a timeout) with a signal |
-| `on_command_ended` / `wica.on_agent_command_ended` | `Event[CommandTrace]` | once per dispatched Command when its terminal state is written, with the reaction that issued it. This is the generic "any Command finished" signal that [agent.md](agent.md) open question #5 asks for, without a broadcast World entry: a consumer no longer needs a per-`call_id` listener just to learn when and how a Command ended |
+| `on_command_ended` / `wica.on_agent_command_ended` | `Event[CommandTrace]` | once per dispatched Command — an output included — when its terminal state is written, with the reaction that issued it, whether it is an output, and whether its end triggers a step. This is the generic "any Command finished" signal that [agent.md](agent.md) open question #5 asks for, without a broadcast World entry: a consumer no longer needs a per-`call_id` listener just to learn when and how a Command ended |
 
 All of them follow the existing instrumentation rules: observation only, defensive payloads (the dataclasses are frozen), `Event.emit`'s per-subscriber isolation, emitted on the loop thread.
 

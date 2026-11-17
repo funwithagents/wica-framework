@@ -399,7 +399,7 @@ def test_an_agent_without_an_output_command_keeps_its_text_private(
     r = rig([{"text": "Just thinking <say>aloud</say>."}], output=None)
     r.hear("hi", 1)
     assert r.private == ["Just thinking <say>aloud</say>."]
-    assert r.commands == [] and not r.reactions[0].noop
+    assert r.commands == [] and r.reactions[0].noop  # nothing reached anyone
     assert "<say>" not in r.wica.agent.system_prompt
     assert "Nobody reads the text you write" in r.wica.agent.system_prompt
 
@@ -580,13 +580,79 @@ def test_an_output_entry_shows_its_tag_and_its_delivery_never_a_call(
     assert 'say output: "Okay." — delivered: Said it.' in r.observations()[2]
 
 
-def test_an_outputs_records_go_with_its_entry(rig: Callable[..., Rig]) -> None:
+def test_outputs_are_reported_as_outputs_from_their_first_words(
+    rig: Callable[..., Rig],
+) -> None:
+    started: list[Any] = []
+    ended: list[Any] = []
+    r = rig([{"text": "<say>One.</say><say>Two.</say>", "tool_calls": []}])
+
+    def on_started(issued: Any) -> None:
+        entry = r.wica.world.get_entry(f"agent:command:{issued.call_id}")
+        started.append((issued.call_id, issued.is_output, entry.current.value))
+
+    r.wica.on_agent_output_started.subscribe(on_started)
+    r.wica.on_agent_command_ended.subscribe(ended.append)
+    r.hear("hi", 1)
+    wait_until(lambda: len(ended) == 2)
+    # Fired with the entry registered but before its running value: a listener sees it all.
+    assert [(c, o, v) for c, o, v in started] == [
+        ("c1", True, None),
+        ("c2", True, None),
+    ]
+    assert r.reactions[0].output_call_ids == ("c1", "c2")
+    assert r.reactions[0].command_call_ids == ("c1", "c2")
+    assert [(t.is_output, t.triggers_step) for t in ended] == [
+        (True, False),
+        (True, False),
+    ]
+
+
+def test_a_cancelled_noted_output_does_not_trigger_a_step(
+    rig: Callable[..., Rig],
+) -> None:
+    ended: list[Any] = []
+    r = rig([{"text": "<say>Long story.</say><next>ask how it was</next>"}])
+    r.wica.on_agent_command_ended.subscribe(ended.append)
+    r.delay = 5.0
+    r.hear("story", 1)
+    r.wica.agent.cancel_command(r.reactions[0].output_call_ids[0])
+    wait_until(lambda: len(ended) == 1)
+    assert (ended[0].state, ended[0].triggers_step) == ("cancelled", False)
+
+
+def test_a_decline_with_private_text_is_a_noop(rig: Callable[..., Rig]) -> None:
+    r = rig(
+        [
+            {"text": "Just background noise. <noop/>"},
+            {"text": ""},
+            {"text": "<say>Hi.</say>"},
+        ]
+    )
+    r.hear("a hum", 1)
+    r.hear("a click", 2)
+    r.hear("hello", 3)
+    assert [(x.noop, x.outcome) for x in r.reactions] == [
+        (True, "ok"),
+        (True, "empty"),
+        (False, "ok"),
+    ]
+    assert r.private == ["Just background noise."]
+
+
+def test_private_text_alone_is_a_decline_without_an_output_command(
+    rig: Callable[..., Rig],
+) -> None:
+    r = rig([{"text": "Thinking it over."}], output=None)
+    r.hear("hi", 1)
+    assert r.reactions[0].noop and r.reactions[0].outcome == "ok"
+
+
+def test_an_outputs_record_goes_with_its_entry(rig: Callable[..., Rig]) -> None:
     r = rig([{"text": "<say>One.</say>"}, {"text": "<say>Two.</say>"}])
     r.hear("hi", 1)
-    first = r.reactions[0].command_call_ids[0]
+    first = r.reactions[0].output_call_ids[0]
     wait_until(lambda: r.said == [("One.", "neutral")])
-    time.sleep(0.1)  # the terminal state lands once the issuing step is over
-    assert r.wica.agent.output_wakes(first) is False  # finished, not yet observed
     r.hear("again", 2)  # the next step observes the finished output and removes it
-    assert r.wica.agent.output_wakes(first) is None
     assert not r.wica.world.is_registered(f"agent:command:{first}")
+    assert f"agent:command:{first}" not in r.wica.agent._output_wake

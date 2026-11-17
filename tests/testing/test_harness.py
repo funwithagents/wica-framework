@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 
 from sut_support import ADD_THEN_TEXT, Voice, describe_timeline, wait_until
 
 from wica import Command, Wica
-from wica.testing import TestRun
+from wica.instrumentation import CommandTrace
+from wica.testing import SutEvent, TestRun
+from wica.testing.harness import _busy_reasons
 
 
 def test_set_expect_action_and_private_text_in_sequence(
@@ -368,6 +371,15 @@ def _output_states(run: TestRun) -> list[str | None]:
     return [e.state for e in run.timeline() if e.kind == "command_state"]
 
 
+def _ends(run: TestRun) -> dict[str, bool]:
+    """`call_id → triggers_step`, from the framework's record of each call's end."""
+    return {
+        e.command.call_id: e.command.triggers_step
+        for e in run.timeline()
+        if e.command is not None
+    }
+
+
 def test_wait_for_speaking_ready_and_idle_around_a_plain_spoken_reply(
     sut_factory: Callable[..., Wica],
 ):
@@ -412,7 +424,9 @@ def test_wait_for_idle_does_not_wait_for_a_step_an_output_without_a_note_never_w
         assert run.wait_for("idle", within=5).ok
         assert _reactions(run) == 1 and _output_states(run) == ["running", "complete"]
         call_id = [e.call_id for e in run.timeline() if e.kind == "command_issued"][0]
-        assert sut.agent.output_wakes(call_id or "") is False
+        assert _ends(run) == {
+            call_id: False
+        }  # the record idle read: no step to wait for
     finally:
         run.close()
         sut.close()
@@ -446,13 +460,8 @@ def test_wait_for_idle_waits_for_the_step_a_noted_output_wakes(
         first, second = (
             e.call_id for e in run.timeline() if e.kind == "command_issued"
         )
-        # The answers the Harness took as each output ended; the Agent's own records go with
-        # the entry, once a later step has observed it.
-        assert run._output_wakes == {
-            first: True,
-            second: False,
-        }  # no note: the chain ends
-        assert sut.agent.output_wakes(first or "") is None  # observed by the woken step
+        # What idle read: the framework's record of each output's end.
+        assert _ends(run) == {first: True, second: False}  # no note: the chain ends
     finally:
         run.close()
         sut.close()
@@ -503,13 +512,86 @@ def test_a_cancelled_output_wakes_nothing_even_with_a_note(
         assert run.wait_for("speaking", within=5).ok
         assert run.wait_for("ready", within=5).ok
         call_id = [e.call_id for e in run.timeline() if e.kind == "command_issued"][0]
-        assert call_id is not None and sut.agent.output_wakes(call_id) is True
+        assert call_id is not None
         sut.agent.cancel_command(call_id)
         assert run.wait_for("idle", within=5).ok
         assert _output_states(run) == ["running", "cancelled"]
+        assert _ends(run) == {call_id: False}  # cancelled: its granted wake withdrawn
         time.sleep(0.3)
         assert _reactions(run) == 1 and voice.said == []  # no step was woken
-        assert sut.agent.output_wakes(call_id) is False
     finally:
         run.close()
         sut.close()
+
+
+# --- idle reads `triggers_step` alone --------------------------------------------------------
+
+
+def _ended_call(
+    call_id: str, *, is_output: bool, triggers_step: bool
+) -> list[SutEvent]:
+    """A call issued, its end recorded by the framework, then its terminal state."""
+    t0 = datetime(2026, 11, 17, tzinfo=timezone.utc)
+    trace = CommandTrace(
+        call_id=call_id,
+        name="say" if is_output else "dance",
+        reaction_id=1,
+        started_at=t0,
+        ended_at=t0 + timedelta(seconds=1),
+        state="complete",
+        is_output=is_output,
+        triggers_step=triggers_step,
+    )
+    return [
+        SutEvent(
+            kind="command_issued",
+            t=1.0,
+            name=trace.name,
+            call_id=call_id,
+            is_output=is_output,
+        ),
+        SutEvent(kind="command_ended", t=2.0, call_id=call_id, command=trace),
+        SutEvent(
+            kind="command_state",
+            t=2.0,
+            name=trace.name,
+            call_id=call_id,
+            state="complete",
+            is_output=is_output,
+        ),
+    ]
+
+
+def _woken(call_id: str) -> SutEvent:
+    """The trigger the end produced, arrived at the Agent (dropped here, as when a reaction is
+    in flight: what idle needs is that it arrived, not that it was reacted to)."""
+    return SutEvent(
+        kind="trigger_dropped", t=2.5, key=f"agent:command:{call_id}", version_id=3
+    )
+
+
+def _idle(timeline: list[SutEvent]) -> list[str]:
+    return _busy_reasons(timeline, lambda key: False)
+
+
+def test_idle_waits_for_a_step_exactly_when_the_end_record_says_it_triggers_one():
+    """The rule the Harness applies, over hand-built timelines: a finished call is waited on past
+    its end only when its `command_ended` record says `triggers_step` — for an output and a tool
+    call alike, whatever their names — and only until that trigger arrives."""
+    for is_output in (True, False):
+        granted = _ended_call("c1", is_output=is_output, triggers_step=True)
+        assert _idle(granted) == [
+            f"{granted[0].name} (c1) completed, its step not yet woken"
+        ]
+        assert _idle([*granted, _woken("c1")]) == []
+        # A trigger on another call's key is not this one's.
+        assert _idle([*granted, _woken("c2")]) != []
+        not_granted = _ended_call("c1", is_output=is_output, triggers_step=False)
+        assert _idle(not_granted) == []
+
+
+def test_idle_waits_for_the_end_record_of_a_call_seen_terminal():
+    """Until the framework's record of the end has arrived, whether it wakes a step is unknown."""
+    issued, _, terminal = _ended_call("c1", is_output=True, triggers_step=True)
+    assert _idle([issued, terminal]) == ["say (c1) ended, its end not yet recorded"]
+    assert _idle([issued]) == ["say (c1) running"]

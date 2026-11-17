@@ -112,17 +112,17 @@ def test_a_second_utterance_is_an_extra_reply_not_a_failure(
     assert result.measures["noop_steps"] == 0
 
 
-def test_two_tags_in_one_response_are_two_outputs(
+def test_two_tags_in_one_response_are_two_outputs_and_one_reply(
     tmp_path: Path, fake_target: Callable[..., FakeTarget]
 ):
-    """Each tag is its own output: the second one in the turn is the extra reply, and the words
-    of both count."""
+    """Each tag is its own output, but one response is one reply: two tags answering the turn
+    are its answer, with nothing extra, and the words of both count."""
     two_tags = [{"text": "<say>hi there</say> a note <say>how are you today</say>"}]
     result = run_once(fake_target(two_tags), GREETING, repetition=1, out_dir=tmp_path)
     assert isinstance(result, RunResult)
     assert result.report.ok, [f for f in result.report.findings if not f.ok]
     assert result.measures["output_calls"] == 2
-    assert result.measures["extra_output"] == 1
+    assert result.measures["extra_output"] == 0
     assert result.measures["turns_answered"] == 1
     assert result.measures["output_words"] == 6
     assert len(result.samples["answer_latency"]) == 1

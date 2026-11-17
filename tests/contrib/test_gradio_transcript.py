@@ -8,8 +8,8 @@ key-less `provider: "fake"` model. See specs/gradio-contrib.md ("Component 3", "
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
@@ -195,65 +195,68 @@ def test_declined_reaction_is_shown_from_its_record_without_state():
     assert "status" not in item["metadata"]  # no execution to follow
 
 
-def test_output_item_is_created_from_an_entry_already_running(unstarted_wica):
-    """An output is reported once its text is complete, its entry by then already `running`: no
-    listener call will ever carry that state, so the log reads it when it attaches — the item
-    is rendered through the hook at once, and its duration counts from that version."""
-    wica = unstarted_wica("say")
+def test_an_output_is_followed_from_its_start(unstarted_wica):
+    """An output's item opens at `on_output_started` — its first words, before its `running`
+    value lands — and follows its entry from there: running with no text yet, then with its
+    whole text, then its outcome. The output's later `on_command` report adds no second item.
+    The 🗣️ comes from the Event's `is_output`, not from the Command's name."""
+    wica = unstarted_wica("voice")  # the configured output Command is named otherwise
     log = TranscriptLog(wica, robot_hook)
     log.on_prompt([HumanMessage(content="hi")])
     key = "agent:command:o1"
     wica.world.register(key, CommandExecution, serialize_fn=lambda value, previous: [])
-    wica.start()  # the World takes updates only while running
+    opened = CommandIssued(name="say", args={"text": ""}, call_id="o1", is_output=True)
+    log.on_output_started(opened)
+    item = item_titled(log.snapshot().conversation, "🗣️ say")
+    assert item["content"] == "say(text='')"
+    assert item["metadata"] == {
+        "title": "🗣️ say",
+        "parent_id": "reaction-1",
+        "status": "pending",
+    }
+
+    wica.start()  # the World takes updates only while running; the listener runs on its loop
+    wica.world.update(
+        key, CommandExecution(name="say", args={"text": ""}, state="running")
+    )
     wica.world.update(
         key, CommandExecution(name="say", args={"text": "hi there"}, state="running")
     )
-    running_at = wica.world.get_entry(key).current.timestamp
-
-    log.on_command(CommandIssued(name="say", args={"text": "hi there"}, call_id="o1"))
-    item = item_titled(log.snapshot().conversation, "🗣️ say")
-    assert item["content"] == "hi there"  # through the hook, not `say(text=…)`
-    assert item["metadata"]["status"] == "pending"
-
-    ended = command_entry("o1", "say", {"text": "hi there"}, "cancelled")
-    ended = replace(
-        ended,
-        current=replace(ended.current, timestamp=running_at + timedelta(seconds=2.5)),
+    _wait_for(
+        lambda: (
+            item_titled(log.snapshot().conversation, "🗣️ say")["content"] == "hi there"
+        )
     )
-    asyncio.run(log.on_command_update(ended))
-    item = item_titled(log.snapshot().conversation, "🗣️ say")
-    assert item["metadata"]["title"] == "🗣️ say ⏹ cancelled"
-    assert item["metadata"]["duration"] == 2.5
-    assert "status" not in item["metadata"]
-
-
-def test_output_item_is_created_from_an_entry_already_over(unstarted_wica):
-    """A short output may be over before its text is reported: the item shows the outcome at
-    once, timed from the running version before it."""
-    wica = unstarted_wica("say")
-    log = TranscriptLog(wica, robot_hook)
-    key = "agent:command:o1"
-    wica.world.register(key, CommandExecution, serialize_fn=lambda value, previous: [])
-    wica.start()
-    wica.world.update(
-        key, CommandExecution(name="say", args={"text": "hi"}, state="running")
-    )
+    log.on_command(dataclasses.replace(opened, args={"text": "hi there"}))
     wica.world.update(
         key,
         CommandExecution(
-            name="say", args={"text": "hi"}, state="complete", result="Said."
+            name="say", args={"text": "hi there"}, state="complete", result="Said."
         ),
     )
-    entry = wica.world.get_entry(key)
-    assert entry.previous is not None
-    ran = (entry.current.timestamp - entry.previous.timestamp).total_seconds()
-
-    log.on_command(CommandIssued(name="say", args={"text": "hi"}, call_id="o1"))
-    item = item_titled(log.snapshot().conversation, "🗣️ say")
-    assert item["metadata"]["title"] == "🗣️ say ✅"
-    assert item["content"] == "hi\n→ Said."
+    _wait_for(
+        lambda: (
+            item_titled(log.snapshot().conversation, "🗣️ say")["metadata"]["title"]
+            == "🗣️ say ✅"
+        )
+    )
+    convo = log.snapshot().conversation
+    assert [t for t in titles(convo) if str(t).startswith(("🗣️", "🦾"))] == ["🗣️ say ✅"]
+    item = item_titled(convo, "🗣️ say")
+    assert item["content"] == "hi there\n→ Said."
     assert "status" not in item["metadata"]
-    assert item["metadata"]["duration"] == round(ran, 1)
+    assert isinstance(item["metadata"]["duration"], float)
+
+
+def test_a_command_issued_as_a_tool_call_is_not_labelled_as_the_voice(unstarted_wica):
+    """A tool call sharing the voice's name is still a tool call: the Event says so."""
+    wica = unstarted_wica("say")
+    log = TranscriptLog(wica)
+    wica.world.register(
+        "agent:command:c1", CommandExecution, serialize_fn=lambda value, previous: []
+    )
+    log.on_command(CommandIssued(name="say", args={"text": "x"}, call_id="c1"))
+    assert titles(log.snapshot().conversation) == ["🦾 say"]
 
 
 def test_command_item_follows_running_then_complete(unstarted_wica):

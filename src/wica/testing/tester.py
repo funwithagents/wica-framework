@@ -112,10 +112,7 @@ def build_tester(
                     "sut:action",
                     f"{event.name}({event.args}) [{event.state or 'issued'}]",
                 )
-                if (
-                    event.kind == "command_issued"
-                    and event.name == run.probe.output_command
-                ):
+                if event.kind == "command_issued" and event.is_output:
                     world.update("sut:output", f"{event.name}({event.args})")
             elif event.kind == "private_text":
                 world.update("sut:reasoning", event.text or "")
