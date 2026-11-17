@@ -51,7 +51,7 @@ config = WicaConfig.from_json_file("agent.config.json")
 | Field | Required | Notes |
 |---|---|---|
 | `agent.provider` | yes | One of the [providers](#providers) below, or any other value LangChain's `init_chat_model` accepts as a provider |
-| `agent.model` | yes | The model id, or the Hub `repo_id` for `huggingface-hub`; for `openai-chat-completions-compatible`, the name the server expects (any label for `llama-server`, the repo id for `mlx_lm.server`); a free label for `fake` |
+| `agent.model` | yes | The model id, or the Hub `repo_id` for `huggingface-hub`; for `openai-chat-completions-compatible`, the name the server expects (any label for `llama-server`, the repo id for `mlx_lm.server`, the model tag for Ollama); a free label for `fake` |
 | `agent.base_url` | with `openai-chat-completions-compatible` only | The server's address, `/v1` included: `http://127.0.0.1:8080/v1`. Required with that provider and rejected with any other, so a typo'd provider cannot send your requests to a vendor instead. See [Local and self-hosted models](#local-and-self-hosted-models) |
 | `agent.system_prompt` / `agent.system_prompt_file` | exactly one | The persona, inline or in a file; see [System prompt](#system-prompt) |
 | `agent.api_key` / `agent.api_key_env` | at most one | A literal key, or the name of the environment variable to read at Agent build; neither uses the provider's own default variable. See [API key](#api-key) |
@@ -125,7 +125,8 @@ WICA runs no model itself. Any server that implements OpenAI's Chat Completions 
 - **No key is needed** for a server that checks none; give `api_key`/`api_key_env` for one that does.
 - **`context_window`** is needed with `history_budget`: a local model has no LangChain profile. Set it to the server's own context size (`-c` on `llama-server`).
 - **`model_timeout`**: the default 10 s is tight for a first request that loads the model, or for a long prompt on a small machine.
-- **An output cap** (`model_kwargs.max_tokens`) bounds a model that writes text without end.
+- **`model_timeout` also bounds the longest reply**: the deadline covers the whole streamed call, so a reply still being written when it expires is cut there.
+- **An output cap** (`model_kwargs.max_tokens`) bounds a model that writes text without end. OpenAI's client sends it as `max_completion_tokens`, which Ollama ignores: there, put it in `model_kwargs.extra_body` instead ([guides/local-models.md](../guides/local-models.md#ollama)).
 
 Which servers were tried, which model sizes work and how cancellation behaves: [guides/local-models.md](../guides/local-models.md). `provider: "openai"` stays OpenAI's own API; a `base_url` in its `model_kwargs` still reaches a proxy in front of OpenAI.
 

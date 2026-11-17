@@ -12,7 +12,7 @@ it uses is `wica.benchmark`, the scenario format and checks are `wica.testing`'s
 | Path | What |
 |---|---|
 | `bench.py` | `DemoTarget` and the `wica-demo-bench` entry point |
-| `matrix.json` | the matrix: one entry per model under test (`id`, `agent` block, `tags`, `enabled`, `notes`), nineteen models over five providers, the demo's persona shared through `agent_defaults`; the `fake` fixture is its opt-in key-less row — see "Model catalog" |
+| `matrix.json` | the matrix: one entry per model under test (`id`, `agent` block, `tags`, `enabled`, `notes`), nineteen hosted models over five providers, three local rows, the demo's persona shared through `agent_defaults`; the `fake` fixture is its opt-in key-less row — see "Model catalog" |
 | `scenarios/*.json` | **the workload**: `conversation` (a generic session — greeting, question, a story interrupted by "Stop!", two quick utterances, goodbye) and `commands` (the demo's own actions); each a list of `input` / `wait` / `expect` / `check` steps, one per line ([specs/wica-tester.md](../specs/wica-tester.md), "Scenarios") |
 | `runs/<stamp>/` | **batches** — per-run reports and summaries, git-ignored working data |
 | `results/<stamp>_<name>/` | **results** — kept batches: `summary.md`, `summary.json`, `runs.json`, hand-written `description.md` and `findings.md` |
@@ -62,6 +62,12 @@ scope; `gpt-4.1-nano` and `o4-mini` are retired, `gpt-5.3` / `gpt-5.5-mini` / `g
 Re-verify the same way when adding a row; a retired id shows up as `no_failed_reactions ×n` with a
 `model_error`, never silently. Add `enabled: false` for a row you do not want in every batch (an older
 snapshot, an expensive model), `requires_env` for a gate beyond the key variable.
+
+**Local rows.** `openai-chat-completions-compatible/qwen2.5-7b-instruct@llama-server`, `@mlx` and `@ollama`
+run the same model behind three self-hosted servers, tagged `local`. They need no key, so they are
+`enabled: false`: start the server their `notes` give, then select one with
+`--only 'openai-chat-completions-compatible/*@llama-server' --include-disabled`. Setting up each server:
+[docs/guides/local-models.md](../docs/guides/local-models.md).
 
 ## Keeping a result
 
