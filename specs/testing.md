@@ -21,7 +21,7 @@ tests:
 
 # Testing
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 
