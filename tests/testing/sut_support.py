@@ -7,8 +7,9 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
+from wica import OutputStream
 from wica.content import Content, TextPart
 
 
@@ -44,3 +45,28 @@ async def add(a: int, b: int) -> int:
     """Add two integers and return their sum."""
     await asyncio.sleep(0.05)  # long enough for a listener to see "running"
     return a + b
+
+
+class Voice:
+    """A recording `say` output Command (a streaming one, with an `emotion` attribute) whose
+    delivery takes `delay` seconds — `first` seconds for the first utterance, when given:
+    `sut.set_output_command(voice.say)`. `said` holds what was delivered to its end."""
+
+    def __init__(self, delay: float = 0.0, *, first: float | None = None) -> None:
+        self.delay = delay
+        self.first = first
+        self.said: list[str] = []
+        voice = self
+
+        async def say(
+            text: OutputStream, emotion: Literal["happy", "sad", "neutral"] = "neutral"
+        ) -> str:
+            """Speak out loud."""
+            pause = voice.delay if voice.first is None else voice.first
+            voice.first = None
+            words = await text.read()
+            await asyncio.sleep(pause)
+            voice.said.append(words)
+            return "Said it."
+
+        self.say = say

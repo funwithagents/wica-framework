@@ -4,7 +4,7 @@ Two tools, both network-free and key-less, both in the package: the **`fake` pro
 
 ## The `fake` provider
 
-Select `provider: "fake"` and the model replays `model_kwargs.script` step by step: each reasoning step consumes the next entry and returns it as the model's response. A step is `{"text": …}`, `{"tool_calls": [{"name": …, "args": {…}}]}` or both; each tool call is dispatched exactly like a real provider's. Once the script is spent, every step returns `model_kwargs.default` (`{"text": ""}` unless set), or `"loop": true` cycles the script. `delay_s` (200 ms by default) is the simulated model latency; set it to `0` in a test.
+Select `provider: "fake"` and the model replays `model_kwargs.script` step by step: each reasoning step consumes the next entry and returns it as the model's response. A step is `{"text": …}`, `{"tool_calls": [{"name": …, "args": {…}}]}` or both; each tool call is dispatched exactly like a real provider's. The text is what a model would write, so a scripted model **speaks** with the output Command's tag, `{"text": "<say>Hello</say>"}`, and **does nothing** with `{"text": "<noop/>"}`; neither is a tool call ([commands.md](commands.md#make-your-agent-speak)). Once the script is spent, every step returns `model_kwargs.default` (`{"text": ""}` unless set), or `"loop": true` cycles the script. `delay_s` (200 ms by default) is the simulated model latency; set it to `0` in a test.
 
 ```python
 import threading
@@ -21,7 +21,7 @@ config = WicaConfig.from_dict(
                 "delay_s": 0,
                 "script": [
                     {"tool_calls": [{"name": "walk_to", "args": {"place": "kitchen"}}]},
-                    {"text": "I am in the kitchen."},
+                    {"text": "<say>I am in the kitchen.</say>"},
                 ],
             },
         }
@@ -33,7 +33,8 @@ heard: list[str] = []
 visited: list[str] = []
 
 
-async def sink(text: str) -> None:
+async def say(text: str) -> None:
+    """Speak out loud."""
     heard.append(text)
     said.set()
 
@@ -45,7 +46,7 @@ async def walk_to(place: str) -> str:
 
 
 wica = Wica.init(config, coalesce_window=0)
-wica.set_output_sink(sink)
+wica.set_output_command(say)
 wica.register_command(walk_to)
 wica.world.register(
     "speech_input",
@@ -62,14 +63,14 @@ assert visited == ["kitchen"]
 assert heard == ["I am in the kitchen."]
 ```
 
-- Each scripted tool call's name is validated against your registered Commands at the first model call: a typo raises instead of silently emitting an unknown call.
+- Each scripted tool call's name is validated against your registered Commands at the first model call: a typo raises instead of silently emitting an unknown call. The output Command is not among them: scripting it as a tool call raises, write its tag in a `text` step.
 - Every response reports **token usage** like a real provider: an estimate of the prompt's text length by default (so a `history_budget` can be watched tripping naturally), or a per-step `"usage": {"input_tokens": N, "output_tokens": M}` to trip it at a chosen step.
 - The script is JSON, so a committed `*.config.json` with `provider: "fake"` is a complete test fixture, the same loader as production.
 - For a model double that cannot live in JSON (a reactive, programmatic one), build the Agent directly with the raw-model override: `from wica.fake_model import FakeChatModel`, then `Agent(AgentConfig(provider="fake", model="…", system_prompt="…"), world=World(loop), loop=loop, model=FakeChatModel(...))`.
 
 ## The harness: `TestRun`
 
-`wica.testing.TestRun` connects to a running `Wica` through a **Probe** (a mirror of its Inputs and Commands over the eight Events) and records a **timeline**: every World write, trigger, prompt, Command issuance and state change, text and reaction record, stamped with the framework's own instrumentation. On it you call the shared expectation set from your test's thread, as blocking calls with a timeout:
+`wica.testing.TestRun` connects to a running `Wica` through a **Probe** (a mirror of its Inputs and Commands over the eight Events) and records a **timeline**: every World write, trigger, prompt, Command issuance and state change (an output is one), private text and reaction record, stamped with the framework's own instrumentation. On it you call the shared expectation set from your test's thread, as blocking calls with a timeout:
 
 ```python
 from wica.testing import TestRun
@@ -79,8 +80,8 @@ wica.start()
 run = TestRun(wica, scenario="greeting", sut_label="fake")
 try:
     run.set("speech_input", "hello")
-    run.expect_action("say", within=5)  # the Command was issued
-    run.expect_action("say", state="complete", within=10)  # ...and finished
+    run.expect_output(contains="hi", within=5)  # the agent said something with "hi" in it
+    run.expect_action("say", state="complete", within=10)  # ...and finished saying it
     run.expect_no_action("dance", for_=0.5)  # nothing else happened
     run.finish("pass", "greeted once")
     report = run.report()
@@ -92,8 +93,8 @@ assert report.ok, [f for f in report.findings if not f.ok]
 print(report.metrics["reaction_latency"].median)
 ```
 
-- **The expectation family**: `set(key, value)` (through the Probe, moving the watermark), `wait(seconds)`, `expect_action(name, where=…, state=…, result_contains=…, within=…)`, `expect_output(contains=…, within=…)` (the output Command, whatever its name), `expect_text(contains=…, within=…)` (the free text), `expect_no_action(name, for_=…)`, `expect_world(key, equals=…, within=…)`, `expect_latency(metric, p95_below=…)`, plus `note`, `report_issue` and `finish(verdict, summary)`. Each returns a pass/fail **finding**. Expectations scan forward from a watermark, so a sequence never re-matches an earlier event and repeating one means "the next one".
-- **The report** (`run.report()`) is a dataclass with the timeline, the metrics (`reaction_latency`, `model_latency`, `time_to_first_content`, `generation_time`, `coalescing_wait`, `busy_time`, `command_duration`, `reactions_per_input`, `input_tokens`, `output_tokens`, each a min/median/p95 summary), the dropped-input count, the findings, the issues and the verdict; `report.ok` is what a test asserts; `report.write(path)` saves it as JSON, or as Markdown for a `.md` path; `report.to_markdown()` renders it. Latency is a measure, never a built-in threshold: `expect_latency` is the one way to make it fail a run.
+- **The expectation family**: `set(key, value)` (through the Probe, moving the watermark), `wait(seconds)`, `expect_action(name, where=…, state=…, result_contains=…, within=…)`, `expect_output(contains=…, arg=…, within=…)` (the next output, whatever the output Command's name; `contains` is matched against its `text`, or against the attribute `arg` names; it matches once the output's body is complete), `expect_private_text(contains=…, within=…)` (what the model wrote outside its output tags), `expect_no_action(name, for_=…)`, `expect_world(key, equals=…, within=…)`, `expect_latency(metric, p95_below=…)`, plus `note`, `report_issue` and `finish(verdict, summary)`. Each returns a pass/fail **finding**. Expectations scan forward from a watermark, so a sequence never re-matches an earlier event and repeating one means "the next one".
+- **The report** (`run.report()`) is a dataclass with the timeline, the metrics (`reaction_latency`, `model_latency`, `time_to_first_content`, `time_to_first_output`, `generation_time`, `coalescing_wait`, `busy_time`, `command_duration`, `reactions_per_input`, `input_tokens`, `output_tokens`, each a min/median/p95 summary), the dropped-input count, the findings, the issues and the verdict; `report.ok` is what a test asserts; `report.write(path)` saves it as JSON, or as Markdown for a `.md` path; `report.to_markdown()` renders it. Latency is a measure, never a built-in threshold: `expect_latency` is the one way to make it fail a run.
 - The same harness drives a **live** model: the repo's own live e2e set plays scenario files on a `TestRun` per step against a test robot, once per provider, and fails a step on a single bad run ([specs/testing.md](../../specs/testing.md), "The live set as a regression gate"); a regression gate with a report per step, not a benchmark.
 
 ## A scripted tester
@@ -113,7 +114,7 @@ run = TestRun(wica, scenario="greeting", sut_label="fake")
 report = run_script(run, script, timeout=15)
 ```
 
-The tester's Commands are `set_<key>` for each Input the Probe found on your agent, and the expectation family above with the same arguments. This JSON shape is what a **scenario file** holds; the benchmark runs a directory of them against a matrix of models ([benchmarking.md](benchmarking.md)). A script that never calls `finish` within the timeout yields a failed finding.
+The tester's Commands are `set_<key>` for each Input the Probe found on your agent, and the expectation family above with the same arguments. In a scenario file the same expectations are written `{"expect": {"output": {…}}}`, `{"expect": {"private_text": {…}}}` and so on. This JSON shape is what a **scenario file** holds; the benchmark runs a directory of them against a matrix of models ([benchmarking.md](benchmarking.md)). A script that never calls `finish` within the timeout yields a failed finding.
 
 ## Where the repo's own tests sit
 

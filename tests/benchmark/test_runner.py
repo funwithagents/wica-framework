@@ -1,6 +1,6 @@
 """`run_once` / `run_matrix` over a fake target (specs/benchmark.md, "The target", "The runner"):
-the chain writes one report per run, a rule-breaking model breaks the checks, a chained reply is
-a measure, a failed run counts and is not scored, a `Skip` or an unmet requirement is a summary
+the chain writes one report per run, a rule-breaking model breaks the checks, a second reply
+(a second tag, or one spoken on the step a `<next>` note asks for) is a measure, a failed run counts and is not scored, a `Skip` or an unmet requirement is a summary
 skip."""
 
 from __future__ import annotations
@@ -8,9 +8,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
-from bench_support import NOOP, SAY_HI, FakeTarget
+from bench_support import NOOP, FakeTarget
 
 from wica.benchmark import RunResult, Skipped, run_matrix, run_once
 from wica.testing import CheckSpec, ExpectStep, InputStep, Scenario, WaitStep
@@ -27,10 +26,6 @@ GREETING = Scenario(
 )
 
 
-def _step(command: str, /, **args: Any) -> dict[str, Any]:
-    return {"tool_calls": [{"name": command, "args": args}]}
-
-
 def test_run_once_writes_both_files_and_returns_the_judged_report(
     tmp_path: Path, fake_target: Callable[..., FakeTarget]
 ):
@@ -39,7 +34,9 @@ def test_run_once_writes_both_files_and_returns_the_judged_report(
     assert isinstance(result, RunResult) and result.completed
     assert result.report.ok, [f for f in result.report.findings if not f.ok]
     assert tuple(f.expectation for f in result.report.checks()) == GREETING.check_names
-    assert result.measures["output_calls"] == 1 and result.measures["noop_steps"] == 1
+    # One output, and nothing after it: the end of an output wakes no step without a note.
+    assert result.measures["output_calls"] == 1 and result.measures["noop_steps"] == 0
+    assert result.measures["output_words"] == 2
     assert result.measures["turns"] == 1 and result.measures["turns_answered"] == 1
     assert result.samples["reaction_latency"]  # pooled by the summary
     json_path = tmp_path / "fake" / "greeting" / "1.json"
@@ -61,6 +58,12 @@ def test_a_model_that_noops_the_greeting_breaks_the_checks(
     broken = {f.expectation for f in result.report.checks() if not f.ok}
     assert broken == {"answers_each_input", "no_noop_on_input"}
     assert not result.report.ok
+    # The declined reaction is read from its record: one noop step, on the input.
+    assert result.measures["noop_steps"] == 1
+    assert result.measures["noops_on_input"] == 1
+    assert result.measures["output_calls"] == 0
+    assert result.measures["turns_answered"] == 0
+    assert result.samples["answer_latency"] == []
 
 
 def test_a_failed_run_is_counted_and_not_scored(
@@ -91,16 +94,38 @@ def test_a_failed_run_is_counted_and_not_scored(
 def test_a_second_utterance_is_an_extra_reply_not_a_failure(
     tmp_path: Path, fake_target: Callable[..., FakeTarget]
 ):
-    twice = SAY_HI + [_step("say", text="and one more thing")]
+    """The model asks to continue with a `<next>` note and speaks again on the step the end of
+    its output wakes: designed behavior, counted and not penalized."""
+    twice = [
+        {"text": "<say>hi there</say><next>add one more thing</next>"},
+        {"text": "<say>and one more thing</say>"},
+    ]
     result = run_once(fake_target(twice), GREETING, repetition=1, out_dir=tmp_path)
     assert isinstance(result, RunResult)
-    assert result.report.ok
+    assert result.report.ok, [f for f in result.report.findings if not f.ok]
     assert result.measures["output_calls"] == 2
     assert result.measures["extra_output"] == 1
     assert (
         len(result.samples["answer_latency"]) == 1
     )  # one turn, timed to its first word
     assert result.measures["output_words"] == 6
+    assert result.measures["noop_steps"] == 0
+
+
+def test_two_tags_in_one_response_are_two_outputs(
+    tmp_path: Path, fake_target: Callable[..., FakeTarget]
+):
+    """Each tag is its own output: the second one in the turn is the extra reply, and the words
+    of both count."""
+    two_tags = [{"text": "<say>hi there</say> a note <say>how are you today</say>"}]
+    result = run_once(fake_target(two_tags), GREETING, repetition=1, out_dir=tmp_path)
+    assert isinstance(result, RunResult)
+    assert result.report.ok, [f for f in result.report.findings if not f.ok]
+    assert result.measures["output_calls"] == 2
+    assert result.measures["extra_output"] == 1
+    assert result.measures["turns_answered"] == 1
+    assert result.measures["output_words"] == 6
+    assert len(result.samples["answer_latency"]) == 1
 
 
 def test_a_skip_from_the_target_is_a_skip_not_an_error(

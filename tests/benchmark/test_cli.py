@@ -6,16 +6,11 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 from bench_support import NOOP, SAY_HI, FakeTarget
 
 from wica.benchmark import Entry, cli
-
-
-def _step(command: str, /, **args: Any) -> dict[str, Any]:
-    return {"tool_calls": [{"name": command, "args": args}]}
 
 
 GREETING = {

@@ -8,6 +8,11 @@ generic: they hold for any WICA agent because the runtime primer states them (sp
 "System prompt") or because any assistant persona promises them. The registry is open: an
 application adds its own through `build_registry(extra_checks)`.
 
+An **output** is a `command_issued` record named after the SUT's output Command (one per tag of
+the model's text, reported once its body is complete); a reaction that **declined** is one whose
+record has the `noop` flag set (`<noop/>` issues no Command). That is how the checks tell speech
+from action and from silence.
+
 The per-run `measures` live here too: numbers taken from a whole run, never thresholded.
 """
 
@@ -20,7 +25,6 @@ from typing import Any, Literal
 from wica.instrumentation import ReactionTrace, TriggerTrace
 from wica.testing.report import Finding, SutEvent
 
-NOOP = "noop"
 CANCEL = "cancel_command"
 _COMMAND_KEY_PREFIX = "agent:command:"
 
@@ -85,8 +89,8 @@ def external_triggers(reaction: ReactionTrace) -> list[TriggerTrace]:
 
 
 def commands_by_reaction(timeline: list[SutEvent]) -> dict[int, list[SutEvent]]:
-    """`reaction_id → its command_issued events` (joined through `command_call_ids`; `noop` has no
-    call id there, see `ReactionTrace.noop`)."""
+    """`reaction_id → its command_issued events`, outputs included (joined through
+    `command_call_ids`)."""
     issued = {
         e.call_id: e
         for e in timeline
@@ -139,6 +143,7 @@ def turns(timeline: list[SutEvent], keys: Iterable[str]) -> list[Turn]:
 
 
 def output_issued(timeline: list[SutEvent], output_name: str | None) -> list[SutEvent]:
+    """The outputs reported in *timeline*, in order."""
     if output_name is None:
         return []
     return [e for e in timeline if e.kind == "command_issued" and e.name == output_name]
@@ -175,9 +180,9 @@ def _at(event: SutEvent, context: CheckContext) -> str:
 
 
 def answers_each_input(window: list[SutEvent], context: CheckContext) -> Finding:
-    """Primer: "anything addressed to you should be answered" / "must be said by calling
-    `<output>`" — every turn opened in the window by one of the scenario's triggering Inputs issues
-    the output Command before the next such write."""
+    """Primer: "anything addressed to you should be answered" — every turn opened in the window by
+    one of the scenario's triggering Inputs is answered by an output before the next such write,
+    whichever step issued it. Private text is not an answer."""
     name = "answers_each_input"
     output = context.output_command_name
     all_turns = turns(window, context.turn_inputs)
@@ -189,8 +194,8 @@ def answers_each_input(window: list[SutEvent], context: CheckContext) -> Finding
                 name,
                 window,
                 False,
-                f"the turn opened at {_at(opening, context)} by {turn.key!r} never issued "
-                f"{output!r}",
+                f"the turn opened at {_at(opening, context)} by {turn.key!r} was never "
+                f"answered by an output ({output!r})",
                 opening,
             )
     return _finding(
@@ -202,13 +207,14 @@ def answers_each_input(window: list[SutEvent], context: CheckContext) -> Finding
 
 
 def no_noop_on_input(window: list[SutEvent], context: CheckContext) -> Finding:
-    """Primer: "never use `noop` to skip an expected response" — no reaction triggered by a write to
-    one of the scenario's Inputs ends in `noop` alone."""
+    """Primer: "never use `<noop/>` to skip an expected response" — no reaction triggered by a write
+    to one of the scenario's Inputs declines: its record's `noop` flag is set (the response was
+    `<noop/>`, or empty)."""
     name = "no_noop_on_input"
     wanted = set(context.scenario_inputs)
     for event in window:
         reaction = event.reaction
-        if reaction is None or not reaction.noop or reaction.command_call_ids:
+        if reaction is None or not reaction.noop:
             continue
         keys = [t.key for t in external_triggers(reaction) if t.key in wanted]
         if keys:
@@ -216,11 +222,11 @@ def no_noop_on_input(window: list[SutEvent], context: CheckContext) -> Finding:
                 name,
                 window,
                 False,
-                f"reaction {reaction.reaction_id} (ended {_at(event, context)}) answered the "
-                f"write to {keys[0]!r} with noop only",
+                f"reaction {reaction.reaction_id} (ended {_at(event, context)}) declined the "
+                f"write to {keys[0]!r} (noop)",
                 event,
             )
-    return _finding(name, window, True, "no input answered with noop")
+    return _finding(name, window, True, "no input declined (noop)")
 
 
 def no_failed_reactions(window: list[SutEvent], context: CheckContext) -> Finding:
@@ -243,21 +249,24 @@ def no_colliding_cancel(window: list[SutEvent], context: CheckContext) -> Findin
     """Primer: "when one action must finish before another starts, do not issue both together" —
     no reaction cancels a Command and issues a new call of that same Command (cancel a running
     `dance` + `dance`): a response's Commands start at once, so the two race. Any other action
-    beside the cancel is not a collision (a `set_emotion`), and neither is a new call of the
-    output Command: cutting off a speech and saying "okay, stopping" is what a person does. The
-    target is resolved from the window by the call id the cancel names; a target the window does
-    not name is not judged."""
+    beside the cancel is not a collision (a `set_emotion`), and neither is an output: cutting off a
+    speech and saying "okay, stopping" is what a person does, and a response that speaks replaces
+    the running output anyway. The check reads tool calls only, so a cancel whose target is an
+    output never collides. The target is resolved from the window by the call id the cancel
+    names; a target the window does not name is not judged."""
     name = "no_colliding_cancel"
     names_by_call = {
         e.call_id: e.name
         for e in window
         if e.kind in ("command_issued", "command_state") and e.call_id and e.name
     }
-    for reaction_id, issued in commands_by_reaction(window).items():
+    output = context.output_command_name
+    for reaction_id, calls in commands_by_reaction(window).items():
+        issued = [e for e in calls if e.name != output]  # tool calls only
         for cancel in (e for e in issued if e.name == CANCEL):
             target_id = str((cancel.args or {}).get("call_id", ""))
             target = names_by_call.get(target_id.removeprefix(_COMMAND_KEY_PREFIX))
-            if target is None or target in (CANCEL, context.output_command_name):
+            if target is None or target in (CANCEL, output):
                 continue
             if any(e.name == target and e is not cancel for e in issued):
                 return _finding(
@@ -274,12 +283,38 @@ def no_colliding_cancel(window: list[SutEvent], context: CheckContext) -> Findin
 
 
 def cancels_when_asked(window: list[SutEvent], context: CheckContext) -> Finding:
-    """The input it follows asks the SUT to stop: `cancel_command` is issued in its window."""
+    """The input it follows asks the SUT to stop: something is stopped in its window —
+    `cancel_command` is issued, or an output that was running when the window opened reaches
+    `cancelled` in it (speaking again cuts off the running output with no `cancel_command`, and
+    that is a correct way to stop talking). For any other Command only `cancel_command` counts."""
     name = "cancels_when_asked"
+    output = context.output_command_name
     for e in window:
         if e.kind == "command_issued" and e.name == CANCEL:
             return _finding(name, window, True, f"{CANCEL} at {_at(e, context)}", e)
-    return _finding(name, window, False, f"{CANCEL} was never issued")
+    # An output reported inside the window started in it: it was not running when it opened.
+    said_in_window = {e.call_id for e in output_issued(window, output)}
+    for e in window:
+        if (
+            e.kind == "command_state"
+            and e.state == "cancelled"
+            and output is not None
+            and e.name == output
+            and e.call_id not in said_in_window
+        ):
+            return _finding(
+                name,
+                window,
+                True,
+                f"the running {output} ({e.call_id}) cut off at {_at(e, context)}",
+                e,
+            )
+    return _finding(
+        name,
+        window,
+        False,
+        f"{CANCEL} was never issued and no running output was cut off",
+    )
 
 
 def command_arg(arg: Any) -> tuple[str, dict[str, Any]]:
@@ -315,16 +350,17 @@ def acts_when_asked(window: list[SutEvent], context: CheckContext) -> Finding:
 def quiet_on_background_change(
     window: list[SutEvent], context: CheckContext
 ) -> Finding:
-    """Primer: "use `noop` when nothing new needs a response" — the input it follows is a change
-    the SUT was not asked about: the output Command is not issued in its window."""
+    """Primer: "use `<noop/>` when nothing new needs a response" — the input it follows is a change
+    the SUT was not asked about: no output is reported in its window. Private text and Commands
+    issued as tool calls do not break it."""
     name = "quiet_on_background_change"
     output = context.output_command_name
     for e in window:
         if e.kind == "command_issued" and e.name == output:
             return _finding(
-                name, window, False, f"{output} issued at {_at(e, context)}", e
+                name, window, False, f"{output} output at {_at(e, context)}", e
             )
-    return _finding(name, window, True, f"no {output} after the change")
+    return _finding(name, window, True, f"no {output} output after the change")
 
 
 CHECKS: dict[str, Check] = {
@@ -374,38 +410,28 @@ def run_check(
 
 
 def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float]:
-    """The per-run numbers next to the framework's metrics: `output_calls`, `extra_output` (output
-    issued beyond a turn's first one — a second utterance in the same turn, however many steps the
-    first took), `noop_steps`, `failed_reactions`, `output_words` (words in the output Command's
-    string args), and the turn numbers a session is read by — `turns` (opened by the scenario's
-    triggering Inputs, see `turns`), `turns_answered` (the output Command issued within the turn),
-    `noops_on_input` (reactions that answered a write to a scenario Input with `noop` alone)."""
+    """The per-run numbers next to the framework's metrics: `output_calls` (outputs reported),
+    `extra_output` (outputs beyond a turn's first one — a second utterance in the same turn,
+    however many steps the first took), `noop_steps` (reactions that declined: the record's `noop`
+    flag), `failed_reactions`, `output_words` (words in the outputs' `text`), and the turn numbers
+    a session is read by — `turns` (opened by the scenario's triggering Inputs, see `turns`),
+    `turns_answered` (an output reported within the turn), `noops_on_input` (reactions that
+    declined a write to a scenario Input)."""
     outputs = output_issued(timeline, context.output_command_name)
-    output = context.output_command_name
     all_turns = turns(timeline, context.turn_inputs)
     answered = sum(
         1
         for turn in all_turns
-        if any(
-            e.kind == "command_issued" and e.name == output
-            for e in timeline[turn.start : turn.end]
-        )
+        if output_issued(timeline[turn.start : turn.end], context.output_command_name)
     )
     wanted = set(context.scenario_inputs)
+    all_reactions = reactions(timeline)
     noops_on_input = sum(
         1
-        for r in reactions(timeline)
-        if r.noop
-        and not r.command_call_ids
-        and any(t.key in wanted for t in external_triggers(r))
+        for r in all_reactions
+        if r.noop and any(t.key in wanted for t in external_triggers(r))
     )
-    words = sum(
-        len(value.split())
-        for e in outputs
-        for value in (e.args or {}).values()
-        if isinstance(value, str)
-    )
-    all_reactions = reactions(timeline)
+    words = sum(len(str((e.args or {}).get("text", "")).split()) for e in outputs)
     return {
         "output_calls": float(len(outputs)),
         "extra_output": float(len(outputs) - answered),
@@ -419,22 +445,27 @@ def measures(timeline: list[SutEvent], context: CheckContext) -> dict[str, float
 
 
 def answer_latencies(timeline: list[SutEvent], context: CheckContext) -> list[float]:
-    """One sample per answered turn: from the write that opened it to its first output Command —
-    the time to the first word, whether the model spoke on its first step or after a side Command
-    (an emotion change) whose completion woke the step that spoke. Unanswered turns give none."""
-    output = context.output_command_name
+    """One sample per answered turn: from the write that opened it to the first words of its first
+    output — the `first_output_at` of the reaction that issued it, whether the model spoke on its
+    first step or after a side Command (an emotion change) whose completion woke the step that
+    spoke. When that reaction's record is not in the timeline, or the output was not its first,
+    the time the output was reported stands in. Unanswered turns give none."""
+    first_of = {
+        r.command_call_ids[0]: r.first_output_at
+        for r in reactions(timeline)
+        if r.command_call_ids and r.first_output_at is not None
+    }
     samples: list[float] = []
     for turn in turns(timeline, context.turn_inputs):
-        first = next(
-            (
-                e
-                for e in timeline[turn.start : turn.end]
-                if e.kind == "command_issued" and e.name == output
-            ),
-            None,
+        answers = output_issued(
+            timeline[turn.start : turn.end], context.output_command_name
         )
-        if first is not None:
-            samples.append(first.t - turn.t)
+        if not answers:
+            continue
+        first = answers[0]
+        opened = first_of.get(first.call_id or "")
+        reached = opened.timestamp() if opened is not None else first.t
+        samples.append(reached - turn.t)
     return samples
 
 

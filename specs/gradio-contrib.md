@@ -16,7 +16,7 @@ tests:
 
 # Gradio contrib components
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -28,8 +28,8 @@ the wiring:
 2. a **reaction history** — one entry per reasoning step, browsable step by step, showing both how
    that World became the step's LLM prompt and how the step performed (latency, tokens, outcome);
 3. a **conversation transcript** — the reasoning loop as a chat: the entry that triggered each
-   step on one side, and on the other every Command the model issued with its live execution
-   state, its free text, and its explicit "no reaction".
+   step on one side, and on the other every Command and output the model issued with its live
+   execution state, its private text, and its explicit "no reaction".
 
 All three are about *the framework itself* — the World, the Agent's prompts, the Agent's
 instrumentation `Event`s (see [wica.md](wica.md)) — rather than any particular persona, so they
@@ -83,8 +83,9 @@ Each surface has the same two-layer shape, taken from the demo's validated desig
   about layout. It is **built over a `Wica` and subscribes to the `Wica`'s `Event`s in its
   constructor** (`TranscriptLog(wica)`, `ReactionLog(wica)`), so the subscription is a consequence
   of construction and the application never wires callbacks by hand. This is the order the
-  framework's output-wiring setters exist for: build the `Wica`, build the presenters over it,
-  hand their callables back (`wica.set_output_sink(transcript.output_sink)`), then `start()`.
+  framework's output wiring exists for: build the `Wica`, build the presenters over it, wire
+  what needs them (an output Command that drives a UI element), then `start()`. A presenter hands
+  nothing back to the `Wica`: it only listens.
   `wica=None` is allowed and means *explore-only*: nothing subscribes and the presenter renders an
   empty surface — the demo's no-key mode. The World-state view needs no presenter: it reads the
   `World` directly.
@@ -125,7 +126,9 @@ Returning `None` falls back to the **generic default**: `⚡ key = value` for an
 for a Command execution (an entry whose value is a `CommandExecution`) `🦾 name` as label with
 `name(args)` as detail, or `🗣️ name` when the Command is the `Wica`'s configured output Command
 (read **live** from `wica.agent.output_command_name`, so it is right whether the presenter or
-`set_output_command` came first). Because a Command's execution *is* a World entry, the same hook
+`set_output_command` came first). An output is such an execution, one per tag the model wrote,
+its `text` among the args ([agent.md](agent.md), "Output: tags in the model's text"). Because a
+Command's execution *is* a World entry, the same hook
 customizes both sides of the transcript — the demo's hook turns `speech_input` into `🗣️ "hello"`
 and a running `say` into `🗣️ say` with the spoken text as body. The hook lives in the application
 next to its entries' `serialize_fn`s: the same per-entry knowledge, rendered for a person instead
@@ -218,11 +221,11 @@ def reaction_panel(
   isn't blank. `BaseMessage` is the type `wica.on_agent_prompt` already carries, the framework's
   LangChain I/O boundary; rendering it here introduces no new dependency.
 - **Renders `ReactionTrace` to readable text** — the reaction's outcome and id; the derived
-  measures as seconds (`coalescing_wait`, `render_time`, `model_latency`, `sink_duration`,
+  measures as seconds (`coalescing_wait`, `render_time`, `model_latency`, `time_to_first_output`,
   `busy_time`), each shown only when its underlying stamp exists (a cancelled reaction has no
-  `model_latency`); `reaction_latency(trace)` ([instrumentation.md](instrumentation.md), "Metrics")
+  `model_latency`, a reaction that opened no output no `time_to_first_output`); `reaction_latency(trace)` ([instrumentation.md](instrumentation.md), "Metrics")
   when it applies (not for a reaction whose only trigger was a Command completion); token usage
-  when reported; the dispatched `command_call_ids` and whether the reaction ended in `noop`; the
+  when reported; the `command_call_ids` (outputs and dispatched Commands) and whether the model declined (`noop`); the
   `error` on a `model_error` or `model_timeout` outcome; and the OpenTelemetry `trace_id` when an SDK is installed —
   the exact identifier a person pastes into their tracing backend to see the same reaction as a
   span tree. `ReactionTrace` is the type `wica.on_agent_reaction_ended` already carries; rendering
@@ -237,8 +240,8 @@ it used to carry (now `ReactionLog`):
 ```python
 class TranscriptLog:
     def __init__(self, wica: Wica | None, display_entry: DisplayEntry | None = None) -> None: ...
-    # subscribes on_agent_trigger, on_agent_prompt, on_agent_command, on_agent_reaction_ended
-    async def output_sink(self, text: str) -> None: ...      # the application passes this to wica.set_output_sink
+    # subscribes on_agent_trigger, on_agent_prompt, on_agent_command, on_agent_private_text,
+    # on_agent_reaction_ended
     def snapshot(self) -> TranscriptSnapshot: ...            # conversation (Gradio "messages" format) + change signature
 
 def conversation_panel(log: TranscriptLog, *, refresh_s: float = 0.2, height: int = 420) -> gr.Chatbot: ...
@@ -254,21 +257,28 @@ What it renders, from the framework's uniform signals only:
   (`💬 reaction N · <trigger>`, opened *pending* — a spinner — on `on_agent_prompt` and, on
   `on_agent_reaction_ended`, losing the spinner and gaining a `duration` — the reaction's
   `busy_time`, the same `metadata.duration` its Command items already use — matched by
-  `reaction_id`, which counts reactions exactly as `on_agent_prompt` does), and its outputs nest
-  under it in order:
-  - **every Command the model issued** (`on_agent_command`), titled through the hook (`🗣️` for the
-    output Command, `🦾` otherwise), **with its execution state live**: the item is created the
-    moment the Command is issued, marked *pending* (a spinner), and the log listens to the
+  `reaction_id`, which counts reactions exactly as `on_agent_prompt` does), and its items nest
+  under it in the order their Events arrive — the step's outputs first (each is reported during
+  the model call, when its text is complete), then its private text, then the Commands it issued
+  as tool calls — which is not always the order the model wrote them in:
+  - **every Command and output the model issued** (`on_agent_command`), titled through the hook
+    (`🗣️` for an output, `🦾` otherwise), **with its execution state live**: the item is created
+    when the Event fires, marked *pending* (a spinner), and the log listens to the
     Command's `agent:command:<call_id>` World entry — the seam `CommandIssued.call_id` exists for
     ([agent.md](agent.md), "Instrumentation") — to edit the item in place as it goes running →
     **✅ complete** (with its result) / **❌ failed** (with the error) / **⏹ cancelled**, plus how
     long it ran. A finished item **stays open**: its `status` is removed rather than set to
     `done`, because Gradio auto-collapses a `done` item and the reader could no longer see what
     was said. The listener is async so terminal states are delivered in version order after
-    `running`.
-  - **💭 output sink** — the model's free text for the step (blank text is skipped);
-  - **🚫 noop** — the auto-registered "no reaction" Command, rendered directly since it has no
-    World entry.
+    `running`. An output is reported once its text is complete and is by then already `running`,
+    so on attaching the listener the log also reads the entry's current state and takes the
+    item's start from that version's timestamp; one item per output tag, with its whole text.
+  - **💭 private text** — what the model wrote outside its output tags in the step
+    (`on_agent_private_text`, which fires only for non-empty text). With no output Command set
+    this is all of the model's text.
+  - **🚫 noop** — a declined reaction: added when `on_agent_reaction_ended` carries a record whose
+    `noop` flag is set (the model answered `<noop/>`, or nothing). Rendered directly, since no
+    Command is issued and no World entry exists; a `<noop/>` fires no `on_agent_command`.
 - **Only pushed on a real change.** The panel does *not* list the chatbot as an output of its
   timer: every event that outputs to a component flips its loading status, and `gr.Chatbot`'s
   autoscroll re-runs on that flip, yanking a reader who scrolled up back to the bottom every tick.
@@ -291,10 +301,11 @@ also what the tests assert on.
   non-exported internal, so the implementation **re-exports `CommandExecution` from
   `wica/__init__.py`** alongside `CommandIssued`, and [commands.md](commands.md) gets an editorial
   note that the value model is public. Its shape is unchanged.
-- **`noop` name and the `agent:command:` key prefix.** The demo duplicated these as module
-  constants "matching `wica.agent`'s". Inside the package the contrib imports `wica.agent`'s own
-  constants instead of duplicating them; whether to promote them to public names is left to the
-  implementation (no consumer outside the package needs them today).
+- **The `agent:command:` key prefix.** The demo duplicated it as a module constant "matching
+  `wica.agent`'s". Inside the package the contrib imports `wica.agent`'s own constant instead of
+  duplicating it; whether to promote it to a public name is left to the implementation (no
+  consumer outside the package needs it today). The `noop` name is no longer needed: a declined
+  reaction is read from the reaction record, and its label is the contrib's own.
 - **`Wica.agent.output_command_name`** and **`Wica.world`** are the only other facade members the
   presenters touch, both already public ([wica.md](wica.md)).
 
@@ -318,8 +329,9 @@ the package layout — [testing.md](testing.md)). They import the contrib (hence
 
 - **`TranscriptLog`** driven the way the Agent drives it: `on_trigger`/`on_prompt`/`on_command`
   calls and an `on_command_update` sequence, asserting the transcript items, reaction nesting,
-  the pending → terminal edits (state suffix, result/error, duration, `status` removed), `noop`,
-  the output-sink item, and that the change signature moves on an in-place edit and is stable
+  the pending → terminal edits (state suffix, result/error, duration, `status` removed), an
+  output's item created from an entry already `running`, the `noop` item from a reaction record,
+  the private-text item, and that the change signature moves on an in-place edit and is stable
   otherwise. Where a log needs a `Wica` (live output Command name, per-Command World listeners),
   the tests build an **unstarted** one over the key-less `provider: "fake"` model, as today.
 - **`ReactionLog`** as a plain object: record a few `on_agent_prompt`-shaped message lists after
@@ -332,7 +344,8 @@ the package layout — [testing.md](testing.md)). They import the contrib (hence
   than raising.
 - **`render_reaction_trace`** over a hand-built `ReactionTrace`: every derived measure shown only
   when its stamp is present (a cancelled reaction with no `model_latency`; the time to first content
-  and the generation time when the first content was stamped), token usage, dispatched
+  and the generation time when the first content was stamped; the time to first output when an
+  output opened), token usage, dispatched
   command ids, `noop`, the attempts and each rejection's feedback (plus the guard time) when the
   response guards sent a response back ([agent.md](agent.md), "Response guards"), `error` on a
   `model_error`, `model_timeout` or `rejected` outcome, and the `trace_id` line.

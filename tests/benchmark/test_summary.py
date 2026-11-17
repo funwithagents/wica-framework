@@ -34,7 +34,6 @@ def _reaction(cache_read: int | None) -> ReactionTrace:
         outcome="ok",
         error=None,
         text_length=0,
-        sink_duration=None,
         command_call_ids=("c1",),
         noop=False,
         usage=TokenUsage(

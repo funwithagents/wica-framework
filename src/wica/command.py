@@ -38,6 +38,11 @@ class Command:
     ) -> None:
         # A WICA registration option, not tool metadata: accepted for a wrapped BaseTool too.
         self._triggers_on_completion = triggers_on_completion
+        # The callable as given, or None when wrapping an off-the-shelf tool. The output Command
+        # is called through it, not through the tool (see specs/commands.md, "The output Command").
+        self._callable: Callable[..., Any] | None = (
+            None if isinstance(fn, BaseTool) else fn
+        )
         if isinstance(fn, BaseTool):
             # An already-built tool carries its own name/description; overriding them here would be
             # silently ineffective, so reject it explicitly rather than mislead the caller.
@@ -60,6 +65,16 @@ class Command:
         return self._tool
 
     @property
+    def callable(self) -> Callable[..., Any] | None:
+        """The callable this Command was built from, or None when it wraps an existing tool."""
+        return self._callable
+
+    @property
+    def description(self) -> str:
+        """The Command's description (the backing tool's)."""
+        return self._tool.description
+
+    @property
     def name(self) -> str:
         """The Command's name (the backing tool's name)."""
         return self._tool.name
@@ -67,7 +82,7 @@ class Command:
     @property
     def triggers_on_completion(self) -> bool:
         """Whether this Command's terminal completion wakes a reasoning step (default True).
-        The per-Command form of the output Command's re-trigger knob; False removes only the
-        trigger — the execution entry still exists and is observed by the next step. See
+        False removes only the trigger — the execution entry still exists and is observed by the
+        next step. Not read for the output Command, whose wake is the model's `<next>` note. See
         specs/commands.md ("The `Command` object")."""
         return self._triggers_on_completion

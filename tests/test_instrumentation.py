@@ -60,7 +60,6 @@ def _reaction(
         outcome="ok",
         error=None,
         text_length=text_length,
-        sink_duration=None,
         command_call_ids=command_call_ids,
         noop=False,
         usage=None,
@@ -151,6 +150,17 @@ def test_reaction_latency_counts_from_the_earliest_external_write():
     )
     assert reaction_latency(reaction_no_action) is None
 
+    # Private text or a <noop/> alone reached nobody: no latency, whatever was written.
+    private_only = _reaction(
+        triggers=triggers,
+        window_opened=0.0,
+        window_closed=0.1,
+        ended=1.0,
+        command_call_ids=(),
+        text_length=40,
+    )
+    assert reaction_latency(private_only) is None
+
     only_completions = _reaction(
         triggers=(_trigger(arrived=0.0, completion=True),),
         window_opened=0.0,
@@ -193,3 +203,23 @@ def test_command_trace_duration():
         state="complete",
     )
     assert trace.duration == pytest.approx(0.5)
+
+
+def test_reaction_latency_ends_when_the_first_output_opens():
+    triggers = (_trigger(arrived=0.0, written=0.0),)
+    spoke = dataclasses.replace(
+        _reaction(
+            triggers=triggers,
+            window_opened=0.0,
+            window_closed=0.1,
+            ended=2.0,
+            command_call_ids=("c1",),
+        ),
+        model_started_at=T0 + timedelta(seconds=0.2),
+        first_output_at=T0 + timedelta(seconds=0.7),
+    )
+    assert reaction_latency(spoke) == pytest.approx(0.7)
+    assert spoke.time_to_first_output == pytest.approx(0.5)
+    acted = dataclasses.replace(spoke, first_output_at=None)
+    assert reaction_latency(acted) == pytest.approx(2.0)
+    assert acted.time_to_first_output is None

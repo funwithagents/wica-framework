@@ -7,6 +7,13 @@ turns the facade's eight instrumentation Events — plus a per-key listener on e
 `agent:command:<call_id>` entry as it appears — into one normalized stream of `SutEvent` records.
 It knows no application Command by name and does not know whether a script or a model drives.
 
+An **output** (one tag of the SUT's output Command) is a Command the Probe learns of late:
+`on_agent_command` reports it once its body is complete, when its entry has been `running` since
+its first words. So the Probe reads the entry as it attaches its listener and records the
+`command_state(running)` it missed, stamped with that version's own timestamp, before the
+`command_issued` record. A reaction that declines (`<noop/>`) issues no Command: its only report
+is the `noop` flag of the `reaction_ended` record.
+
 Threading: every handler here runs on the SUT's loop thread — the Event handlers because the
 facade emits there, the per-key Command listener because it is *async* (the World offloads a sync
 listener to its thread-pool executor, which would let a `command_state` record land after the
@@ -34,7 +41,7 @@ from wica.world import WorldEntry, WorldEntryConfig
 _logger = logging.getLogger(__name__)
 
 _COMMAND_KEY_PREFIX = "agent:command:"
-_NATIVE_COMMANDS = frozenset({"noop", "cancel_command"})
+_NATIVE_COMMANDS = frozenset({"cancel_command"})
 
 
 def _t() -> float:
@@ -68,8 +75,8 @@ class Probe:
 
     @property
     def commands(self) -> dict[str, Command]:
-        """The SUT's registered Commands minus WICA's native `noop` / `cancel_command`. The output
-        Command is among them once the SUT has started (see `output_command_name`). Live."""
+        """The SUT's registered Commands minus WICA's native `cancel_command`. The output Command
+        is not one of them (it is not a tool): see `output_command`. Live."""
         return {
             name: command
             for name, command in self._sut.agent.commands.items()
@@ -77,8 +84,15 @@ class Probe:
         }
 
     @property
-    def output_command_name(self) -> str | None:
+    def output_command(self) -> str | None:
+        """The name of the SUT's output Command, None when it has none. A `command_issued` record
+        with this name is an **output**."""
         return self._sut.agent.output_command_name
+
+    @property
+    def output_command_name(self) -> str | None:
+        """Same as `output_command` (the name the Agent itself uses)."""
+        return self.output_command
 
     # --- the stream ------------------------------------------------------------------------------
 
@@ -124,7 +138,7 @@ class Probe:
         sut.on_agent_trigger_dropped.subscribe(self._on_trigger_dropped)
         sut.on_agent_prompt.subscribe(self._on_prompt)
         sut.on_agent_command.subscribe(self._on_command)
-        sut.on_agent_text.subscribe(self._on_text)
+        sut.on_agent_private_text.subscribe(self._on_private_text)
         sut.on_agent_reaction_ended.subscribe(self._on_reaction_ended)
         sut.on_agent_command_ended.subscribe(self._on_command_ended)
         self._attached = True
@@ -139,7 +153,7 @@ class Probe:
         sut.on_agent_trigger_dropped.unsubscribe(self._on_trigger_dropped)
         sut.on_agent_prompt.unsubscribe(self._on_prompt)
         sut.on_agent_command.unsubscribe(self._on_command)
-        sut.on_agent_text.unsubscribe(self._on_text)
+        sut.on_agent_private_text.unsubscribe(self._on_private_text)
         sut.on_agent_reaction_ended.unsubscribe(self._on_reaction_ended)
         sut.on_agent_command_ended.unsubscribe(self._on_command_ended)
         with self._lock:
@@ -190,6 +204,55 @@ class Probe:
         )
 
     def _on_command(self, issued: CommandIssued) -> None:
+        key = f"{_COMMAND_KEY_PREFIX}{issued.call_id}"
+        call_id = issued.call_id
+
+        def state_event(execution: CommandExecution, t: float) -> SutEvent:
+            return SutEvent(
+                kind="command_state",
+                t=t,
+                key=key,
+                name=execution.name,
+                call_id=call_id,
+                args=dict(execution.args),
+                state=execution.state,
+                result=execution.result,
+                error=execution.error,
+            )
+
+        # A Command issued as a tool call is reported before its first value lands, so its entry
+        # is still empty here. An output is reported once its body is complete: its entry has been
+        # `running` since its first words, and that state is recorded now, before `command_issued`,
+        # stamped with the version's own timestamp. Its terminal state is written only after the
+        # step that issued it has ended, with one exception the core allows: an output that failed
+        # (or was cancelled from outside) before its response was complete is already terminal —
+        # then the running version it went through is the entry's previous one, and the terminal
+        # state is recorded right after `command_issued`, with no listener to attach.
+        missed: list[SutEvent] = []
+        try:
+            entry = self._sut.world.get_entry(key)
+        except KeyError:
+            entry = None
+        terminal = False
+        if entry is not None:
+            current = entry.current
+            if isinstance(current.value, CommandExecution):
+                terminal = current.value.is_terminal()
+                previous = entry.previous
+                if not terminal:
+                    missed.append(
+                        state_event(current.value, current.timestamp.timestamp())
+                    )
+                elif (
+                    previous is not None
+                    and isinstance(previous.value, CommandExecution)
+                    and not previous.value.is_terminal()
+                ):
+                    missed.append(
+                        state_event(previous.value, previous.timestamp.timestamp())
+                    )
+        for event in missed:
+            self._emit(event)
         self._emit(
             SutEvent(
                 kind="command_issued",
@@ -199,10 +262,12 @@ class Probe:
                 args=dict(issued.args),
             )
         )
-        if issued.name == "noop":
-            return  # no World entry, no state to follow
-        key = f"{_COMMAND_KEY_PREFIX}{issued.call_id}"
-        call_id = issued.call_id
+        if entry is None:
+            return  # the entry is already gone: no state to follow
+        if terminal:
+            current = entry.current
+            self._emit(state_event(current.value, current.timestamp.timestamp()))
+            return
 
         # Async on purpose: the World runs an async listener as a task on the SUT's loop, queued
         # *before* the trigger the same write emits, so the `command_state` record lands in the
@@ -213,19 +278,7 @@ class Probe:
             execution = entry.current.value
             if not isinstance(execution, CommandExecution):
                 return
-            self._emit(
-                SutEvent(
-                    kind="command_state",
-                    t=_t(),
-                    key=key,
-                    name=execution.name,
-                    call_id=call_id,
-                    args=dict(execution.args),
-                    state=execution.state,
-                    result=execution.result,
-                    error=execution.error,
-                )
-            )
+            self._emit(state_event(execution, _t()))
             if execution.is_terminal():
                 with self._lock:
                     self._key_listeners.pop(key, None)
@@ -235,15 +288,16 @@ class Probe:
         with self._lock:
             self._key_listeners[key] = handler
         try:
-            # on_agent_command fires once the entry is registered and before its running value
-            # lands, so the listener sees running → terminal (specs/agent.md).
+            # For a tool call, on_agent_command fires once the entry is registered and before its
+            # running value lands, so the listener sees running → terminal (specs/agent.md); for
+            # an output it sees the terminal state.
             self._sut.world.add_listener(key, handler)
         except KeyError:
             with self._lock:
                 self._key_listeners.pop(key, None)
 
-    def _on_text(self, text: str) -> None:
-        self._emit(SutEvent(kind="output_text", t=_t(), text=text))
+    def _on_private_text(self, text: str) -> None:
+        self._emit(SutEvent(kind="private_text", t=_t(), text=text))
 
     def _on_reaction_ended(self, trace: ReactionTrace) -> None:
         self._emit(SutEvent(kind="reaction_ended", t=_t(), reaction=trace))

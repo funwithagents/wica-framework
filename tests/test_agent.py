@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from langchain_core.language_models import BaseChatModel
@@ -21,6 +21,7 @@ from langchain_core.messages import (
 from langchain_core.messages.tool import tool_call_chunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
+from langchain_core.tools import tool as langchain_tool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from opentelemetry.trace import format_trace_id
 from pydantic import Field
@@ -29,21 +30,18 @@ from wica.agent import (
     Agent,
     AssistantTextRecord,
     CommandIssued,
-    NoReactionRecord,
     ObservationRecord,
     _command_ack,
     _EMPTY_OBSERVATION,
     _EMPTY_OBSERVATION_BLOCK,
-    _NOOP_ACK,
-    _NOOP_COMMAND_NAME,
     _assemble,
     _was_truncated,
-    build_chat_model,
     mark_cache_breakpoint,
 )
 from wica.command import Command
 from wica.config import AgentConfig, ConfigError
 from wica.content import Content, TextPart
+from wica.text_output import OutputStream
 from wica.guards import (
     REJECTED_TOOL_RESULT,
     ModelResponse,
@@ -54,6 +52,7 @@ from wica.instrumentation import (
     CommandTrace,
     ReactionTrace,
     TokenUsage,
+    now,
     reaction_latency,
 )
 from wica.world import World, WorldEntry
@@ -167,12 +166,15 @@ def sequence(
     return respond
 
 
-class RecordingSink:
+class RecordingText:
+    """Records the model's private text — what it writes outside an output tag, which is all of
+    its text when no output Command is set — as an `on_private_text` subscriber."""
+
     def __init__(self) -> None:
         self.texts: list[str] = []
         self.event = threading.Event()
 
-    async def __call__(self, text: str) -> None:
+    def __call__(self, text: str) -> None:
         self.texts.append(text)
         self.event.set()
 
@@ -197,8 +199,8 @@ def world(loop: asyncio.AbstractEventLoop) -> Iterator[World]:
 
 
 @pytest.fixture
-def sink() -> RecordingSink:
-    return RecordingSink()
+def private() -> RecordingText:
+    return RecordingText()
 
 
 def make_agent(
@@ -207,21 +209,22 @@ def make_agent(
     world: World,
     loop: asyncio.AbstractEventLoop,
     system_prompt: str = "You are terse.",
-    output_sink: Callable[[str], Awaitable[None]] | None = None,
+    private_text: Callable[[str], None] | None = None,
     output_command: Callable[..., Any] | Command | None = None,
     history_reactions: int | None = None,
     history_budget: float | None = None,
     context_window: int | None = None,
     model_timeout: float | None = 10.0,
-    force_tool_call: bool = True,
     max_retries: int = 1,
+    max_next_steps: int | None = 1,
     **kwargs: Any,
 ) -> Agent:
     """Construct an Agent over an injected (fully-scripted) model. The Agent takes an AgentConfig
     and builds its own model from it; the `model=` override lets these tests supply the bespoke
     ProgrammableChatModel the loop is driven over. The prompt is carried on the config. The output
-    sink / output Command are not constructor arguments (build, then wire — see specs/agent.md,
-    "Output wiring"); this helper folds the wiring step in for brevity."""
+    Command is not a constructor argument (build, then wire — see specs/agent.md, "Output
+    wiring"); this helper folds the wiring step in for brevity, and subscribes `private_text` to
+    `on_private_text`."""
     config = AgentConfig(
         provider="fake",
         model="test",
@@ -230,12 +233,12 @@ def make_agent(
         history_budget=history_budget,
         context_window=context_window,
         model_timeout=model_timeout,
-        force_tool_call=force_tool_call,
         max_retries=max_retries,
+        max_next_steps=max_next_steps,
     )
     agent = Agent(config, world=world, loop=loop, model=model, **kwargs)
-    if output_sink is not None:
-        agent.set_output_sink(output_sink)
+    if private_text is not None:
+        agent.on_private_text.subscribe(private_text)
     if output_command is not None:
         agent.set_output_command(output_command)
     return agent
@@ -245,18 +248,18 @@ def human_texts(message: BaseMessage) -> str:
     return message.text
 
 
-def test_text_only_response_updates_sink_and_history(loop, world, sink):
+def test_text_only_response_is_private_text_kept_in_history(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response("Hello there"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
     world.update("input", "hi")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == ["Hello there"]
+    assert private.texts == ["Hello there"]
     assert len(agent._history) == 2
     assert isinstance(agent._history[0], ObservationRecord)
     assert [e.entry.key for e in agent._history[0].entries] == ["input"]
@@ -265,7 +268,7 @@ def test_text_only_response_updates_sink_and_history(loop, world, sink):
     agent.stop()
 
 
-def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
+def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -275,7 +278,7 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
             text_response("The sum is 3"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -293,8 +296,8 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
     assert entry.current.value.name == "add"
     assert entry.current.value.args == {"a": 1, "b": 2}
 
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    assert sink.texts == ["The sum is 3"]
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.texts == ["The sum is 3"]
     assert len(model.calls) == 2
 
     second_call_messages = model.calls[1]
@@ -323,7 +326,7 @@ def test_tool_call_dispatches_then_completes_and_retriggers(loop, world, sink):
     agent.stop()
 
 
-def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
+def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, private):
     # Regression: past commands must be re-rendered as the model's own native tool_calls, not as
     # a "Calling foo(...)…" assistant text block — otherwise the model imitates that prose and
     # emits command descriptions as plain text instead of issuing real tool calls.
@@ -336,7 +339,7 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
             text_response("the sum is 3"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -346,7 +349,7 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
     agent.start()
 
     world.update("input", "add them")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     messages = agent._render_messages()
     ai_messages = [m for m in messages if isinstance(m, AIMessage)]
@@ -367,7 +370,7 @@ def test_past_commands_render_as_native_tool_calls_not_prose(loop, world, sink):
     agent.stop()
 
 
-def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
+def test_tool_failure_surfaces_into_world_and_next_step(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -377,7 +380,7 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
             text_response("Sorry, that failed"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     async def explode() -> str:
         """Always raises."""
@@ -389,7 +392,7 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
 
     world.update("input", "explode please")
 
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     second_call_messages = model.calls[1]
     # the tool_result is the fixed ack; the failure is delivered by the command's World entry
@@ -406,7 +409,9 @@ def test_tool_failure_surfaces_into_world_and_next_step(loop, world, sink):
     agent.stop()
 
 
-def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, sink):
+def test_running_command_shown_as_in_progress_to_a_concurrent_step(
+    loop, world, private
+):
     # Regression (analysis/_todo.md, "dance then say hello during dance"): while a command is still
     # running, a new input starts a fresh step; that step must be told the command is NOT finished.
     # The running command renders as an in-progress observation entry, and its tool_result is a
@@ -427,7 +432,7 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
             text_response("hi"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.register_command(dance)
     agent.start()
 
@@ -440,8 +445,8 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
 
     # A new input arrives while dance is still running -> a concurrent step runs.
     world.update("input", "say hi")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    assert sink.texts == ["hi"]
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.texts == ["hi"]
     assert len(model.calls) == 2
 
     step2 = model.calls[1]
@@ -461,7 +466,9 @@ def test_running_command_shown_as_in_progress_to_a_concurrent_step(loop, world, 
     agent.stop()
 
 
-def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world, sink):
+def test_parallel_tool_calls_independent_keys_and_mixed_status_line(
+    loop, world, private
+):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -482,7 +489,7 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
             text_response("done"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.register_command(fast_tool)
     agent.register_command(slow_tool)
     agent.start()
@@ -493,7 +500,7 @@ def test_parallel_tool_calls_independent_keys_and_mixed_status_line(loop, world,
     slow_key = "agent:command:c2"
     wait_until(lambda: world.get_entry(slow_key).current.value.state == "running")
 
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     assert len(model.calls) == 2
 
     second_call_messages = model.calls[1]
@@ -535,7 +542,7 @@ def _is_unregistered(world: World, key: str) -> bool:
         return True
 
 
-def test_dropped_command_completion_persists_until_observed(loop, world, sink):
+def test_dropped_command_completion_persists_until_observed(loop, world, private):
     # A turn issues two commands. The first completes and starts a second step; while that step is
     # in flight (busy), the second command completes — its trigger is dropped by the single-in-flight
     # loop. The dropped completion is NOT eagerly retired: it stays as current World state and is
@@ -569,7 +576,7 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
             text_response("ack"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.register_command(fast)
     agent.register_command(slow)
     agent.start()
@@ -588,17 +595,17 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
     # Finish step 2. fast was observed and retired by it; slow's completion was dropped, so no
     # third step ran for it — and it must persist as current terminal state, not be lost.
     loop.call_soon_threadsafe(release_step2.set)
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    assert sink.texts == ["done"]
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.texts == ["done"]
     assert len(model.calls) == 2
     assert _is_unregistered(world, "agent:command:c1")
     assert world.get_entry("agent:command:c2").current.value.state == "complete"
 
     # A fresh input starts step 3, which observes slow: its outcome renders into that step's
     # prompt, and only then is the entry retired — the completion reaches history before it goes.
-    sink.event.clear()
+    private.event.clear()
     world.update("input", "poke")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     assert len(model.calls) == 3
     step3_observation = "".join(
         str(m.content) for m in model.calls[2] if isinstance(m, HumanMessage)
@@ -609,7 +616,7 @@ def test_dropped_command_completion_persists_until_observed(loop, world, sink):
     agent.stop()
 
 
-def test_single_in_flight_trigger_dropped_and_logged(loop, world, sink, caplog):
+def test_single_in_flight_trigger_dropped_and_logged(loop, world, private, caplog):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -622,7 +629,7 @@ def test_single_in_flight_trigger_dropped_and_logged(loop, world, sink, caplog):
         return AIMessage(content="finally")
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
     with caplog.at_level(logging.INFO, logger="wica.agent"):
@@ -634,9 +641,9 @@ def test_single_in_flight_trigger_dropped_and_logged(loop, world, sink, caplog):
         time.sleep(0.2)  # let any (incorrect) extra steps have a chance to start
 
         loop.call_soon_threadsafe(hold.set)
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert private.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == ["finally"]
+    assert private.texts == ["finally"]
     assert len(model.calls) == 1
     assert sum(1 for r in caplog.records if "dropping trigger" in r.message) == 2
     assert len(agent._history) == 2  # one ObservationRecord + one AssistantTextRecord
@@ -644,17 +651,17 @@ def test_single_in_flight_trigger_dropped_and_logged(loop, world, sink, caplog):
     agent.stop()
 
 
-def test_full_bundle_capture_includes_passive_entries(loop, world, sink):
+def test_full_bundle_capture_includes_passive_entries(loop, world, private):
     world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=False)
     model = ProgrammableChatModel(respond=text_response("ok"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
     world.update("b", "b-value")
     world.update("a", "a-value")
 
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     assert len(agent._history) == 2
     observation = agent._history[0]
     assert isinstance(observation, ObservationRecord)
@@ -663,7 +670,7 @@ def test_full_bundle_capture_includes_passive_entries(loop, world, sink):
     agent.stop()
 
 
-def test_freshness_flips_at_bundle_boundary(loop, world, sink):
+def test_freshness_flips_at_bundle_boundary(loop, world, private):
     def fresh_serialize(value: Any, previous: Any) -> Content:
         return [TextPart(f"FRESH:{value}")]
 
@@ -680,15 +687,15 @@ def test_freshness_flips_at_bundle_boundary(loop, world, sink):
     model = ProgrammableChatModel(
         respond=sequence(text_response("first"), text_response("second"))
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
     world.update("note", "one")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    sink.event.clear()
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    private.event.clear()
 
     world.update("note", "two")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     messages = agent._render_messages()
     human_messages = [m for m in messages if isinstance(m, HumanMessage)]
@@ -699,18 +706,20 @@ def test_freshness_flips_at_bundle_boundary(loop, world, sink):
     agent.stop()
 
 
-def test_on_prompt_event_fires_with_the_messages_the_model_receives(loop, world, sink):
+def test_on_prompt_event_fires_with_the_messages_the_model_receives(
+    loop, world, private
+):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response("hi"))
     captured: list[list[BaseMessage]] = []
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.on_prompt.subscribe(captured.append)
     agent.start()
 
     world.update("input", "hello")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert len(captured) == 1  # one emit per step
     assert captured[0] == model.calls[0]  # exactly the messages handed to the model
@@ -718,12 +727,14 @@ def test_on_prompt_event_fires_with_the_messages_the_model_receives(loop, world,
     agent.stop()
 
 
-def test_on_prompt_subscriber_cannot_mutate_messages_sent_to_model(loop, world, sink):
+def test_on_prompt_subscriber_cannot_mutate_messages_sent_to_model(
+    loop, world, private
+):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response("hi"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     def mutate(messages: list[BaseMessage]) -> None:
         for message in messages:
@@ -734,7 +745,7 @@ def test_on_prompt_subscriber_cannot_mutate_messages_sent_to_model(loop, world, 
     agent.start()
 
     world.update("input", "hello")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert model.calls[0]
     assert any("hello" in human_texts(message) for message in model.calls[0])
@@ -742,25 +753,27 @@ def test_on_prompt_subscriber_cannot_mutate_messages_sent_to_model(loop, world, 
     agent.stop()
 
 
-def test_on_trigger_event_fires_with_the_entry_that_started_the_step(loop, world, sink):
+def test_on_trigger_event_fires_with_the_entry_that_started_the_step(
+    loop, world, private
+):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response("hi"))
     triggers: list[str] = []
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
 
     world.update("input", "hello")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert triggers == ["input"]
 
     agent.stop()
 
 
-def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, sink):
+def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -771,7 +784,7 @@ def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, s
         )
     )
     commands: list[CommandIssued] = []
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.on_command.subscribe(commands.append)
 
     async def add(a: int, b: int) -> int:
@@ -782,14 +795,14 @@ def test_on_command_event_fires_with_a_command_issued_at_dispatch(loop, world, s
     agent.start()
 
     world.update("input", "add them")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert commands == [CommandIssued("add", {"a": 1, "b": 2}, "c1")]
 
     agent.stop()
 
 
-def test_on_command_subscriber_cannot_mutate_dispatched_arguments(loop, world, sink):
+def test_on_command_subscriber_cannot_mutate_dispatched_arguments(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -800,7 +813,7 @@ def test_on_command_subscriber_cannot_mutate_dispatched_arguments(loop, world, s
         )
     )
     invoked: list[int] = []
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     def mutate(command: CommandIssued) -> None:
         command.args["payload"]["value"] = 99
@@ -816,14 +829,14 @@ def test_on_command_subscriber_cannot_mutate_dispatched_arguments(loop, world, s
     agent.start()
 
     world.update("input", "add them")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert invoked == [1]
 
     agent.stop()
 
 
-def test_raising_on_prompt_subscriber_does_not_abort_the_step(loop, world, sink):
+def test_raising_on_prompt_subscriber_does_not_abort_the_step(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -832,14 +845,14 @@ def test_raising_on_prompt_subscriber_does_not_abort_the_step(loop, world, sink)
     def boom(messages: list[BaseMessage]) -> None:
         raise RuntimeError("subscriber failure")
 
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.on_prompt.subscribe(boom)  # Event.emit isolates a raising subscriber
     agent.start()
 
     world.update("input", "hello")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == [
+    assert private.texts == [
         "still replied"
     ]  # the raising subscriber didn't break the step
     assert len(model.calls) == 1
@@ -847,12 +860,12 @@ def test_raising_on_prompt_subscriber_does_not_abort_the_step(loop, world, sink)
     agent.stop()
 
 
-def test_stop_unsubscribes_from_the_world_trigger(loop, world, sink):
+def test_stop_unsubscribes_from_the_world_trigger(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response("hi"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
     agent.stop()
 
@@ -861,7 +874,7 @@ def test_stop_unsubscribes_from_the_world_trigger(loop, world, sink):
     assert model.calls == []
 
 
-def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
+def test_cancel_command_marks_cancelled_and_retriggers(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -878,7 +891,7 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
             text_response("cancelled that for you"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.register_command(block_forever)
     agent.start()
 
@@ -888,7 +901,7 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
     wait_until(lambda: world.get_entry(key).current.value.state == "running")
 
     agent.cancel_command("c1")
-    wait_until(lambda: sink.event.is_set())
+    wait_until(lambda: private.event.is_set())
 
     second_call_messages = model.calls[1]
     # the tool_result is the fixed ack; the cancellation is delivered by the command's World entry
@@ -907,7 +920,7 @@ def test_cancel_command_marks_cancelled_and_retriggers(loop, world, sink):
     agent.stop()
 
 
-def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink):
+def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -921,7 +934,7 @@ def test_stop_cancels_running_tool_without_triggering_new_step(loop, world, sink
     model = ProgrammableChatModel(
         respond=tool_call_response([("block_forever", {}, "call1")])
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.register_command(block_forever)
     agent.start()
 
@@ -965,7 +978,7 @@ def _wait_for_render(model: ProgrammableChatModel, world: World, needle: str) ->
     raise AssertionError(f"no prompt rendered {needle!r} within {WAIT_TIMEOUT}s")
 
 
-def test_model_can_cancel_a_running_command(loop, world, sink):
+def test_model_can_cancel_a_running_command(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -983,7 +996,7 @@ def test_model_can_cancel_a_running_command(loop, world, sink):
             text_response("stopped it"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.register_command(block_forever)
     agent.start()
     # cancel_command is a WICA-native Command the Agent auto-registers at start — no app wiring.
@@ -1003,7 +1016,7 @@ def test_model_can_cancel_a_running_command(loop, world, sink):
     agent.stop()
 
 
-def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
+def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -1020,7 +1033,7 @@ def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
             text_response("ok"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.register_command(block_forever)
     agent.start()
 
@@ -1040,9 +1053,9 @@ def test_cancel_command_action_is_lenient_on_full_entry_key(loop, world, sink):
     agent.stop()
 
 
-def test_cancel_command_action_is_a_noop_for_unknown_id(loop, world, sink):
+def test_cancel_command_action_is_a_noop_for_unknown_id(loop, world, private):
     model = ProgrammableChatModel(respond=text_response("ok"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
     future = asyncio.run_coroutine_threadsafe(
@@ -1054,7 +1067,7 @@ def test_cancel_command_action_is_a_noop_for_unknown_id(loop, world, sink):
     agent.stop()
 
 
-def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
+def test_burst_of_triggers_coalesces_into_one_step(loop, world, private):
     # Two triggers within the coalescing window run a *single* step whose observation captures
     # both — but on_trigger still fires once per collected trigger. See specs/agent.md.
     world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
@@ -1062,14 +1075,14 @@ def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
     model = ProgrammableChatModel(respond=text_response("ok"))
     triggers: list[str] = []
     agent = make_agent(
-        model, world=world, loop=loop, coalesce_window=0.3, output_sink=sink
+        model, world=world, loop=loop, coalesce_window=0.3, private_text=private
     )
     agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
 
     world.update("a", "a-value")
     world.update("b", "b-value")  # joins the same window → same step
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     time.sleep(0.3)  # let any (incorrect) second step have a chance to run
 
     assert len(model.calls) == 1
@@ -1082,7 +1095,7 @@ def test_burst_of_triggers_coalesces_into_one_step(loop, world, sink):
     agent.stop()
 
 
-def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
+def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, private):
     # coalesce_window=0 is the pre-coalescing behavior: each trigger fires at once (no wait), and a
     # trigger arriving while a step is in flight is dropped, not coalesced.
     world.register(
@@ -1098,7 +1111,7 @@ def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
 
     model = ProgrammableChatModel(respond=respond)
     agent = make_agent(
-        model, world=world, loop=loop, coalesce_window=0, output_sink=sink
+        model, world=world, loop=loop, coalesce_window=0, private_text=private
     )
     agent.start()
 
@@ -1110,7 +1123,7 @@ def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
     world.update("input", "second")  # arrives while busy → dropped
     time.sleep(0.2)
     loop.call_soon_threadsafe(hold.set)
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert len(model.calls) == 1
     assert len([r for r in agent._history if isinstance(r, ObservationRecord)]) == 1
@@ -1118,7 +1131,7 @@ def test_zero_window_fires_immediately_and_drops_while_busy(loop, world, sink):
     agent.stop()
 
 
-def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
+def test_bypass_coalescing_flushes_the_window_early(loop, world, private):
     # A long window would make a plain trigger wait ~1s; a bypass_coalescing trigger flushes the
     # window early, carrying along whatever was already batched.
     world.register("ctx", str, serialize_fn=identity_serialize, triggers_llm_call=True)
@@ -1132,7 +1145,7 @@ def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
     model = ProgrammableChatModel(respond=text_response("ok"))
     triggers: list[str] = []
     agent = make_agent(
-        model, world=world, loop=loop, coalesce_window=1.0, output_sink=sink
+        model, world=world, loop=loop, coalesce_window=1.0, private_text=private
     )
     agent.on_trigger.subscribe(lambda entry: triggers.append(entry.key))
     agent.start()
@@ -1144,7 +1157,7 @@ def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
 
     t_urgent = time.monotonic()
     world.update("urgent", "stop!")  # bypass → flush now, pulling ctx forward
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     assert time.monotonic() - t_urgent < 0.5  # far under the 1.0s window → early flush
 
     assert len(model.calls) == 1
@@ -1156,7 +1169,7 @@ def test_bypass_coalescing_flushes_the_window_early(loop, world, sink):
     agent.stop()
 
 
-def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
+def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, private):
     # bypass_coalescing skips the *wait*, not the single-in-flight *drop*: an urgent trigger landing
     # while a step is in flight is dropped like any other (barge-in/interruption is deferred).
     world.register(
@@ -1179,7 +1192,7 @@ def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
 
     model = ProgrammableChatModel(respond=respond)
     agent = make_agent(
-        model, world=world, loop=loop, coalesce_window=0, output_sink=sink
+        model, world=world, loop=loop, coalesce_window=0, private_text=private
     )
     agent.start()
 
@@ -1189,7 +1202,7 @@ def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
     world.update("urgent", "stop!")  # bypass, but busy → dropped
     time.sleep(0.2)
     loop.call_soon_threadsafe(hold.set)
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert len(model.calls) == 1  # urgent did not start a second step
     assert len([r for r in agent._history if isinstance(r, ObservationRecord)]) == 1
@@ -1197,7 +1210,7 @@ def test_bypass_trigger_arriving_while_busy_is_still_dropped(loop, world, sink):
     agent.stop()
 
 
-# --- Command object, output Command, noop, and system-prompt composition ---------------------
+# --- Command object, output Command, doing nothing, and system-prompt composition ------------
 
 
 def text_and_tool_response(
@@ -1215,7 +1228,7 @@ def text_and_tool_response(
     return respond
 
 
-def test_register_command_accepts_a_command_object(loop, world, sink):
+def test_register_command_accepts_a_command_object(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -1225,7 +1238,7 @@ def test_register_command_accepts_a_command_object(loop, world, sink):
             text_response("done"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     async def add(a: int, b: int) -> int:
         return a + b
@@ -1242,148 +1255,241 @@ def test_register_command_accepts_a_command_object(loop, world, sink):
     agent.stop()
 
 
-def test_system_prompt_composes_persona_and_runtime_primer_without_output_clause(
-    loop, world, sink
+def test_system_prompt_without_an_output_command_is_the_persona_then_the_primer(
+    loop, world, private
 ):
     model = ProgrammableChatModel(respond=text_response("hi"))
     agent = make_agent(
-        model, world=world, loop=loop, system_prompt="You are terse.", output_sink=sink
+        model,
+        world=world,
+        loop=loop,
+        system_prompt="You are terse.",
+        private_text=private,
     )
 
     prompt = agent.system_prompt
     # Persona is preserved verbatim, at the front.
     assert prompt.startswith("You are terse.")
-    # The always-on primer is appended (perception + noop guidance present).
+    # Perception + acting, including that a response's tool calls run concurrently, so sequencing
+    # dependent actions is the model's job.
     assert "observations of your World" in prompt
-    assert _NOOP_COMMAND_NAME in prompt
-    # …including, in the perception + acting part (before the output-mode clause), that a
-    # response's tool calls run concurrently, so sequencing dependent actions is the model's job.
     assert "run concurrently" in prompt
     assert "in a later step" in prompt
-    assert prompt.index("run concurrently") < prompt.index(
-        "write your answer as ordinary text"
+    # No output Command: no tag is taught, and the model is told nobody reads its text.
+    assert "Nobody reads the text you write" in prompt
+    assert "is heard" not in prompt
+    # The silence clause: doing nothing is a tag in the text, not a tool.
+    assert "write <noop/> as your whole response" in prompt
+    assert "noop is not a tool" in prompt
+    assert (
+        prompt.index("run concurrently")
+        < prompt.index("Nobody reads the text you write")
+        < prompt.index("<noop/>")
     )
-    # No output Command → default text-reply clause, not the private-reasoning one.
-    assert "write your answer as ordinary text" in prompt
-    assert "private reasoning" not in prompt
+    # No continuation clause without an output: there is no speech to continue after.
+    assert "<next>" not in prompt
+    assert "end of your own speech" not in prompt
 
 
-def test_output_command_is_the_user_channel_free_text_is_private(loop, world, sink):
+def test_system_prompt_teaches_the_output_tag_its_attributes_and_the_note(
+    loop, world, private
+):
+    async def say(
+        text: OutputStream,
+        emotion: Literal["happy", "sad"] = "happy",
+        voice: str = "default",
+    ) -> None:
+        """Speak out loud."""
+
+    agent = _dummy_agent(loop, world, private, output_command=say)
+
+    prompt = agent.system_prompt
+    # The output clause: the tag, that it is not a tool, the Command's description, its
+    # attributes with their allowed values, and an example carrying each default.
+    assert "<say>Hello there!</say>" in prompt
+    assert "Only the text inside the tag is heard" in prompt
+    assert "say is not a tool" in prompt
+    assert "What say does: Speak out loud." in prompt
+    assert "emotion (one of: happy, sad); voice" in prompt
+    assert '<say emotion="happy" voice="default">Hello there!</say>' in prompt
+    assert "Speaking again replaces what you were saying" in prompt
+    assert "Nobody reads the text you write" not in prompt
+    # The continuation clause, with its neutral example, comes last.
+    assert "<next>look it up, then tell them what I found</next>" in prompt
+    assert (
+        prompt.index("run concurrently")
+        < prompt.index("<say>Hello there!</say>")
+        < prompt.index("write <noop/> as your whole response")
+        < prompt.index("<next>")
+    )
+
+
+@pytest.mark.parametrize(
+    ("max_next_steps", "taught"), [(0, False), (1, True), (None, True)]
+)
+def test_system_prompt_teaches_the_note_unless_it_is_turned_off(
+    loop, world, private, max_next_steps, taught
+):
+    def say(text: str) -> None:
+        """Speak out loud."""
+
+    agent = _dummy_agent(
+        loop, world, private, output_command=say, max_next_steps=max_next_steps
+    )
+
+    prompt = agent.system_prompt
+    assert "<say>Hello there!</say>" in prompt
+    assert "optional attributes" not in prompt  # the Command declares none
+    assert ("<next>" in prompt) is taught
+    # Turned off, the model is still told its own speech ending does not call it again.
+    assert (
+        "The end of your own speech does not call you again; a command finishing does."
+        in prompt
+    ) is not taught
+
+
+def test_an_output_is_a_command_execution_and_text_outside_its_tag_is_private(
+    loop, world, private
+):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    release = asyncio.Event()
+
+    async def speak(text: str) -> str:
+        """Say something to the user."""
+        await release.wait()
+        return "spoken"
+
+    model = ProgrammableChatModel(
+        respond=text_response("thinking about it <speak>hello</speak>")
+    )
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        private_text=private,
+        output_command=speak,
+        coalesce_window=0,
+    )
+    issued: list[CommandIssued] = []
+    ended: list[CommandTrace] = []
+    agent.on_command.subscribe(issued.append)
+    agent.on_command_ended.subscribe(ended.append)
+    agent.start()
+    world.update("input", "greet the user")
+
+    # While it is delivered the output is a running Command entry, reported on on_command with
+    # its whole text; the text outside the tag went to on_private_text.
+    key = "agent:command:c1"
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    assert issued == [CommandIssued("speak", {"text": "hello"}, "c1")]
+    running = world.get_entry(key).current.value
+    assert (running.name, running.args, running.state) == (
+        "speak",
+        {"text": "hello"},
+        "running",
+    )
+    assert private.texts == ["thinking about it"]
+    # History keeps the response as written, as text: no tool call stands for the speech.
+    assert agent._history[1:] == [
+        AssistantTextRecord("thinking about it <speak>hello</speak>")
+    ]
+
+    loop.call_soon_threadsafe(release.set)
+    wait_until(lambda: world.get_entry(key).current.value.state == "complete")
+    assert world.get_entry(key).current.value.result == "spoken"
+    assert [(t.call_id, t.name, t.state, t.reaction_id) for t in ended] == [
+        ("c1", "speak", "complete", 1)
+    ]
+    time.sleep(0.2)  # give any (erroneous) wake a chance to fire
+    assert len(model.calls) == 1  # the end of the output woke nothing
+
+    # The next step observes the finished output like any Command, then retires its entry.
+    world.update("input", "again")
+    wait_until(lambda: len(model.calls) == 2)
+    assert "Called speak(text='hello') → spoken" in _rendered_user_text(model, 1)
+    wait_until(lambda: not world.is_registered(key))
+
+    agent.stop()
+
+
+@pytest.mark.parametrize(("name", "args"), [("say", {"text": "hello"}), ("noop", {})])
+def test_calling_the_output_command_or_noop_as_a_tool_names_an_unknown_command(
+    loop, world, private, name, args
+):
+    """Neither is bound as a tool: the unknown_command guard sends the call back, and the retry
+    speaks through the tag."""
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     spoken: list[str] = []
-    spoke = threading.Event()
-
-    async def speak(text: str) -> str:
-        """Say something to the user."""
-        spoken.append(text)
-        spoke.set()
-        return "spoken"
-
-    # Step 1: think in free text and speak via the output Command. Step 2 (re-triggered by the
-    # output command completing) ends the turn with noop.
     model = ProgrammableChatModel(
         respond=sequence(
-            text_and_tool_response(
-                "thinking about it", [("speak", {"text": "hello"}, "s1")]
-            ),
-            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+            tool_call_response([(name, args, "t1")]),
+            text_response("<say>hello</say>"),
         )
     )
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, output_command=speak
+        model,
+        world=world,
+        loop=loop,
+        private_text=private,
+        output_command=_say_command(spoken),
+        coalesce_window=0,
     )
-
-    # The output clause names the command and marks free text private.
-    assert "speak" in agent.system_prompt
-    assert "private reasoning" in agent.system_prompt
-
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
     agent.start()
+
     world.update("input", "greet the user")
-
-    assert spoke.wait(timeout=WAIT_TIMEOUT)
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    # The Command carried the user-facing text; the sink got the private free-text reasoning.
-    assert spoken == ["hello"]
-    assert sink.texts == ["thinking about it"]
-    # The output command's completion re-triggered a step (default flag), which the model ended
-    # with noop — so the model was called at least twice.
-    wait_until(lambda: len(model.calls) >= 2)
-
+    wait_until(lambda: spoken == ["hello"])
     agent.stop()
 
+    [rejection] = rejections
+    assert f"There is no command named {name!r}" in rejection.feedback
+    assert "The commands you can call are: cancel_command." in rejection.feedback
+    assert len(model.calls) == 2
 
-def test_noop_takes_no_action_and_does_not_retrigger(loop, world, sink):
+
+def test_noop_issues_no_command_and_stays_in_history_as_text(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(
-        respond=tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")])
+        respond=sequence(text_response("<noop/>"), text_response("ok"))
     )
     issued: list[CommandIssued] = []
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    traces: list[ReactionTrace] = []
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.on_command.subscribe(issued.append)
+    agent.on_reaction_ended.subscribe(traces.append)
     agent.start()
 
     world.update("input", "nothing to do here")
-    wait_until(lambda: len(model.calls) == 1)
+    wait_until(lambda: len(traces) == 1)
     time.sleep(0.2)  # give any (erroneous) re-trigger a chance to fire
 
-    # No World command entry was created, nothing spoke, no re-trigger. on_command *does* fire for
-    # noop (observability — it is a command the model issued, just not a World action).
+    # No Command was issued, no World entry created, nothing private reported, no re-trigger:
+    # the reaction record's flag is what reports the choice.
+    assert traces[0].noop is True and traces[0].outcome == "ok"
+    assert traces[0].command_call_ids == ()
+    assert issued == []
     assert not any(
         e.key.startswith("agent:command:") for e in world.get_prompt_entries()
     )
-    assert sink.texts == []
-    assert issued == [CommandIssued("noop", {}, "c1")]
-    assert not world.is_registered(
-        "agent:command:c1"
-    )  # a call_id, but no entry behind it
+    assert private.texts == []
     assert len(model.calls) == 1
-    # History records the declined reaction as a dedicated NoReactionRecord.
-    assert any(isinstance(r, NoReactionRecord) for r in agent._history)
+    assert agent._history[1:] == [AssistantTextRecord("<noop/>")]
 
-    agent.stop()
-
-
-def test_noop_renders_as_native_call_with_plain_ack(loop, world, sink):
-    world.register(
-        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    # First input → noop; a later input drives a second step whose prompt contains the rendered
-    # noop from history (native tool call + plain ack).
-    model = ProgrammableChatModel(
-        respond=sequence(
-            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
-            text_response("ok"),
-        )
-    )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
-    agent.start()
-
-    world.update("input", "first")
-    # Wait for the reaction to end, not just the model call: a trigger arriving while the step
-    # is still in flight is dropped (single-in-flight), and the second step would never run.
-    wait_until(lambda: len(model.calls) == 1 and not agent._busy)
-
+    # A later step sees the choice as the assistant's own text — no tool call, no tool_result.
     world.update("input", "second")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     second_prompt = model.calls[1]
-    # The past noop re-renders as the model's own native tool call...
-    assert any(
-        c["name"] == _NOOP_COMMAND_NAME
-        for m in second_prompt
-        if isinstance(m, AIMessage)
-        for c in m.tool_calls
-    )
-    # ...paired with a plain acknowledgement tool_result (not an entry-pointer ack).
-    assert any(
-        m.tool_call_id == "n1" and m.content == _NOOP_ACK
-        for m in second_prompt
-        if isinstance(m, ToolMessage)
-    )
+    assert [m.text for m in second_prompt if isinstance(m, AIMessage)] == ["<noop/>"]
+    assert not any(m.tool_calls for m in second_prompt if isinstance(m, AIMessage))
+    assert not any(isinstance(m, ToolMessage) for m in second_prompt)
+    assert traces[1].noop is False
 
     agent.stop()
 
@@ -1412,11 +1518,11 @@ def _rendered_user_text(model: ProgrammableChatModel, call_index: int) -> str:
 
 
 def test_history_renders_an_unregistered_entry_from_its_captured_serializer(
-    loop, world, sink
+    loop, world, private
 ):
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
     world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -1434,10 +1540,12 @@ def test_history_renders_an_unregistered_entry_from_its_captured_serializer(
     agent.stop()
 
 
-def test_reregistering_a_key_does_not_rewrite_earlier_observations(loop, world, sink):
+def test_reregistering_a_key_does_not_rewrite_earlier_observations(
+    loop, world, private
+):
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
     world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -1462,11 +1570,11 @@ def test_reregistering_a_key_does_not_rewrite_earlier_observations(loop, world, 
 
 
 def test_application_entry_under_agent_command_prefix_uses_its_own_serializer(
-    loop, world, sink
+    loop, world, private
 ):
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
     world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -1495,7 +1603,7 @@ def world_keys_seen(model: ProgrammableChatModel) -> list[str]:
 
 
 def test_invalid_provider_call_id_gets_a_safe_world_key_but_keeps_its_message_id(
-    loop, world, sink
+    loop, world, private
 ):
     def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -1509,7 +1617,7 @@ def test_invalid_provider_call_id_gets_a_safe_world_key_but_keeps_its_message_id
         )
     )
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
     agent.register_command(add)
     world.register(
@@ -1525,7 +1633,7 @@ def test_invalid_provider_call_id_gets_a_safe_world_key_but_keeps_its_message_id
     agent.stop()
 
 
-def test_call_ids_are_minted_in_order_whatever_the_provider_id(loop, world, sink):
+def test_call_ids_are_minted_in_order_whatever_the_provider_id(loop, world, private):
     # The model is pointed at a short id WICA mints (c1, c2, …), never the provider's: a model
     # copying a long opaque id into cancel_command garbles it. A provider reusing an id is harmless.
     release = threading.Event()
@@ -1540,7 +1648,7 @@ def test_call_ids_are_minted_in_order_whatever_the_provider_id(loop, world, sink
     )
     issued: list[CommandIssued] = []
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
     agent.on_command.subscribe(issued.append)
     agent.register_command(slow)
@@ -1563,23 +1671,32 @@ def test_call_ids_are_minted_in_order_whatever_the_provider_id(loop, world, sink
     agent.stop()
 
 
-def test_minted_ids_count_noop_skip_taken_keys_and_survive_a_restart(loop, world, sink):
+def test_minted_ids_count_outputs_skip_taken_keys_and_survive_a_restart(
+    loop, world, private
+):
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
         return a + b
 
     model = ProgrammableChatModel(
         respond=sequence(
-            tool_call_response(
-                [(_NOOP_COMMAND_NAME, {}, "p1"), ("add", {"a": 1, "b": 2}, "p2")]
+            text_and_tool_response(
+                "<say>Adding.</say>", [("add", {"a": 1, "b": 2}, "p1")]
             ),
-            text_response("three"),
-            tool_call_response([("add", {"a": 2, "b": 2}, "p3")]),
-            text_response("four"),
+            text_response("<noop/>"),
+            tool_call_response([("add", {"a": 2, "b": 2}, "p2")]),
+            text_response("<noop/>"),
         )
     )
     issued: list[CommandIssued] = []
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        private_text=private,
+        output_command=_say_command([]),
+        coalesce_window=0,
+    )
     agent.on_command.subscribe(issued.append)
     agent.register_command(add)
     world.register(
@@ -1589,13 +1706,14 @@ def test_minted_ids_count_noop_skip_taken_keys_and_survive_a_restart(loop, world
     world.register("agent:command:c2", str, serialize_fn=identity_serialize)
     agent.start()
     world.update("input", "add 1 and 2")
-    wait_until(lambda: sink.texts == ["three"])
+    wait_until(lambda: len(model.calls) == 2 and not agent._busy)
     agent.stop()
     agent.start()
     world.update("input", "add 2 and 2")
-    wait_until(lambda: sink.texts == ["three", "four"])
+    wait_until(lambda: len(model.calls) == 4 and not agent._busy)
+    # An output takes an id like a tool call does; a <noop/> takes none.
     assert [(c.name, c.call_id) for c in issued] == [
-        (_NOOP_COMMAND_NAME, "c1"),
+        ("say", "c1"),
         ("add", "c3"),
         ("add", "c4"),
     ]
@@ -1605,41 +1723,43 @@ def test_minted_ids_count_noop_skip_taken_keys_and_survive_a_restart(loop, world
 # --- Reserved names and duplicate rejection ---------------------------------------------
 
 
-def _dummy_agent(loop, world, sink, **kwargs) -> Agent:
+def _dummy_agent(loop, world, private, **kwargs) -> Agent:
     return make_agent(
         ProgrammableChatModel(respond=text_response("ok")),
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         **kwargs,
     )
 
 
-def _named(name: str) -> Command:
-    def fn() -> str:
-        """A test command."""
+def _named(name: str, description: str = "A test command.") -> Command:
+    """A Command usable both as a registered Command and as an output Command (its one
+    parameter is the text)."""
+
+    def fn(text: str = "") -> str:
         return "x"
 
-    return Command(fn, name=name, description="A test command.")
+    return Command(fn, name=name, description=description)
 
 
-@pytest.mark.parametrize("name", ["noop", "cancel_command"])
-def test_register_command_rejects_reserved_names(loop, world, sink, name):
-    agent = _dummy_agent(loop, world, sink)
+@pytest.mark.parametrize("name", ["noop", "next", "cancel_command"])
+def test_register_command_rejects_reserved_names(loop, world, private, name):
+    agent = _dummy_agent(loop, world, private)
     with pytest.raises(ValueError, match="reserved"):
         agent.register_command(_named(name))
 
 
-def test_register_command_rejects_duplicate_names(loop, world, sink):
-    agent = _dummy_agent(loop, world, sink)
+def test_register_command_rejects_duplicate_names(loop, world, private):
+    agent = _dummy_agent(loop, world, private)
     agent.register_command(_named("wave"))
     with pytest.raises(ValueError, match="already registered"):
         agent.register_command(_named("wave"))
 
 
-@pytest.mark.parametrize("name", ["noop", "cancel_command"])
-def test_set_output_command_rejects_reserved_names(loop, world, sink, name):
-    agent = _dummy_agent(loop, world, sink)
+@pytest.mark.parametrize("name", ["noop", "next", "cancel_command"])
+def test_set_output_command_rejects_reserved_names(loop, world, private, name):
+    agent = _dummy_agent(loop, world, private)
     before = agent.system_prompt
     with pytest.raises(ValueError, match="reserved"):
         agent.set_output_command(_named(name))
@@ -1647,29 +1767,50 @@ def test_set_output_command_rejects_reserved_names(loop, world, sink, name):
     assert agent.system_prompt == before
 
 
-def test_register_command_rejects_the_output_commands_name(loop, world, sink):
-    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+def test_register_command_rejects_the_output_commands_name(loop, world, private):
+    agent = _dummy_agent(loop, world, private, output_command=_named("say"))
     with pytest.raises(ValueError, match="output Command"):
         agent.register_command(_named("say"))
 
 
-def test_restart_keeps_exactly_one_of_each_builtin(loop, world, sink):
-    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+def test_restart_keeps_exactly_one_builtin_and_the_output_command_out_of_the_tools(
+    loop, world, private
+):
+    agent = _dummy_agent(loop, world, private, output_command=_named("say"))
     agent.register_command(_named("wave"))
     agent.start()
     agent.stop()
     agent.start()
-    assert sorted(agent._commands) == ["cancel_command", "noop", "say", "wave"]
+    assert sorted(agent.commands) == ["cancel_command", "wave"]
+    assert agent.output_command_name == "say"
     agent.stop()
 
 
-# --- Output wiring: set_output_command / set_output_sink (specs/agent.md "Output wiring") -------
+def test_set_output_command_rejects_a_name_that_is_not_a_tag_name_or_a_wrapped_tool(
+    loop, world, private
+):
+    @langchain_tool
+    def search(query: str) -> str:
+        """Search the web."""
+        return query
+
+    agent = _dummy_agent(loop, world, private)
+    before = agent.system_prompt
+    with pytest.raises(ValueError, match="not a valid tag name"):
+        agent.set_output_command(_named("say it"))
+    with pytest.raises(ValueError, match="built from a callable"):
+        agent.set_output_command(Command(search))
+    assert agent.output_command_name is None
+    assert agent.system_prompt == before
+
+
+# --- Output wiring: set_output_command (specs/agent.md "Output wiring") ------------------------
 
 
 def test_set_output_command_rejects_an_already_registered_name_unchanged(
-    loop, world, sink
+    loop, world, private
 ):
-    agent = _dummy_agent(loop, world, sink)
+    agent = _dummy_agent(loop, world, private)
     agent.register_command(_named("wave"))
     before = agent.system_prompt
     with pytest.raises(ValueError, match="already registered"):
@@ -1679,11 +1820,11 @@ def test_set_output_command_rejects_an_already_registered_name_unchanged(
     assert list(agent.commands) == ["wave"]
 
 
-def test_set_output_command_after_start_attaches_immediately_and_dispatches(
-    loop, world, sink
+def test_set_output_command_after_start_takes_effect_at_the_next_step(
+    loop, world, private
 ):
-    """Setting while running is permitted: the Command is bound at once, the next step's system
-    prompt carries the output clause, and a call to it dispatches like any Command."""
+    """Setting while running is permitted: the next step's system prompt teaches the tag and its
+    text is delivered — and the model binding is untouched, since the output Command is no tool."""
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -1696,86 +1837,111 @@ def test_set_output_command_after_start_attaches_immediately_and_dispatches(
         spoke.set()
         return "spoken"
 
-    model = ProgrammableChatModel(
-        respond=sequence(
-            tool_call_response([("speak", {"text": "hello"}, "s1")]),
-            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
-        )
+    model = ProgrammableChatModel(respond=text_response("<speak>hello</speak>"))
+    agent = make_agent(
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
     agent.start()
-    assert "speak" not in agent.commands
-    assert "ordinary text" in agent.system_prompt
+    world.update("input", "before the voice")
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: not agent._busy)
+    assert private.texts == ["<speak>hello</speak>"]  # no output Command yet: private
+    assert "Nobody reads the text you write" in agent.system_prompt
 
     agent.set_output_command(speak)
-    assert "speak" in agent.commands
     assert agent.output_command_name == "speak"
+    assert list(agent.commands) == ["cancel_command"]
 
     world.update("input", "greet the user")
     assert spoke.wait(timeout=WAIT_TIMEOUT)
     assert spoken == ["hello"]
-    # The step's prompt (rendered after the set) names the output Command.
-    system = model.calls[0][0]
-    assert "speak" in system.text and "private reasoning" in system.text
+    assert private.texts == ["<speak>hello</speak>"]  # nothing private this time
+    # The step's prompt (rendered after the set) teaches the tag; the binding did not change.
+    assert "<speak>Hello there!</speak>" in model.calls[1][0].text
+    assert "<speak>Hello there!</speak>" not in model.calls[0][0].text
+    assert [b["tools"] for b in model.bindings] == [["cancel_command"]] * 2
     agent.stop()
 
 
-def test_replacing_the_output_command_detaches_the_previous_one(loop, world, sink):
-    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+def test_replacing_the_output_command_frees_the_previous_name(loop, world, private):
+    agent = _dummy_agent(loop, world, private, output_command=_named("say"))
     agent.start()
-    assert "say" in agent.commands
+    assert "<say>Hello there!</say>" in agent.system_prompt
 
     agent.set_output_command(_named("speak"))
-    assert "say" not in agent.commands
-    assert "speak" in agent.commands
     assert agent.output_command_name == "speak"
-    assert "speak" in agent.system_prompt and "calling say" not in agent.system_prompt
-    # The old name is free again; the new one is reserved.
+    assert "<speak>Hello there!</speak>" in agent.system_prompt
+    assert "<say>" not in agent.system_prompt
+    # The old name is free again; the new one is taken.
     agent.register_command(_named("say"))
     with pytest.raises(ValueError, match="output Command"):
         agent.register_command(_named("speak"))
     agent.stop()
 
 
-def test_setting_the_same_name_again_swaps_the_command_object(loop, world, sink):
-    first = _named("say")
-    second = _named("say")
-    agent = _dummy_agent(loop, world, sink, output_command=first)
+def test_setting_the_same_name_again_swaps_the_command_object(loop, world, private):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    first: list[str] = []
+    second: list[str] = []
+    model = ProgrammableChatModel(respond=text_response("<say>hello</say>"))
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        private_text=private,
+        output_command=_say_command(first),
+        coalesce_window=0,
+    )
     agent.start()
-    assert agent.commands["say"] is first
-    agent.set_output_command(second)
-    assert agent.commands["say"] is second
-    assert list(agent.commands).count("say") == 1
+    agent.set_output_command(_say_command(second))
+    world.update("input", "greet the user")
+    wait_until(lambda: second == ["hello"])
+    assert first == []
     agent.stop()
 
 
-def test_clearing_the_output_command_restores_free_text_mode(loop, world, sink):
-    agent = _dummy_agent(loop, world, sink, output_command=_named("say"))
+def test_clearing_the_output_command_makes_all_text_private_again(loop, world, private):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    spoken: list[str] = []
+    model = ProgrammableChatModel(respond=text_response("<say>hello</say>"))
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        private_text=private,
+        output_command=_say_command(spoken),
+        coalesce_window=0,
+    )
     agent.start()
-    assert "private reasoning" in agent.system_prompt
+    assert "<say>Hello there!</say>" in agent.system_prompt
 
     agent.set_output_command(None)
     assert agent.output_command_name is None
-    assert "say" not in agent.commands
-    assert "ordinary text" in agent.system_prompt
-    assert "private reasoning" not in agent.system_prompt
-    agent.register_command(_named("say"))  # no longer reserved
+    assert "<say>" not in agent.system_prompt
+    assert "<next>" not in agent.system_prompt
+    assert "Nobody reads the text you write" in agent.system_prompt
+
+    world.update("input", "greet the user")
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.texts == ["<say>hello</say>"]  # no tag is an output any more
+    assert spoken == []
+    assert not any(
+        e.key.startswith("agent:command:") for e in world.get_prompt_entries()
+    )
+    agent.register_command(_named("say"))  # no longer the output Command's name
     agent.stop()
 
 
-# --- Forcing a tool call (specs/agent.md, "Forcing a tool call") -------------------------
-
-
-def _speak_and_noop_model() -> ProgrammableChatModel:
-    return ProgrammableChatModel(
-        respond=sequence(
-            tool_call_response([("say", {"text": "hello"}, "s1")]),
-            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
-        )
-    )
+# --- The model binding: the output Command is not a tool, and no tool choice is forced ----
 
 
 def _say_command(spoken: list[str]) -> Command:
+    """An output Command `say` taking the whole text of each output."""
+
     async def say(text: str) -> str:
         """Say something to the user."""
         spoken.append(text)
@@ -1784,210 +1950,36 @@ def _say_command(spoken: list[str]) -> Command:
     return Command(say)
 
 
-def test_output_command_forces_a_tool_call_on_every_step(loop, world, sink):
-    """With an output Command bound, every model call is bound with a forced tool choice over the
-    full tool set — the speaking step and the follow-up step that ends with noop alike."""
+def test_the_output_command_is_not_bound_as_a_tool_and_no_tool_choice_is_forced(
+    loop, world, private
+):
+    """The model speaks in its text, so the binding holds only the Commands issued as tool calls
+    and carries no tool_choice (which several self-hosted servers ignore)."""
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     spoken: list[str] = []
-    model = _speak_and_noop_model()
+    model = ProgrammableChatModel(respond=text_response("<say>hello</say>"))
     agent = make_agent(
         model,
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         output_command=_say_command(spoken),
         coalesce_window=0,
     )
+    agent.register_command(_named("wave"))
     agent.start()
     world.update("input", "greet the user")
-    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    wait_until(lambda: spoken == ["hello"])
     agent.stop()
 
-    assert spoken == ["hello"]
-    assert len(model.bindings) == 2
-    for binding in model.bindings:
-        assert binding["tool_choice"] == "any"
-        assert set(binding["tools"]) == {"say", _NOOP_COMMAND_NAME, "cancel_command"}
+    [binding] = model.bindings
+    assert binding["tool_choice"] is None
+    assert set(binding["tools"]) == {"wave", "cancel_command"}
 
 
-def test_without_an_output_command_the_binding_is_not_forced(loop, world, sink):
-    """Free text is the reply: a text-only answer must stay possible, so force_tool_call is not
-    read."""
-    world.register(
-        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    model = ProgrammableChatModel(respond=text_response("hello"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
-    agent.start()
-    world.update("input", "greet the user")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    agent.stop()
-
-    assert sink.texts == ["hello"]
-    assert model.bindings[0]["tool_choice"] is None
-
-
-def test_force_tool_call_false_leaves_the_output_command_unforced(loop, world, sink):
-    world.register(
-        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    spoken: list[str] = []
-    model = _speak_and_noop_model()
-    agent = make_agent(
-        model,
-        world=world,
-        loop=loop,
-        output_sink=sink,
-        output_command=_say_command(spoken),
-        force_tool_call=False,
-        coalesce_window=0,
-    )
-    agent.start()
-    world.update("input", "greet the user")
-    wait_until(lambda: len(model.bindings) == 2)
-    agent.stop()
-
-    assert spoken == ["hello"]
-    assert [b["tool_choice"] for b in model.bindings] == [None, None]
-
-
-def test_forcing_follows_the_output_command_as_it_is_set_and_cleared(loop, world, sink):
-    """Forced exactly while the output Command is bound: not before it is set, from the moment it
-    is set on a running Agent, and no longer once it is cleared."""
-    world.register(
-        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    model = ProgrammableChatModel(respond=text_response("ok"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
-    # The scripted model answers in text even while forced; this test is about the binding, not
-    # about the guard that would reject that answer.
-    agent.remove_response_guard("output_command_required")
-    agent.start()
-
-    def step(n: int) -> None:
-        world.update("input", f"input {n}")
-        wait_until(lambda: len(model.bindings) == n)
-        wait_until(
-            lambda: len(sink.texts) == n
-        )  # the step has delivered its text and ended
-
-    step(1)
-    agent.set_output_command(_say_command([]))
-    step(2)
-    agent.set_output_command(None)
-    step(3)
-    agent.stop()
-
-    assert [b["tool_choice"] for b in model.bindings] == [None, "any", None]
-
-
-def test_huggingface_hub_is_forced_with_required_past_its_single_tool_check(
-    loop, world, sink
-):
-    """ChatHuggingFace.bind_tools refuses a tool_choice with more than one tool; the Agent binds it
-    directly, so the Hub client receives tool_choice="required" with every tool. Driven offline:
-    the real huggingface-hub model from build_chat_model, its async client replaced by one that
-    records the request."""
-    from langchain_huggingface import ChatHuggingFace
-
-    requests: list[dict[str, Any]] = []
-
-    async def stream() -> AsyncIterator[dict[str, Any]]:
-        # The Agent streams the call: a tool-call delta, then the usage chunk the Hub sends when
-        # asked to (stream_options.include_usage).
-        yield {
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "tool_calls",
-                    "delta": {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": "n1",
-                                "type": "function",
-                                "function": {
-                                    "name": _NOOP_COMMAND_NAME,
-                                    "arguments": "{}",
-                                },
-                            }
-                        ],
-                    },
-                }
-            ]
-        }
-        yield {
-            "choices": [],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        }
-
-    class RecordingClient:
-        async def chat_completion(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
-            requests.append(kwargs)
-            return stream()
-
-    model = build_chat_model(
-        AgentConfig(
-            provider="huggingface-hub",
-            model="openai/gpt-oss-120b",
-            hf_provider="cerebras",
-            api_key="hf_test",
-            system_prompt="You are terse.",
-        )
-    )
-    assert isinstance(model, ChatHuggingFace)
-    object.__setattr__(model.llm, "async_client", RecordingClient())
-    world.register(
-        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    agent = make_agent(
-        model,
-        world=world,
-        loop=loop,
-        output_sink=sink,
-        output_command=_say_command([]),
-    )
-    agent.start()
-    world.update("input", "greet the user")
-    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
-    agent.stop()
-
-    assert requests[0]["tool_choice"] == "required"
-    assert {tool["function"]["name"] for tool in requests[0]["tools"]} == {
-        "say",
-        _NOOP_COMMAND_NAME,
-        "cancel_command",
-    }
-
-
-def test_set_output_sink_after_start_takes_effect_next_step_and_none_silences(
-    loop, world
-):
-    world.register(
-        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    model = ProgrammableChatModel(respond=text_response("hi"))
-    agent = make_agent(model, world=world, loop=loop, coalesce_window=0)
-    agent.start()
-
-    late = RecordingSink()
-    agent.set_output_sink(late)
-    world.update("input", "one")
-    assert late.event.wait(timeout=WAIT_TIMEOUT)
-    assert late.texts == ["hi"]
-
-    agent.set_output_sink(None)
-    world.update("input", "two")
-    wait_until(lambda: len(model.calls) == 2)
-    assert late.texts == ["hi"]  # the second step's text went to the no-op sink
-    agent.stop()
-
-
-def test_command_finishing_after_the_world_stopped_does_not_raise(loop, world, sink):
+def test_command_finishing_after_the_world_stopped_does_not_raise(loop, world, private):
     # A Command can complete after the World paused (injected-loop shutdown, or a Command that
     # swallows its cancellation). Its terminal write then has nowhere to go: it must be dropped and
     # logged, not raised into the task — the cancel branch already tolerated this; the complete and
@@ -1998,7 +1990,7 @@ def test_command_finishing_after_the_world_stopped_does_not_raise(loop, world, s
     model = ProgrammableChatModel(
         respond=tool_call_response([("finish_late", {}, "late1")])
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     release = asyncio.Event()
 
     async def finish_late() -> str:
@@ -2025,7 +2017,7 @@ def test_command_finishing_after_the_world_stopped_does_not_raise(loop, world, s
     agent.stop()
 
 
-def test_unknown_command_name_fails_with_a_clear_error(loop, world, sink):
+def test_unknown_command_name_fails_with_a_clear_error(loop, world, private):
     # Without the unknown_command guard, a model naming a tool the Agent never bound fails the
     # entry with a readable error (not the bare KeyError repr "'ghost'"), delivered to the next step
     # like any Command failure.
@@ -2038,12 +2030,12 @@ def test_unknown_command_name_fails_with_a_clear_error(loop, world, sink):
             text_response("noted"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.remove_response_guard("unknown_command")
     agent.start()
 
     world.update("input", "summon")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     observation = "".join(
         str(m.content) for m in model.calls[1] if isinstance(m, HumanMessage)
@@ -2052,7 +2044,7 @@ def test_unknown_command_name_fails_with_a_clear_error(loop, world, sink):
     agent.stop()
 
 
-# --- Step failure handling: model-call and output-sink errors, well-formed history ---------
+# --- Step failure handling: model-call and output Command errors, well-formed history ------
 
 
 async def _explode(messages: list[BaseMessage]) -> AIMessage:
@@ -2066,49 +2058,58 @@ def _no_consecutive_human_messages(messages: list[BaseMessage]) -> bool:
     )
 
 
-def test_model_call_failure_is_logged_and_the_next_step_runs(loop, world, sink, caplog):
+def test_model_call_failure_is_logged_and_the_next_step_runs(
+    loop, world, private, caplog
+):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(
         respond=sequence(_explode, text_response("recovered"))
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
     with caplog.at_level(logging.ERROR, logger="wica.agent"):
         world.update("input", "first")
         wait_until(lambda: len(model.calls) == 1 and not agent._busy)
         world.update("input", "second")
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert any("model call failed" in r.message for r in errors)
     assert any(
         r.exc_info and isinstance(r.exc_info[1], ConnectionError) for r in errors
     )
-    assert sink.texts == ["recovered"]
+    assert private.texts == ["recovered"]
 
     agent.stop()
 
 
-def test_output_sink_failure_is_logged_and_commands_still_dispatch(loop, world, caplog):
+def test_a_failing_output_command_ends_as_a_failed_entry_and_commands_still_dispatch(
+    loop, world, private
+):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
 
-    async def bad_sink(text: str) -> None:
-        raise RuntimeError("sink broke")
+    async def say(text: str) -> str:
+        """Say something to the user."""
+        raise RuntimeError("voice broke")
 
-    # Step 1 speaks (into the raising sink) and issues wave; wave's completion re-triggers step 2,
-    # which ends the chain with noop.
+    # Step 1 speaks (into the raising output Command) and issues wave; wave's completion
+    # re-triggers step 2, which does nothing.
     model = ProgrammableChatModel(
         respond=sequence(
-            text_and_tool_response("doing it", [("wave", {}, "w1")]),
-            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+            text_and_tool_response("<say>doing it</say>", [("wave", {}, "w1")]),
+            text_response("<noop/>"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=bad_sink)
+    agent = make_agent(
+        model, world=world, loop=loop, output_command=say, coalesce_window=0
+    )
+    ended: list[CommandTrace] = []
+    agent.on_command_ended.subscribe(ended.append)
     waved = threading.Event()
 
     async def wave() -> str:
@@ -2119,36 +2120,35 @@ def test_output_sink_failure_is_logged_and_commands_still_dispatch(loop, world, 
     agent.register_command(wave)
     agent.start()
 
-    with caplog.at_level(logging.ERROR, logger="wica.agent"):
-        world.update("input", "hello")
-        assert waved.wait(timeout=WAIT_TIMEOUT)
-        wait_until(
-            lambda: len(model.calls) >= 2
-        )  # wave's completion re-triggers a step
+    world.update("input", "hello")
+    assert waved.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: len(model.calls) >= 2)  # wave's completion re-triggers a step
 
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert any("output sink raised" in r.message for r in errors)
-    assert any(r.exc_info and isinstance(r.exc_info[1], RuntimeError) for r in errors)
-    # The utterance is still in history: the next prompt carries it as assistant text.
-    assert any(
-        isinstance(m, AIMessage) and "doing it" in str(m.content)
-        for m in model.calls[1]
+    assert ("say", "failed") in [(t.name, t.state) for t in ended]
+    # The utterance is still in history as written, and the failure is observed like any
+    # Command's: as its World entry.
+    second = model.calls[1]
+    assert [m.text for m in second if isinstance(m, AIMessage)] == [
+        "<say>doing it</say>"
+    ]
+    assert "Called say(text='doing it') → failed: voice broke" in _rendered_user_text(
+        model, 1
     )
 
     agent.stop()
 
 
-def test_failed_step_observation_merges_into_the_next_prompt(loop, world, sink):
+def test_failed_step_observation_merges_into_the_next_prompt(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=sequence(_explode, text_response("ok")))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
     world.update("input", "first")
     wait_until(lambda: len(model.calls) == 1 and not agent._busy)
     world.update("input", "second")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     second = model.calls[1]
     assert _no_consecutive_human_messages(second)
@@ -2161,7 +2161,7 @@ def test_failed_step_observation_merges_into_the_next_prompt(loop, world, sink):
     agent.stop()
 
 
-def test_merged_observations_keep_their_own_freshness(loop, world, sink):
+def test_merged_observations_keep_their_own_freshness(loop, world, private):
     def fresh_serialize(value: Any, previous: Any) -> Content:
         return [TextPart(f"FRESH:{value}")]
 
@@ -2176,12 +2176,12 @@ def test_merged_observations_keep_their_own_freshness(loop, world, sink):
         triggers_llm_call=True,
     )
     model = ProgrammableChatModel(respond=sequence(_explode, text_response("ok")))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
     world.update("note", "one")
     wait_until(lambda: len(model.calls) == 1 and not agent._busy)
     world.update("note", "two")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     humans = [m for m in model.calls[1] if isinstance(m, HumanMessage)]
     assert len(humans) == 1
@@ -2191,19 +2191,19 @@ def test_merged_observations_keep_their_own_freshness(loop, world, sink):
     agent.stop()
 
 
-def test_empty_model_response_does_not_split_the_next_prompt(loop, world, sink):
+def test_empty_model_response_does_not_split_the_next_prompt(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(
         respond=sequence(text_response(""), text_response("ok"))
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
     world.update("input", "first")
     wait_until(lambda: len(model.calls) == 1 and not agent._busy)
     world.update("input", "second")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     assert _no_consecutive_human_messages(model.calls[1])
     assert len([m for m in model.calls[1] if isinstance(m, HumanMessage)]) == 1
@@ -2211,7 +2211,7 @@ def test_empty_model_response_does_not_split_the_next_prompt(loop, world, sink):
     agent.stop()
 
 
-def test_commands_mapping_lists_the_bound_set_read_only(loop, world, sink):
+def test_commands_mapping_lists_the_bound_set_read_only(loop, world, private):
     async def speak(text: str) -> str:
         """Speak."""
         return "ok"
@@ -2224,14 +2224,16 @@ def test_commands_mapping_lists_the_bound_set_read_only(loop, world, sink):
         ProgrammableChatModel(respond=text_response("x")),
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         output_command=speak,
     )
     agent.register_command(add)
     assert agent.output_command_name == "speak"
     assert list(agent.commands) == ["add"]  # builtins attach at start()
     agent.start()
-    assert set(agent.commands) == {"add", "speak", "noop", "cancel_command"}
+    # The output Command is not a tool: it is named apart, never listed among the Commands.
+    assert set(agent.commands) == {"add", "cancel_command"}
+    assert agent.output_command_name == "speak"
     assert agent.commands["add"].tool.description == "Add."
     with pytest.raises(TypeError):
         agent.commands["ghost"] = agent.commands["add"]  # type: ignore[index]
@@ -2239,7 +2241,7 @@ def test_commands_mapping_lists_the_bound_set_read_only(loop, world, sink):
 
 
 def test_on_command_fires_once_the_execution_entry_exists_and_carries_its_call_id(
-    loop, world, sink
+    loop, world, private
 ):
     """A subscriber can follow a Command it did not know the id of: it attaches a listener on
     agent:command:<call_id> from inside the on_command handler and sees running -> complete."""
@@ -2252,7 +2254,7 @@ def test_on_command_fires_once_the_execution_entry_exists_and_carries_its_call_i
             text_response("done"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     registered_at_emit: list[bool] = []
     states: list[str] = []
     terminal = threading.Event()
@@ -2287,7 +2289,7 @@ def test_on_command_fires_once_the_execution_entry_exists_and_carries_its_call_i
 
 
 def test_command_with_triggers_on_completion_false_does_not_retrigger(
-    loop, world, sink
+    loop, world, private
 ):
     """The completion wakes no step, but its outcome is not lost: the next input-driven step
     observes the terminal entry (rendered into its prompt) and retires it."""
@@ -2300,7 +2302,7 @@ def test_command_with_triggers_on_completion_false_does_not_retrigger(
             text_response("second step"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     terminal = threading.Event()
 
     async def on_update(entry) -> None:
@@ -2323,7 +2325,7 @@ def test_command_with_triggers_on_completion_false_does_not_retrigger(
     assert len(model.calls) == 1
 
     world.update("input", "anything else?")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     assert len(model.calls) == 2
     humans = [m for m in model.calls[1] if isinstance(m, HumanMessage)]
     assert any("Called ping() → pong" in str(m.content) for m in humans)
@@ -2333,106 +2335,111 @@ def test_command_with_triggers_on_completion_false_does_not_retrigger(
     agent.stop()
 
 
-@pytest.mark.parametrize("explicit_false", [False, True])
-def test_output_command_retrigger_follows_its_own_flag_or_the_default(
-    loop, world, sink, explicit_false
+@pytest.mark.parametrize("triggers_on_completion", [True, False])
+def test_the_end_of_an_output_wakes_no_step_whatever_its_completion_flag(
+    loop, world, private, triggers_on_completion
 ):
+    """An output's wake is the model's <next> note, never the Command's triggers_on_completion."""
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
-    spoke = threading.Event()
 
     async def speak(text: str) -> str:
         """Say something to the user."""
-        spoke.set()
         return "spoken"
 
-    model = ProgrammableChatModel(
-        respond=sequence(
-            tool_call_response([("speak", {"text": "hello"}, "s1")]),
-            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
-        )
+    model = ProgrammableChatModel(respond=text_response("<speak>hello</speak>"))
+    agent = make_agent(
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
-    if explicit_false:
-        agent.set_output_command(Command(speak, triggers_on_completion=False))
-    else:
-        agent.set_output_command(speak)  # bare callable: the module default (True)
+    agent.set_output_command(
+        Command(speak, triggers_on_completion=triggers_on_completion)
+    )
+    ended: list[CommandTrace] = []
+    agent.on_command_ended.subscribe(ended.append)
     agent.start()
     world.update("input", "greet")
-    assert spoke.wait(timeout=WAIT_TIMEOUT)
-    if explicit_false:
-        time.sleep(0.2)
-        assert len(model.calls) == 1  # speak -> idle
-    else:
-        wait_until(lambda: len(model.calls) == 2)  # speak re-triggered, ended by noop
+    wait_until(lambda: [t.state for t in ended] == ["complete"])
+    time.sleep(0.2)  # give any (erroneous) wake a chance to fire
+    assert len(model.calls) == 1
+    assert agent.output_wakes("c1") is False
     agent.stop()
 
 
-def test_on_text_fires_with_the_step_text_before_the_sink(loop, world):
+def test_output_wakes_tells_which_calls_are_followed_by_a_step(loop, world, private):
+    """What a harness waiting for the Agent to settle reads: None for a tool-call Command, True
+    for an output whose response carried a note, False for one that did not."""
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
-    seen: list[str] = []
-    delivered = threading.Event()
-
-    async def ordered_sink(text: str) -> None:
-        seen.append(f"sink:{text}")
-        delivered.set()
-
+    spoken: list[str] = []
     model = ProgrammableChatModel(
-        respond=sequence(text_response("hello"), text_response(""))
+        respond=sequence(
+            tool_call_response([("wave", {}, "w1")]),
+            text_response("<say>One moment.</say><next>then report</next>"),
+            text_response("<say>Done.</say>"),
+        )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=ordered_sink)
-    agent.on_text.subscribe(lambda text: seen.append(f"event:{text}"))
-    agent.start()
-    world.update("input", "hi")
-    assert delivered.wait(timeout=WAIT_TIMEOUT)
-    assert seen == ["event:hello", "sink:hello"]
-    # An empty response emits nothing.
-    world.update("input", "again")
-    wait_until(lambda: len(model.calls) == 2 and not agent._busy)
-    assert seen == ["event:hello", "sink:hello"]
-    agent.stop()
-
-
-def test_on_text_fires_even_when_the_sink_raises(loop, world, caplog):
-    world.register(
-        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    texts: list[str] = []
-    got = threading.Event()
-
-    async def bad_sink(text: str) -> None:
-        raise RuntimeError("sink broke")
-
     agent = make_agent(
-        ProgrammableChatModel(respond=text_response("still observed")),
+        model,
         world=world,
         loop=loop,
-        output_sink=bad_sink,
+        private_text=private,
+        output_command=_say_command(spoken),
+        coalesce_window=0,
     )
-
-    def record(text: str) -> None:
-        texts.append(text)
-        got.set()
-
-    agent.on_text.subscribe(record)
+    agent.register_command(_named("wave"))
     agent.start()
-    with caplog.at_level(logging.ERROR, logger="wica.agent"):
-        world.update("input", "hi")
-        assert got.wait(timeout=WAIT_TIMEOUT)
-        wait_until(
-            lambda: any("output sink raised" in r.message for r in caplog.records)
+    world.update("input", "wave, then tell me")
+    wait_until(lambda: spoken == ["One moment.", "Done."])
+    wait_until(lambda: not agent._busy)
+
+    assert agent.output_wakes("c1") is None  # wave: a Command, not an output
+    assert agent.output_wakes("c2") is True
+    assert agent.output_wakes("c3") is False
+    assert agent.output_wakes("c9") is None
+    time.sleep(0.2)
+    assert len(model.calls) == 3  # the last output carried no note
+    agent.stop()
+
+
+def test_on_private_text_carries_only_the_text_outside_the_output_tags(loop, world):
+    world.register(
+        "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+    spoken: list[str] = []
+    texts: list[str] = []
+    traces: list[ReactionTrace] = []
+    model = ProgrammableChatModel(
+        respond=sequence(
+            text_response("an aside <say>hello</say>"),
+            text_response(""),
+            text_response("<say>only speech</say>"),
         )
-    assert texts == ["still observed"]
+    )
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        output_command=_say_command(spoken),
+        coalesce_window=0,
+    )
+    agent.on_private_text.subscribe(texts.append)
+    agent.on_reaction_ended.subscribe(traces.append)
+    agent.start()
+    for count, value in enumerate(["hi", "again", "once more"], start=1):
+        world.update("input", value)
+        wait_until(lambda: len(traces) == count)
+    wait_until(lambda: spoken == ["hello", "only speech"])
+    # An empty response and one that is all speech emit nothing.
+    assert texts == ["an aside"]
     agent.stop()
 
 
 # --- Instrumentation: ReactionTrace, on_trigger_dropped, on_command_ended, spans ---------------
 
 
-def test_reaction_ended_carries_the_phase_stamps_and_usage(loop, world, sink):
+def test_reaction_ended_carries_the_phase_stamps_and_usage(loop, world, private):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2444,7 +2451,7 @@ def test_reaction_ended_carries_the_phase_stamps_and_usage(loop, world, sink):
         )
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     traces: list[ReactionTrace] = []
     done = threading.Event()
     agent.on_reaction_ended.subscribe(_recorder(traces, done))
@@ -2478,19 +2485,19 @@ def test_reaction_ended_carries_the_phase_stamps_and_usage(loop, world, sink):
         <= trace.model_ended_at
         <= trace.ended_at
     )
-    assert trace.sink_duration is not None and trace.sink_duration >= 0
+    assert trace.first_output_at is None  # no output Command: nothing was delivered
     assert trace.trace_id is not None
     assert re.fullmatch(r"[0-9a-f]{32}", trace.trace_id)
 
     agent.stop()
 
 
-def test_reaction_ended_reports_an_empty_response(loop, world, sink):
+def test_reaction_ended_reports_an_empty_response(loop, world, private):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response(""))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     traces: list[ReactionTrace] = []
     done = threading.Event()
     agent.on_reaction_ended.subscribe(_recorder(traces, done))
@@ -2500,12 +2507,13 @@ def test_reaction_ended_reports_an_empty_response(loop, world, sink):
     assert done.wait(timeout=WAIT_TIMEOUT)
 
     assert traces[0].outcome == "empty"
-    assert traces[0].sink_duration is None
+    assert traces[0].noop is True  # no text and no tool call counts as doing nothing
+    assert traces[0].text_length == 0
 
     agent.stop()
 
 
-def test_reaction_ended_reports_a_model_error(loop, world, sink):
+def test_reaction_ended_reports_a_model_error(loop, world, private):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2514,7 +2522,7 @@ def test_reaction_ended_reports_a_model_error(loop, world, sink):
         raise RuntimeError("boom")
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     traces: list[ReactionTrace] = []
     done = threading.Event()
     agent.on_reaction_ended.subscribe(_recorder(traces, done))
@@ -2534,7 +2542,9 @@ def test_reaction_ended_reports_a_model_error(loop, world, sink):
     agent.stop()
 
 
-def test_model_call_past_its_deadline_ends_the_step_as_model_timeout(loop, world, sink):
+def test_model_call_past_its_deadline_ends_the_step_as_model_timeout(
+    loop, world, private
+):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2552,7 +2562,7 @@ def test_model_call_past_its_deadline_ends_the_step_as_model_timeout(loop, world
 
     model = ProgrammableChatModel(respond=respond)
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, model_timeout=0.05
+        model, world=world, loop=loop, private_text=private, model_timeout=0.05
     )
     traces: list[ReactionTrace] = []
     done = threading.Event()
@@ -2564,21 +2574,21 @@ def test_model_call_past_its_deadline_ends_the_step_as_model_timeout(loop, world
     assert traces[0].outcome == "model_timeout"
     assert traces[0].error == "model call exceeded its 0.05 s deadline"
     assert traces[0].model_ended_at is not None
-    assert sink.texts == []
+    assert private.texts == []
 
     # The Agent is free again; the timed-out observation merges into the next prompt.
     done.clear()
     world.update("prompt", "second")
     assert done.wait(timeout=WAIT_TIMEOUT)
     assert traces[1].outcome == "ok"
-    assert sink.texts == ["back"]
+    assert private.texts == ["back"]
     user_text = _rendered_user_text(model, 1)
     assert "first" in user_text and "second" in user_text
 
     agent.stop()
 
 
-def test_a_providers_own_timeout_error_is_a_model_error(loop, world, sink):
+def test_a_providers_own_timeout_error_is_a_model_error(loop, world, private):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2587,7 +2597,7 @@ def test_a_providers_own_timeout_error_is_a_model_error(loop, world, sink):
         raise TimeoutError("read timed out")
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     traces: list[ReactionTrace] = []
     done = threading.Event()
     agent.on_reaction_ended.subscribe(_recorder(traces, done))
@@ -2602,7 +2612,7 @@ def test_a_providers_own_timeout_error_is_a_model_error(loop, world, sink):
 
 
 @pytest.mark.parametrize("model_timeout", [None, 5.0])
-def test_a_call_within_its_deadline_completes(loop, world, sink, model_timeout):
+def test_a_call_within_its_deadline_completes(loop, world, private, model_timeout):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2613,7 +2623,7 @@ def test_a_call_within_its_deadline_completes(loop, world, sink, model_timeout):
 
     model = ProgrammableChatModel(respond=respond)
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, model_timeout=model_timeout
+        model, world=world, loop=loop, private_text=private, model_timeout=model_timeout
     )
     traces: list[ReactionTrace] = []
     done = threading.Event()
@@ -2623,12 +2633,12 @@ def test_a_call_within_its_deadline_completes(loop, world, sink, model_timeout):
     world.update("prompt", "x")
     assert done.wait(timeout=WAIT_TIMEOUT)
     assert traces[0].outcome == "ok"
-    assert sink.texts == ["slow but fine"]
+    assert private.texts == ["slow but fine"]
 
     agent.stop()
 
 
-def test_reaction_ended_reports_cancellation_on_stop(loop, world, sink):
+def test_reaction_ended_reports_cancellation_on_stop(loop, world, private):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2640,7 +2650,7 @@ def test_reaction_ended_reports_cancellation_on_stop(loop, world, sink):
         return AIMessage(content="never")
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.on_prompt.subscribe(lambda m: prompt_fired.set())
     traces: list[ReactionTrace] = []
     done = threading.Event()
@@ -2656,7 +2666,7 @@ def test_reaction_ended_reports_cancellation_on_stop(loop, world, sink):
     assert traces[0].model_ended_at is None
 
 
-def test_dropped_trigger_fires_on_trigger_dropped(loop, world, sink):
+def test_dropped_trigger_fires_on_trigger_dropped(loop, world, private):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2669,7 +2679,7 @@ def test_dropped_trigger_fires_on_trigger_dropped(loop, world, sink):
         return AIMessage(content="done")
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     dropped: list[WorldEntry] = []
     got_drop = threading.Event()
     agent.on_trigger_dropped.subscribe(_recorder(dropped, got_drop))
@@ -2683,16 +2693,16 @@ def test_dropped_trigger_fires_on_trigger_dropped(loop, world, sink):
     assert dropped[0].current.value == "second"
 
     loop.call_soon_threadsafe(block.set)
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     agent.stop()
 
 
-def test_coalesced_reaction_lists_every_trigger(loop, world, sink):
+def test_coalesced_reaction_lists_every_trigger(loop, world, private):
     world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(
-        model, world=world, loop=loop, coalesce_window=0.2, output_sink=sink
+        model, world=world, loop=loop, coalesce_window=0.2, private_text=private
     )
     traces: list[ReactionTrace] = []
     done = threading.Event()
@@ -2709,7 +2719,7 @@ def test_coalesced_reaction_lists_every_trigger(loop, world, sink):
     agent.stop()
 
 
-def test_command_ended_carries_reaction_id_and_duration(loop, world, sink):
+def test_command_ended_carries_reaction_id_and_duration(loop, world, private):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2719,7 +2729,7 @@ def test_command_ended_carries_reaction_id_and_duration(loop, world, sink):
             text_response("done"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -2759,7 +2769,7 @@ def test_command_ended_carries_reaction_id_and_duration(loop, world, sink):
     agent.stop()
 
 
-def test_span_tree_follows_the_reaction(loop, world, sink, spans):
+def test_span_tree_follows_the_reaction(loop, world, private, spans):
     world.register(
         "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -2769,7 +2779,7 @@ def test_span_tree_follows_the_reaction(loop, world, sink, spans):
             text_response("done"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -2829,7 +2839,7 @@ def test_span_tree_follows_the_reaction(loop, world, sink, spans):
 
 
 def test_spans_opened_inside_a_command_nest_under_the_command_span(
-    loop, world, sink, spans
+    loop, world, private, spans
 ):
     from opentelemetry import trace as otel_trace_module
 
@@ -2842,7 +2852,7 @@ def test_spans_opened_inside_a_command_nest_under_the_command_span(
             text_response("done"),
         )
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     async def add(a: int, b: int) -> int:
         """Add two numbers."""
@@ -2856,7 +2866,7 @@ def test_spans_opened_inside_a_command_nest_under_the_command_span(
     agent.start()
 
     world.update("prompt", "add them")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     agent.stop()
 
     finished = spans.get_finished_spans()
@@ -2866,18 +2876,70 @@ def test_spans_opened_inside_a_command_nest_under_the_command_span(
     assert tts_span.parent.span_id == command_span.context.span_id
 
 
-def test_coalesced_reaction_links_the_other_triggers(loop, world, sink, spans):
+def test_an_output_span_is_a_command_span_under_the_reaction(
+    loop, world, private, spans
+):
+    """An output is traced like a Command: its span opens during the model call as a child of
+    the reaction (a sibling of the model span), what the output Command opens nests under it,
+    and the model span marks the first output. There is no sink span."""
+    from opentelemetry import trace as otel_trace_module
+
+    world.register(
+        "prompt", str, serialize_fn=identity_serialize, triggers_llm_call=True
+    )
+
+    async def say(text: str) -> str:
+        """Speak out loud."""
+        with otel_trace_module.get_tracer("app").start_as_current_span(
+            "tts.synthesize"
+        ):
+            pass
+        return "said"
+
+    model = ProgrammableChatModel(respond=text_response("<say>hello</say>"))
+    agent = make_agent(
+        model,
+        world=world,
+        loop=loop,
+        private_text=private,
+        output_command=say,
+        coalesce_window=0,
+    )
+    ended: list[CommandTrace] = []
+    agent.on_command_ended.subscribe(ended.append)
+    agent.start()
+    world.update("prompt", "greet")
+    wait_until(lambda: [t.state for t in ended] == ["complete"])
+    agent.stop()
+
+    finished = spans.get_finished_spans()
+    assert "wica.agent.sink" not in {s.name for s in finished}
+    (reaction_span,) = [s for s in finished if s.name == "wica.agent.reaction"]
+    (model_span,) = [s for s in finished if s.name == "wica.agent.model"]
+    (command_span,) = [s for s in finished if s.name == "wica.agent.command"]
+    (tts_span,) = [s for s in finished if s.name == "tts.synthesize"]
+    assert model_span.parent is not None and command_span.parent is not None
+    assert model_span.parent.span_id == reaction_span.context.span_id
+    assert command_span.parent.span_id == reaction_span.context.span_id
+    assert command_span.attributes["wica.command.name"] == "say"
+    assert command_span.attributes["wica.command.state"] == "complete"
+    assert tts_span.parent is not None
+    assert tts_span.parent.span_id == command_span.context.span_id
+    assert "wica.first_output" in [event.name for event in model_span.events]
+
+
+def test_coalesced_reaction_links_the_other_triggers(loop, world, private, spans):
     world.register("a", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     world.register("b", str, serialize_fn=identity_serialize, triggers_llm_call=True)
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(
-        model, world=world, loop=loop, coalesce_window=0.2, output_sink=sink
+        model, world=world, loop=loop, coalesce_window=0.2, private_text=private
     )
     agent.start()
 
     world.update("a", "1")
     world.update("b", "2")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     agent.stop()
 
     finished = spans.get_finished_spans()
@@ -2902,11 +2964,11 @@ def _hide_when_none(value: Any, previous: Any) -> Content:
 
 
 def test_observation_leaves_out_entries_whose_serializer_returns_empty(
-    loop, world, sink
+    loop, world, private
 ):
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
     world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -2930,11 +2992,11 @@ def test_observation_leaves_out_entries_whose_serializer_returns_empty(
 
 
 def test_all_omitted_observation_renders_as_a_placeholder_user_message(
-    loop, world, sink
+    loop, world, private
 ):
     model = ProgrammableChatModel(respond=text_response("ok"))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0
+        model, world=world, loop=loop, private_text=private, coalesce_window=0
     )
     world.register("silent", str, serialize_fn=lambda v, p: [], triggers_llm_call=True)
     agent.start()
@@ -2954,13 +3016,13 @@ def test_all_omitted_observation_renders_as_a_placeholder_user_message(
     agent.stop()
 
 
-def test_merged_all_omitted_observations_share_one_placeholder(loop, world, sink):
+def test_merged_all_omitted_observations_share_one_placeholder(loop, world, private):
     world.register("silent", str, serialize_fn=lambda v, p: [], triggers_llm_call=True)
     world.register("mood", str, serialize_fn=_hide_when_none)
     model = ProgrammableChatModel(
         respond=sequence(text_response(""), text_response(""), text_response("ok"))
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
     world.update("silent", "a")
@@ -2974,7 +3036,7 @@ def test_merged_all_omitted_observations_share_one_placeholder(loop, world, sink
     world.update(
         "silent", "c"
     )  # real blocks replace the placeholder in the merged message
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     humans = [m for m in model.calls[2] if isinstance(m, HumanMessage)]
     assert len(humans) == 1
     assert isinstance(humans[0].content, list)
@@ -2987,13 +3049,13 @@ def test_merged_all_omitted_observations_share_one_placeholder(loop, world, sink
 
 
 def _run_text_steps(
-    agent: Agent, world: World, sink: RecordingSink, inputs: list[str]
+    agent: Agent, world: World, private: RecordingText, inputs: list[str]
 ) -> None:
     """Drive one text-only step per input, waiting for each reply before the next update."""
     for value in inputs:
-        sink.event.clear()
+        private.event.clear()
         world.update("input", value)
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert private.event.wait(timeout=WAIT_TIMEOUT)
         wait_until(lambda: agent._busy is False)
 
 
@@ -3013,7 +3075,7 @@ def _assert_tool_stream_valid(messages: list[BaseMessage]) -> None:
 
 
 def test_history_window_grows_to_twice_the_limit_then_cuts_back_to_it(
-    loop, world, sink
+    loop, world, private
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3021,12 +3083,12 @@ def test_history_window_grows_to_twice_the_limit_then_cuts_back_to_it(
     model = ProgrammableChatModel(respond=text_response("ok"))
     prompts: list[list[BaseMessage]] = []
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, history_reactions=2
+        model, world=world, loop=loop, private_text=private, history_reactions=2
     )
     agent.on_prompt.subscribe(prompts.append)
     agent.start()
 
-    _run_text_steps(agent, world, sink, ["one", "two", "three", "four"])
+    _run_text_steps(agent, world, private, ["one", "two", "three", "four"])
 
     def observations(messages: list[BaseMessage]) -> list[str]:
         return [human_texts(m) for m in messages if isinstance(m, HumanMessage)]
@@ -3050,21 +3112,21 @@ def test_history_window_grows_to_twice_the_limit_then_cuts_back_to_it(
     agent.stop()
 
 
-def test_history_window_counts_failed_and_noop_steps_as_reactions(loop, world, sink):
+def test_history_window_counts_failed_and_noop_steps_as_reactions(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(
         respond=sequence(
             _explode,
-            tool_call_response([(_NOOP_COMMAND_NAME, {}, "n1")]),
+            text_response("<noop/>"),
             text_response("three"),
             text_response("four"),
         )
     )
     prompts: list[list[BaseMessage]] = []
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, history_reactions=2
+        model, world=world, loop=loop, private_text=private, history_reactions=2
     )
     agent.on_prompt.subscribe(prompts.append)
     agent.start()
@@ -3073,7 +3135,7 @@ def test_history_window_counts_failed_and_noop_steps_as_reactions(loop, world, s
     wait_until(lambda: len(model.calls) == 1 and not agent._busy)
     world.update("input", "two")  # noop: a reaction all the same
     wait_until(lambda: len(model.calls) == 2 and not agent._busy)
-    _run_text_steps(agent, world, sink, ["three", "four"])
+    _run_text_steps(agent, world, private, ["three", "four"])
 
     # Four reactions (error, noop, text, text) reach 2X = 4 → only steps 3 and 4 remain, so the
     # failed step's observation (which would have merged into step 2's) and the noop are gone.
@@ -3081,14 +3143,14 @@ def test_history_window_counts_failed_and_noop_steps_as_reactions(loop, world, s
     humans = [human_texts(m) for m in step4 if isinstance(m, HumanMessage)]
     assert len(humans) == 2
     assert "three" in humans[0] and "one" not in humans[0] and "two" not in humans[0]
-    assert not any(isinstance(m, ToolMessage) for m in step4)
-    assert not any(isinstance(r, NoReactionRecord) for r in agent._history)
+    assert AssistantTextRecord("<noop/>") not in agent._history
+    assert [m.text for m in step4 if isinstance(m, AIMessage)] == ["three"]
 
     agent.stop()
 
 
 def test_history_window_cut_keeps_a_steps_tool_calls_with_their_results(
-    loop, world, sink
+    loop, world, private
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3108,19 +3170,19 @@ def test_history_window_cut_keeps_a_steps_tool_calls_with_their_results(
     )
     prompts: list[list[BaseMessage]] = []
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, history_reactions=2
+        model, world=world, loop=loop, private_text=private, history_reactions=2
     )
     agent.on_prompt.subscribe(prompts.append)
     agent.register_command(add)
     agent.start()
 
     world.update("input", "add 1 and 1")  # step 1 dispatches call1; completion → step 2
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     wait_until(lambda: agent._busy is False)
-    sink.event.clear()
+    private.event.clear()
     world.update("input", "add 2 and 2")  # step 3 dispatches call3; completion → step 4
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    assert sink.texts == ["two", "four"]
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.texts == ["two", "four"]
     assert len(prompts) == 4
 
     for messages in prompts:
@@ -3138,7 +3200,7 @@ def test_history_window_cut_keeps_a_steps_tool_calls_with_their_results(
     agent.stop()
 
 
-def test_command_outcome_still_renders_after_its_dispatch_was_cut(loop, world, sink):
+def test_command_outcome_still_renders_after_its_dispatch_was_cut(loop, world, private):
     # With X = 1 every second step cuts the previous one, so a slow Command's dispatch is gone
     # before its outcome is observed: the entry must still render (as an orphan), and the stream
     # must stay valid without the tool_call it answers.
@@ -3161,7 +3223,7 @@ def test_command_outcome_still_renders_after_its_dispatch_was_cut(loop, world, s
     )
     prompts: list[list[BaseMessage]] = []
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, history_reactions=1
+        model, world=world, loop=loop, private_text=private, history_reactions=1
     )
     agent.on_prompt.subscribe(prompts.append)
     agent.register_command(dance)
@@ -3174,11 +3236,11 @@ def test_command_outcome_still_renders_after_its_dispatch_was_cut(loop, world, s
     world.update(
         "input", "how is it going?"
     )  # step 2 cuts step 1 while dance still runs
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    sink.event.clear()
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    private.event.clear()
     loop.call_soon_threadsafe(block.set)  # completion → step 3 cuts step 2
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    assert sink.texts == ["still going", "finished"]
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.texts == ["still going", "finished"]
 
     step2, step3 = prompts[1], prompts[2]
     for messages in (step2, step3):
@@ -3191,15 +3253,15 @@ def test_command_outcome_still_renders_after_its_dispatch_was_cut(loop, world, s
     agent.stop()
 
 
-def test_unbounded_history_keeps_every_reaction_by_default(loop, world, sink):
+def test_unbounded_history_keeps_every_reaction_by_default(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response("ok"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.start()
 
-    _run_text_steps(agent, world, sink, ["one", "two", "three", "four", "five"])
+    _run_text_steps(agent, world, private, ["one", "two", "three", "four", "five"])
 
     humans = [m for m in model.calls[4] if isinstance(m, HumanMessage)]
     assert len(humans) == 5
@@ -3211,11 +3273,11 @@ def test_unbounded_history_keeps_every_reaction_by_default(loop, world, sink):
 
 
 def test_history_window_clause_sits_between_perception_and_output_clauses(
-    loop, world, sink
+    loop, world, private
 ):
     model = ProgrammableChatModel(respond=text_response("hi"))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, history_reactions=3
+        model, world=world, loop=loop, private_text=private, history_reactions=3
     )
 
     prompt = agent.system_prompt
@@ -3223,8 +3285,8 @@ def test_history_window_clause_sits_between_perception_and_output_clauses(
     assert (
         prompt.index("run concurrently")
         < prompt.index("most recent reactions")
-        < prompt.index("write your answer as ordinary text")
-        < prompt.index(f"never use {_NOOP_COMMAND_NAME}")
+        < prompt.index("Nobody reads the text you write")
+        < prompt.index("never use <noop/>")
     )
 
     async def say(text: str) -> None:
@@ -3233,7 +3295,9 @@ def test_history_window_clause_sits_between_perception_and_output_clauses(
     agent.set_output_command(say)  # recomposition keeps the clause, in the same place
     prompt = agent.system_prompt
     assert prompt.index("run concurrently") < prompt.index("most recent reactions")
-    assert prompt.index("most recent reactions") < prompt.index("private reasoning")
+    assert prompt.index("most recent reactions") < prompt.index(
+        "<say>Hello there!</say>"
+    )
 
 
 # --- History budget (specs/agent.md, "History budget") -----------------------------------
@@ -3267,7 +3331,7 @@ def _observation_texts(messages: list[BaseMessage]) -> list[str]:
 
 
 def test_history_budget_cuts_to_the_low_water_mark_from_reported_usage(
-    loop, world, sink
+    loop, world, private
 ):
     # window 1000 × budget 0.5 → high 500, low 250. The first report (100) is the fixed part +
     # one reaction; six reactions reporting 600 → (600 - 100) / 5 = 100 each → keep
@@ -3283,14 +3347,14 @@ def test_history_budget_cuts_to_the_low_water_mark_from_reported_usage(
         model,
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         history_budget=0.5,
         context_window=1000,
     )
     agent.on_prompt.subscribe(prompts.append)
     agent.start()
 
-    _run_text_steps(agent, world, sink, ["r1", "r2", "r3", "r4", "r5", "r6", "r7"])
+    _run_text_steps(agent, world, private, ["r1", "r2", "r3", "r4", "r5", "r6", "r7"])
 
     # Under the mark (calls 1-5) nothing is cut: prompt 6 still holds all six reactions.
     assert len(_observation_texts(prompts[5])) == 6
@@ -3305,7 +3369,9 @@ def test_history_budget_cuts_to_the_low_water_mark_from_reported_usage(
     agent.stop()
 
 
-def test_history_budget_charges_the_fixed_part_once_not_per_reaction(loop, world, sink):
+def test_history_budget_charges_the_fixed_part_once_not_per_reaction(
+    loop, world, private
+):
     # A prompt dominated by its fixed part: window 100k × 0.5 → high 50k, low 25k; the first
     # report is 10k fixed + 1k → 11k, then +1k per reaction up to 51k at 41 reactions. A plain
     # average (51k / 41 ≈ 1.24k) would keep 20; charging the fixed part once keeps
@@ -3320,14 +3386,14 @@ def test_history_budget_charges_the_fixed_part_once_not_per_reaction(loop, world
         model,
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         history_budget=0.5,
         context_window=100_000,
     )
     agent.on_prompt.subscribe(prompts.append)
     agent.start()
 
-    _run_text_steps(agent, world, sink, [f"r{n}" for n in range(1, 43)])
+    _run_text_steps(agent, world, private, [f"r{n}" for n in range(1, 43)])
 
     assert (
         len(_observation_texts(prompts[40])) == 41
@@ -3340,7 +3406,7 @@ def test_history_budget_charges_the_fixed_part_once_not_per_reaction(loop, world
 
 
 def test_history_budget_warns_when_the_fixed_part_leaves_no_room(
-    loop, world, sink, caplog
+    loop, world, private, caplog
 ):
     # Fixed part ~400 (first report) against a low mark of 250: nothing fits; keep one, warn.
     world.register(
@@ -3351,14 +3417,14 @@ def test_history_budget_warns_when_the_fixed_part_leaves_no_room(
         model,
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         history_budget=0.5,
         context_window=1000,
     )
     agent.start()
 
     with caplog.at_level(logging.WARNING, logger="wica.agent"):
-        _run_text_steps(agent, world, sink, ["r1", "r2", "r3"])
+        _run_text_steps(agent, world, private, ["r1", "r2", "r3"])
 
     assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 1
     assert any("leaves no room" in r.message for r in caplog.records)
@@ -3366,7 +3432,7 @@ def test_history_budget_warns_when_the_fixed_part_leaves_no_room(
     agent.stop()
 
 
-def test_history_budget_ignores_calls_without_usage(loop, world, sink):
+def test_history_budget_ignores_calls_without_usage(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -3375,13 +3441,13 @@ def test_history_budget_ignores_calls_without_usage(loop, world, sink):
         model,
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         history_budget=0.1,
         context_window=10,
     )
     agent.start()
 
-    _run_text_steps(agent, world, sink, ["r1", "r2", "r3", "r4"])
+    _run_text_steps(agent, world, private, ["r1", "r2", "r3", "r4"])
 
     assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 4
 
@@ -3389,7 +3455,7 @@ def test_history_budget_ignores_calls_without_usage(loop, world, sink):
 
 
 def test_history_budget_cannot_cut_a_single_reaction_and_warns(
-    loop, world, sink, caplog
+    loop, world, private, caplog
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3399,14 +3465,14 @@ def test_history_budget_cannot_cut_a_single_reaction_and_warns(
         model,
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         history_budget=0.5,
         context_window=1000,
     )
     agent.start()
 
     with caplog.at_level(logging.WARNING, logger="wica.agent"):
-        _run_text_steps(agent, world, sink, ["r1"])
+        _run_text_steps(agent, world, private, ["r1"])
 
     assert sum(isinstance(r, ObservationRecord) for r in agent._history) == 1
     assert any(
@@ -3417,7 +3483,7 @@ def test_history_budget_cannot_cut_a_single_reaction_and_warns(
     agent.stop()
 
 
-def test_history_budget_and_fixed_window_compose(loop, world, sink):
+def test_history_budget_and_fixed_window_compose(loop, world, private):
     # The fixed cap still applies at step start (2X = 6 → keep 3) while the budget never trips.
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3428,7 +3494,7 @@ def test_history_budget_and_fixed_window_compose(loop, world, sink):
         model,
         world=world,
         loop=loop,
-        output_sink=sink,
+        private_text=private,
         history_reactions=3,
         history_budget=0.5,
         context_window=1000,
@@ -3436,7 +3502,7 @@ def test_history_budget_and_fixed_window_compose(loop, world, sink):
     agent.on_prompt.subscribe(prompts.append)
     agent.start()
 
-    _run_text_steps(agent, world, sink, ["r1", "r2", "r3", "r4", "r5", "r6"])
+    _run_text_steps(agent, world, private, ["r1", "r2", "r3", "r4", "r5", "r6"])
 
     assert len(_observation_texts(prompts[4])) == 5
     assert len(_observation_texts(prompts[5])) == 3
@@ -3444,7 +3510,7 @@ def test_history_budget_and_fixed_window_compose(loop, world, sink):
     agent.stop()
 
 
-def test_history_budget_requires_a_known_context_window(loop, world, sink):
+def test_history_budget_requires_a_known_context_window(loop, world, private):
     model = ProgrammableChatModel(respond=text_response("hi"))  # profile: None
     with pytest.raises(ConfigError, match="context_window"):
         make_agent(model, world=world, loop=loop, history_budget=0.5)
@@ -3465,7 +3531,7 @@ def test_history_budget_requires_a_known_context_window(loop, world, sink):
     assert agent._history_high is None
 
 
-def test_history_budget_alone_turns_on_the_window_clause(loop, world, sink):
+def test_history_budget_alone_turns_on_the_window_clause(loop, world, private):
     model = ProgrammableChatModel(respond=text_response("hi"))
     agent = make_agent(
         model, world=world, loop=loop, history_budget=0.5, context_window=1000
@@ -3516,7 +3582,7 @@ def test_breakpoint_sits_before_the_newest_observation_and_copies():
     ("provider", "marked"), [("anthropic", True), ("openai", False)]
 )
 def test_only_anthropic_requests_carry_the_breakpoint(
-    loop, world, sink, provider, marked
+    loop, world, private, provider, marked
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3531,7 +3597,7 @@ def test_only_anthropic_requests_carry_the_breakpoint(
         provider=provider, model="test", system_prompt="You are terse.", api_key="k"
     )
     agent = Agent(config, world=world, loop=loop, model=model)
-    agent.set_output_sink(sink)
+    agent.on_private_text.subscribe(private)
     prompts: list[list[BaseMessage]] = []
     agent.on_prompt.subscribe(prompts.append)
 
@@ -3542,7 +3608,7 @@ def test_only_anthropic_requests_carry_the_breakpoint(
     agent.register_command(add)
     agent.start()
     world.update("input", "add 1 and 2")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     agent.stop()
 
     sent = model.calls[1]  # the step the add completion woke
@@ -3568,7 +3634,7 @@ def _with_usage(message: AIMessage, input_tokens: int) -> AIMessage:
 
 
 def _rejecting(word: str, *, show: bool) -> Callable[[ModelResponse], Retry | None]:
-    """An application guard rejecting any free text containing `word`."""
+    """An application guard rejecting any text containing `word`."""
 
     def guard(response: ModelResponse) -> Retry | None:
         return (
@@ -3589,7 +3655,7 @@ def _texts(message: BaseMessage) -> list[str]:
 
 
 def test_a_rejected_response_is_retried_and_only_the_accepted_one_is_kept(
-    loop, world, sink
+    loop, world, private
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3608,7 +3674,7 @@ def test_a_rejected_response_is_retried_and_only_the_accepted_one_is_kept(
         return _with_usage(next(answers), 10 * (len(messages)))
 
     model = ProgrammableChatModel(respond=respond)
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     prompts: list[list[BaseMessage]] = []
     issued: list[CommandIssued] = []
     rejections: list[ResponseRejection] = []
@@ -3623,10 +3689,10 @@ def test_a_rejected_response_is_retried_and_only_the_accepted_one_is_kept(
     world.update("input", "summon")
     assert done.wait(timeout=WAIT_TIMEOUT)
 
-    # Two model calls, one prompt event; the sink and on_command see only the accepted response.
+    # Two model calls, one prompt event; on_private_text and on_command see only the accepted response.
     assert len(model.calls) == 2
     assert len(prompts) == 1
-    assert sink.texts == ["fine"]
+    assert private.texts == ["fine"]
     assert issued == []
     # The retry showed the rejected call, answered it, then said why.
     retry = model.calls[1]
@@ -3663,7 +3729,7 @@ def test_a_rejected_response_is_retried_and_only_the_accepted_one_is_kept(
 
 
 def test_a_reminder_retry_hides_the_response_and_extends_the_newest_observation(
-    loop, world, sink
+    loop, world, private
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3671,14 +3737,14 @@ def test_a_reminder_retry_hides_the_response_and_extends_the_newest_observation(
     model = ProgrammableChatModel(
         respond=sequence(text_response("bad words"), text_response("kind words"))
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.add_response_guard(_rejecting("bad", show=False))
     agent.start()
 
     world.update("input", "hello")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == ["kind words"]
+    assert private.texts == ["kind words"]
     first, retry = model.calls
     assert len(retry) == len(first)
     assert retry[:-1] == first[:-1]
@@ -3689,20 +3755,20 @@ def test_a_reminder_retry_hides_the_response_and_extends_the_newest_observation(
     agent.stop()
 
 
-def test_several_rejections_make_one_correction_shown_if_any_asks(loop, world, sink):
+def test_several_rejections_make_one_correction_shown_if_any_asks(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(
         respond=sequence(text_response("bad and ugly"), text_response("nice"))
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.add_response_guard(_rejecting("bad", show=False))
     agent.add_response_guard(_rejecting("ugly", show=True))
     agent.start()
 
     world.update("input", "hello")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
 
     retry = model.calls[1]
     assert isinstance(retry[-2], AIMessage) and retry[-2].text == "bad and ugly"
@@ -3711,13 +3777,13 @@ def test_several_rejections_make_one_correction_shown_if_any_asks(loop, world, s
 
 
 def test_out_of_retries_the_reaction_ends_rejected_and_nothing_is_used(
-    loop, world, sink, caplog
+    loop, world, private, caplog
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(respond=text_response("bad"))
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
     agent.add_response_guard(_rejecting("bad", show=True))
     rejections: list[ResponseRejection] = []
     traces: list[ReactionTrace] = []
@@ -3731,7 +3797,7 @@ def test_out_of_retries_the_reaction_ends_rejected_and_nothing_is_used(
         assert done.wait(timeout=WAIT_TIMEOUT)
 
     assert len(model.calls) == 2  # 1 + max_retries
-    assert sink.texts == []
+    assert private.texts == []
     assert [r.will_retry for r in rejections] == [True, False]
     [trace] = traces
     assert (trace.outcome, trace.attempts, trace.error) == (
@@ -3745,7 +3811,7 @@ def test_out_of_retries_the_reaction_ends_rejected_and_nothing_is_used(
     # The rejected step left only its Observation, merged into the next prompt.
     model.respond = text_response("good")
     world.update("input", "second")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert private.event.wait(timeout=WAIT_TIMEOUT)
     last = model.calls[-1]
     assert not any(isinstance(m, AIMessage) for m in last)
     assert _no_consecutive_human_messages(last)
@@ -3753,14 +3819,24 @@ def test_out_of_retries_the_reaction_ends_rejected_and_nothing_is_used(
     agent.stop()
 
 
-def test_with_no_retries_the_first_rejection_ends_the_reaction(loop, world, sink):
+def test_with_no_retries_the_first_rejection_ends_the_reaction(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = ProgrammableChatModel(
-        respond=tool_call_response([("ghost", {}, "g1"), ("noop", {}, "n1")])
+        respond=tool_call_response([("ghost", {}, "g1"), ("wave", {}, "w1")])
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink, max_retries=0)
+    agent = make_agent(
+        model, world=world, loop=loop, private_text=private, max_retries=0
+    )
+    waved: list[str] = []
+
+    async def wave() -> str:
+        """Wave."""
+        waved.append("waved")
+        return "waved"
+
+    agent.register_command(wave)
     traces: list[ReactionTrace] = []
     done = threading.Event()
     agent.on_reaction_ended.subscribe(_recorder(traces, done))
@@ -3768,16 +3844,17 @@ def test_with_no_retries_the_first_rejection_ends_the_reaction(loop, world, sink
 
     world.update("input", "go")
     assert done.wait(timeout=WAIT_TIMEOUT)
+    time.sleep(0.1)
 
     assert len(model.calls) == 1
     assert traces[0].outcome == "rejected"
-    assert (
-        traces[0].noop is False
-    )  # the noop beside the unknown call was not used either
+    # The valid call beside the unknown one was not used either.
+    assert traces[0].command_call_ids == ()
+    assert waved == []
     agent.stop()
 
 
-def test_a_retry_past_its_deadline_ends_the_reaction_as_a_timeout(loop, world, sink):
+def test_a_retry_past_its_deadline_ends_the_reaction_as_a_timeout(loop, world, private):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
@@ -3788,7 +3865,7 @@ def test_a_retry_past_its_deadline_ends_the_reaction_as_a_timeout(loop, world, s
 
     model = ProgrammableChatModel(respond=sequence(text_response("bad"), slow))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, model_timeout=0.2
+        model, world=world, loop=loop, private_text=private, model_timeout=0.2
     )
     agent.add_response_guard(_rejecting("bad", show=True))
     traces: list[ReactionTrace] = []
@@ -3800,12 +3877,12 @@ def test_a_retry_past_its_deadline_ends_the_reaction_as_a_timeout(loop, world, s
     assert done.wait(timeout=WAIT_TIMEOUT)
 
     assert (traces[0].outcome, traces[0].attempts) == ("model_timeout", 2)
-    assert sink.texts == []
+    assert private.texts == []
     agent.stop()
 
 
 def test_a_raising_guard_accepts_and_an_async_guard_is_awaited(
-    loop, world, sink, caplog
+    loop, world, private, caplog
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -3813,7 +3890,7 @@ def test_a_raising_guard_accepts_and_an_async_guard_is_awaited(
     model = ProgrammableChatModel(
         respond=sequence(text_response("bad"), text_response("good"))
     )
-    agent = make_agent(model, world=world, loop=loop, output_sink=sink)
+    agent = make_agent(model, world=world, loop=loop, private_text=private)
 
     def broken(response: ModelResponse) -> Retry | None:
         raise RuntimeError("guard bug")
@@ -3830,9 +3907,9 @@ def test_a_raising_guard_accepts_and_an_async_guard_is_awaited(
 
     with caplog.at_level(logging.ERROR, logger="wica.agent"):
         world.update("input", "go")
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert private.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == ["good"]
+    assert private.texts == ["good"]
     assert len(model.calls) == 2
     assert any("'broken' raised" in r.getMessage() for r in caplog.records)
     agent.stop()
@@ -3844,7 +3921,6 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
         "incomplete_response",
         "unknown_command",
         "invalid_args",
-        "output_command_required",
     ]
 
     agent.add_response_guard(lambda r: None, name="mine")
@@ -3852,7 +3928,6 @@ def test_guards_are_listed_added_and_removed_by_name(loop, world):
     assert list(agent.response_guards) == [
         "incomplete_response",
         "unknown_command",
-        "output_command_required",
         "mine",
     ]
     with pytest.raises(ValueError, match="already added"):
@@ -3942,7 +4017,7 @@ def test_assemble_sums_split_text_tool_calls_and_usage():
             AIMessageChunk(content="red."),
             _tool_chunk(0, '{"col', name="set_light", call_id="c1"),
             _tool_chunk(0, 'or": "red"}'),
-            _tool_chunk(1, "", name=_NOOP_COMMAND_NAME, call_id="c2"),
+            _tool_chunk(1, "", name="wave", call_id="c2"),
             _usage_chunk(30, 12),
         ]
     )
@@ -3958,7 +4033,7 @@ def test_assemble_sums_split_text_tool_calls_and_usage():
             "id": "c1",
             "type": "tool_call",
         },
-        {"name": _NOOP_COMMAND_NAME, "args": {}, "id": "c2", "type": "tool_call"},
+        {"name": "wave", "args": {}, "id": "c2", "type": "tool_call"},
     ]
     assert message.invalid_tool_calls == []
     assert message.usage_metadata is not None
@@ -4002,14 +4077,14 @@ def test_assemble_keeps_list_content_such_as_a_thinking_block():
 
 
 def _streaming_agent(
-    streams: Sequence[Stream], loop, world, sink, **kwargs: Any
+    streams: Sequence[Stream], loop, world, private, **kwargs: Any
 ) -> tuple[Agent, StreamingChatModel, list[ReactionTrace], threading.Event]:
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     model = StreamingChatModel(streams=list(streams))
     agent = make_agent(
-        model, world=world, loop=loop, output_sink=sink, coalesce_window=0, **kwargs
+        model, world=world, loop=loop, private_text=private, coalesce_window=0, **kwargs
     )
     traces: list[ReactionTrace] = []
     done = threading.Event()
@@ -4017,8 +4092,8 @@ def _streaming_agent(
     return agent, model, traces, done
 
 
-def test_a_streamed_response_is_used_once_whole(loop, world, sink):
-    """Split text reaches the sink once, whole; a split tool call is dispatched once with all its
+def test_a_streamed_response_is_used_once_whole(loop, world, private):
+    """Split text is reported once, whole; a split tool call is dispatched once with all its
     arguments; the usage from the last chunk lands in the reaction record."""
     lights: list[str] = []
 
@@ -4036,11 +4111,11 @@ def test_a_streamed_response_is_used_once_whole(loop, world, sink):
                 _tool_chunk(0, ': "red"}'),
                 _usage_chunk(40, 9),
             ),
-            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+            chunks_stream(AIMessageChunk(content="<noop/>")),
         ],
         loop,
         world,
-        sink,
+        private,
     )
     agent.register_command(set_light)
     agent.start()
@@ -4050,58 +4125,166 @@ def test_a_streamed_response_is_used_once_whole(loop, world, sink):
     wait_until(lambda: lights == ["red"])
     agent.stop()
 
-    assert sink.texts == ["Turning it red."]
+    assert private.texts == ["Turning it red."]
     assert traces[0].outcome == "ok"
     assert traces[0].usage == TokenUsage(40, 9, None)
     assert len(traces[0].command_call_ids) == 1
 
 
 def test_a_streamed_call_cut_by_the_cap_is_not_dispatched_and_is_retried(
-    loop, world, sink
+    loop, world, private
 ):
-    """A `say` whose arguments were cut is malformed: not spoken, and the incomplete_response guard
-    asks for it again — as a reminder, since the broken call cannot be replayed."""
-    spoken: list[str] = []
+    """A call whose arguments were cut is malformed: not executed, and the incomplete_response
+    guard asks for it again — as a reminder, since the broken call cannot be replayed."""
+    notes: list[str] = []
+
+    async def write_note(text: str) -> str:
+        """Write a note."""
+        notes.append(text)
+        return "written"
+
     agent, model, traces, done = _streaming_agent(
         [
             chunks_stream(
-                _tool_chunk(0, '{"text": "Once upon a ti', name="say", call_id="s1")
+                _tool_chunk(
+                    0, '{"text": "Once upon a ti', name="write_note", call_id="s1"
+                )
             ),
             chunks_stream(
                 _tool_chunk(
-                    0, '{"text": "Once upon a time."}', name="say", call_id="s2"
+                    0, '{"text": "Once upon a time."}', name="write_note", call_id="s2"
                 )
             ),
-            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+            chunks_stream(AIMessageChunk(content="<noop/>")),
         ],
         loop,
         world,
-        sink,
-        output_command=_say_command(spoken),
+        private,
     )
+    agent.register_command(write_note)
     rejections: list[ResponseRejection] = []
     agent.on_response_rejected.subscribe(rejections.append)
     agent.start()
 
-    world.update("input", "tell me a story")
+    world.update("input", "note the story")
     assert done.wait(timeout=WAIT_TIMEOUT)
-    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    wait_until(
+        lambda: len(traces) == 2
+    )  # the note's completion woke a step that did nothing
     agent.stop()
 
-    assert spoken == ["Once upon a time."]
+    assert notes == ["Once upon a time."]
     assert traces[0].outcome == "ok"
     assert traces[0].attempts == 2
     assert len(model.calls) == 3
     [rejection] = rejections
     assert rejection.show_response is False
     [malformed] = rejection.response.malformed
-    assert (malformed.name, malformed.raw_args) == ("say", '{"text": "Once upon a ti')
+    assert (malformed.name, malformed.raw_args) == (
+        "write_note",
+        '{"text": "Once upon a ti',
+    )
     assert "not complete JSON" in malformed.error
-    # One correction, from incomplete_response alone: output_command_required leaves it the case.
-    assert rejection.feedback.startswith("Your call to `say` was not executed")
+    assert rejection.feedback.startswith("Your call to `write_note` was not executed")
     retry_prompt = model.calls[1]
     assert not any(isinstance(m, AIMessage) for m in retry_prompt)
-    assert "Your call to `say` was not executed" in human_texts(retry_prompt[-1])
+    assert "Your call to `write_note` was not executed" in human_texts(retry_prompt[-1])
+
+
+def test_an_output_is_delivered_while_the_response_is_still_streaming(
+    loop, world, private
+):
+    """The output Command gets the first words before the model has finished: the entry opens
+    with an empty text, is filled once the body is complete, and first_output_at stamps it."""
+    heard: list[str] = []
+    first_piece_at: list[Any] = []
+    text_at_first_piece: list[str] = []
+
+    async def say(text: OutputStream) -> str:
+        """Speak out loud."""
+        async for piece in text:
+            if not heard:
+                first_piece_at.append(now())
+                text_at_first_piece.append(world.get("agent:command:c1").args["text"])
+            heard.append(piece)
+        return "said"
+
+    agent, _, traces, done = _streaming_agent(
+        [
+            _slow_stream(
+                AIMessageChunk(content="hm <say>Once"),
+                0.15,
+                AIMessageChunk(content=" upon a time.</say>"),
+            )
+        ],
+        loop,
+        world,
+        private,
+        output_command=say,
+    )
+    issued: list[CommandIssued] = []
+    ended: list[CommandTrace] = []
+    agent.on_command.subscribe(issued.append)
+    agent.on_command_ended.subscribe(ended.append)
+    agent.start()
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: [t.state for t in ended] == ["complete"])
+    agent.stop()
+
+    trace = traces[0]
+    assert "".join(heard) == "Once upon a time."
+    assert heard[0] == "Once"
+    assert text_at_first_piece == [""]
+    assert issued == [CommandIssued("say", {"text": "Once upon a time."}, "c1")]
+    assert private.texts == ["hm"]
+    assert trace.command_call_ids == ("c1",)
+    assert trace.first_content_at is not None and trace.model_ended_at is not None
+    assert trace.first_output_at is not None
+    assert trace.first_content_at <= trace.first_output_at < trace.model_ended_at
+    assert first_piece_at[0] < trace.model_ended_at
+    assert (trace.model_ended_at - trace.first_output_at).total_seconds() >= 0.1
+
+
+def test_a_response_that_spoke_drops_a_cut_call_without_a_retry(loop, world, private):
+    """Once an output has started the response cannot be taken back: no guard runs, the words
+    are kept, and the malformed call beside them is dropped."""
+    spoken: list[str] = []
+    lights: list[str] = []
+
+    async def set_light(color: str) -> str:
+        """Set the light's color."""
+        lights.append(color)
+        return "ok"
+
+    agent, model, traces, done = _streaming_agent(
+        [
+            chunks_stream(
+                AIMessageChunk(content="<say>On it.</say>"),
+                _tool_chunk(0, '{"color": "re', name="set_light", call_id="c1"),
+            )
+        ],
+        loop,
+        world,
+        private,
+        output_command=_say_command(spoken),
+    )
+    agent.register_command(set_light)
+    rejections: list[ResponseRejection] = []
+    agent.on_response_rejected.subscribe(rejections.append)
+    agent.start()
+
+    world.update("input", "make it red")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: spoken == ["On it."])
+    agent.stop()
+
+    assert lights == []
+    assert rejections == []
+    assert traces[0].outcome == "ok"
+    assert traces[0].attempts == 1
+    assert len(traces[0].command_call_ids) == 1  # the output alone
+    assert len(model.calls) == 1
 
 
 def _failing_after_first_chunk() -> AsyncIterator[AIMessageChunk]:
@@ -4142,10 +4325,10 @@ def _empty_stream() -> AsyncIterator[AIMessageChunk]:
     ],
 )
 def test_a_stream_that_does_not_complete_discards_its_partial_message(
-    loop, world, sink, stream, outcome, error
+    loop, world, private, stream, outcome, error
 ):
     agent, _, traces, done = _streaming_agent(
-        [stream], loop, world, sink, model_timeout=0.1
+        [stream], loop, world, private, model_timeout=0.1
     )
     agent.start()
 
@@ -4155,12 +4338,12 @@ def test_a_stream_that_does_not_complete_discards_its_partial_message(
 
     assert traces[0].outcome == outcome
     assert traces[0].error is not None and error in traces[0].error
-    assert sink.texts == []
+    assert private.texts == []
     assert not any(isinstance(r, AssistantTextRecord) for r in agent._history)
 
 
 def test_without_the_malformed_guard_a_cut_call_is_dropped_and_the_rest_used(
-    loop, world, sink
+    loop, world, private
 ):
     agent, model, traces, done = _streaming_agent(
         [
@@ -4171,7 +4354,7 @@ def test_without_the_malformed_guard_a_cut_call_is_dropped_and_the_rest_used(
         ],
         loop,
         world,
-        sink,
+        private,
     )
     lights: list[str] = []
 
@@ -4188,7 +4371,7 @@ def test_without_the_malformed_guard_a_cut_call_is_dropped_and_the_rest_used(
     assert done.wait(timeout=WAIT_TIMEOUT)
     agent.stop()
 
-    assert sink.texts == ["On it."]
+    assert private.texts == ["On it."]
     assert lights == []
     assert traces[0].outcome == "ok"
     assert traces[0].attempts == 1
@@ -4196,7 +4379,9 @@ def test_without_the_malformed_guard_a_cut_call_is_dropped_and_the_rest_used(
     assert len(model.calls) == 1
 
 
-def test_a_response_with_a_malformed_call_is_never_shown_in_a_retry(loop, world, sink):
+def test_a_response_with_a_malformed_call_is_never_shown_in_a_retry(
+    loop, world, private
+):
     """A guard asking to show the rejected response gets a reminder instead when the response
     holds a malformed call: the broken call cannot be replayed to a provider."""
     agent, model, traces, done = _streaming_agent(
@@ -4209,7 +4394,7 @@ def test_a_response_with_a_malformed_call_is_never_shown_in_a_retry(loop, world,
         ],
         loop,
         world,
-        sink,
+        private,
     )
     agent.remove_response_guard("incomplete_response")
     agent.add_response_guard(
@@ -4224,7 +4409,7 @@ def test_a_response_with_a_malformed_call_is_never_shown_in_a_retry(loop, world,
     assert done.wait(timeout=WAIT_TIMEOUT)
     agent.stop()
 
-    assert sink.texts == ["Done."]
+    assert private.texts == ["Done."]
     assert rejections[0].show_response is False
     retry_prompt = model.calls[1]
     assert not any(isinstance(m, AIMessage) for m in retry_prompt)
@@ -4245,7 +4430,7 @@ def _slow_stream(*steps: AIMessageChunk | float) -> Stream:
 
 
 def test_first_content_is_stamped_at_the_first_chunk_carrying_an_answer(
-    loop, world, sink
+    loop, world, private
 ):
     """A leading chunk with only metadata or reasoning does not count; the stamp splits the model
     latency into the wait and the arrival."""
@@ -4263,7 +4448,7 @@ def test_first_content_is_stamped_at_the_first_chunk_carrying_an_answer(
         ],
         loop,
         world,
-        sink,
+        private,
     )
     agent.start()
     world.update("input", "hello")
@@ -4271,7 +4456,7 @@ def test_first_content_is_stamped_at_the_first_chunk_carrying_an_answer(
     agent.stop()
 
     trace = traces[0]
-    assert sink.texts == ["Hello."]
+    assert private.texts == ["Hello."]
     assert trace.model_started_at is not None and trace.model_ended_at is not None
     assert trace.first_content_at is not None
     assert trace.model_started_at < trace.first_content_at < trace.model_ended_at
@@ -4280,29 +4465,38 @@ def test_first_content_is_stamped_at_the_first_chunk_carrying_an_answer(
     assert trace.generation_time >= 0.05
 
 
-def test_first_content_counts_a_tool_call_and_is_the_last_attempts(loop, world, sink):
+def test_first_content_counts_a_tool_call_and_is_the_last_attempts(
+    loop, world, private
+):
     """A tool-call chunk is content. After a retry the stamp is the accepted attempt's, so
     generation_time is the used response's and time_to_first_content includes the rejected one."""
-    spoken: list[str] = []
+    notes: list[str] = []
+
+    async def write_note(text: str) -> str:
+        """Write a note."""
+        notes.append(text)
+        return "written"
+
     agent, _, traces, done = _streaming_agent(
         [
-            _slow_stream(AIMessageChunk(content="Hello there."), 0.1),
+            # Rejected by unknown_command, after 0.1 s.
+            _slow_stream(_tool_chunk(0, "{}", name="ghost", call_id="g1"), 0.1),
             _slow_stream(
                 0.1,
-                _tool_chunk(0, '{"text": "Hello', name="say", call_id="s1"),
+                _tool_chunk(0, '{"text": "Hello', name="write_note", call_id="s1"),
                 _tool_chunk(0, ' there."}'),
             ),
-            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+            chunks_stream(AIMessageChunk(content="<noop/>")),
         ],
         loop,
         world,
-        sink,
-        output_command=_say_command(spoken),
+        private,
     )
+    agent.register_command(write_note)
     agent.start()
     world.update("input", "greet")
     assert done.wait(timeout=WAIT_TIMEOUT)
-    wait_until(lambda: spoken == ["Hello there."])
+    wait_until(lambda: notes == ["Hello there."])
     agent.stop()
 
     trace = traces[0]
@@ -4314,10 +4508,10 @@ def test_first_content_counts_a_tool_call_and_is_the_last_attempts(loop, world, 
 
 
 def test_first_content_survives_a_failed_stream_and_is_none_when_nothing_arrived(
-    loop, world, sink
+    loop, world, private
 ):
     agent, _, traces, done = _streaming_agent(
-        [_failing_after_first_chunk, _empty_stream], loop, world, sink
+        [_failing_after_first_chunk, _empty_stream], loop, world, private
     )
     agent.start()
     world.update("input", "one")
@@ -4335,7 +4529,7 @@ def test_first_content_survives_a_failed_stream_and_is_none_when_nothing_arrived
 
 
 def test_a_model_without_a_streaming_path_stamps_first_content_at_its_whole_message(
-    loop, world, sink
+    loop, world, private
 ):
     world.register(
         "input", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -4346,7 +4540,10 @@ def test_a_model_without_a_streaming_path_stamps_first_content_at_its_whole_mess
         return AIMessage(content="hi")
 
     agent = make_agent(
-        ProgrammableChatModel(respond=respond), world=world, loop=loop, output_sink=sink
+        ProgrammableChatModel(respond=respond),
+        world=world,
+        loop=loop,
+        private_text=private,
     )
     traces: list[ReactionTrace] = []
     done = threading.Event()
@@ -4395,36 +4592,48 @@ def _cut_at_the_cap(tokens: int) -> AIMessageChunk:
     )
 
 
-def test_a_well_formed_call_in_a_response_cut_at_the_cap_is_retried(loop, world, sink):
+def test_a_well_formed_call_in_a_response_cut_at_the_cap_is_retried(
+    loop, world, private
+):
     """A provider may return a cut call well-formed, with empty arguments. The stop reason marks
     the response truncated: incomplete_response alone corrects it (invalid_args stays silent
     about the cut call), as a reminder, with the cap as the length to stay under."""
-    spoken: list[str] = []
+    notes: list[str] = []
+
+    async def write_note(text: str) -> str:
+        """Write a note."""
+        notes.append(text)
+        return "written"
+
     agent, model, traces, done = _streaming_agent(
         [
             chunks_stream(
-                _tool_chunk(0, "", name="say", call_id="s1"), _cut_at_the_cap(60)
+                _tool_chunk(0, "", name="write_note", call_id="s1"), _cut_at_the_cap(60)
             ),
             chunks_stream(
-                _tool_chunk(0, '{"text": "A robot woke up."}', name="say", call_id="s2")
+                _tool_chunk(
+                    0, '{"text": "A robot woke up."}', name="write_note", call_id="s2"
+                )
             ),
-            chunks_stream(_tool_chunk(0, "{}", name=_NOOP_COMMAND_NAME, call_id="n1")),
+            chunks_stream(AIMessageChunk(content="<noop/>")),
         ],
         loop,
         world,
-        sink,
-        output_command=_say_command(spoken),
+        private,
     )
+    agent.register_command(write_note)
     rejections: list[ResponseRejection] = []
     agent.on_response_rejected.subscribe(rejections.append)
     agent.start()
 
-    world.update("input", "tell me a story")
+    world.update("input", "note a story")
     assert done.wait(timeout=WAIT_TIMEOUT)
-    wait_until(lambda: any(isinstance(r, NoReactionRecord) for r in agent._history))
+    wait_until(
+        lambda: len(traces) == 2
+    )  # the note's completion woke a step that did nothing
     agent.stop()
 
-    assert spoken == ["A robot woke up."]
+    assert notes == ["A robot woke up."]
     assert traces[0].attempts == 2
     [rejection] = rejections
     assert rejection.response.truncated is True
@@ -4432,27 +4641,47 @@ def test_a_well_formed_call_in_a_response_cut_at_the_cap_is_retried(loop, world,
     assert rejection.show_response is False
     assert rejection.feedback.startswith(
         "Your response was cut off at the output length limit while you were writing the call "
-        "to `say`"
+        "to `write_note`"
     )
     assert "keep it under 60 characters" in rejection.feedback
     assert "invalid" not in rejection.feedback
     assert not any(isinstance(m, AIMessage) for m in model.calls[1])
 
 
-def test_free_text_cut_at_the_cap_is_still_the_reply_without_an_output_command(
-    loop, world, sink
-):
+def test_text_cut_at_the_cap_is_accepted(loop, world, private):
     agent, model, traces, done = _streaming_agent(
         [chunks_stream(AIMessageChunk(content="Once upon a"), _cut_at_the_cap(4))],
         loop,
         world,
-        sink,
+        private,
     )
     agent.start()
     world.update("input", "tell me a story")
     assert done.wait(timeout=WAIT_TIMEOUT)
     agent.stop()
 
-    assert sink.texts == ["Once upon a"]
+    assert private.texts == ["Once upon a"]
     assert traces[0].outcome == "ok"
     assert traces[0].attempts == 1
+
+
+def test_an_output_cut_at_the_cap_is_delivered_as_far_as_it_got(loop, world, private):
+    """The cap closes the tag: what was written is said, and nothing is retried."""
+    spoken: list[str] = []
+    agent, model, traces, done = _streaming_agent(
+        [chunks_stream(AIMessageChunk(content="<say>Once upon a"), _cut_at_the_cap(4))],
+        loop,
+        world,
+        private,
+        output_command=_say_command(spoken),
+    )
+    agent.start()
+    world.update("input", "tell me a story")
+    assert done.wait(timeout=WAIT_TIMEOUT)
+    wait_until(lambda: spoken == ["Once upon a"])
+    agent.stop()
+
+    assert traces[0].outcome == "ok"
+    assert traces[0].attempts == 1
+    assert len(model.calls) == 1
+    assert agent._history[1:] == [AssistantTextRecord("<say>Once upon a")]

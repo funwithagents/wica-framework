@@ -33,11 +33,12 @@ class Speaking:
 class SpeakingSlot:
     """The Speaking panel's state: the utterance the simulated TTS is currently producing.
 
-    `start(text)` opens a new utterance and returns a token; `advance`/`complete`/`cancelled`
-    take that token and are ignored if a newer utterance has started since — so an overlapping
-    `say` (the model can chain one while another still speaks) never has the older one's ending
-    stamped onto the newer one. The panel keeps showing the last utterance, complete or
-    cancelled, until the next one starts."""
+    `start(text)` opens a new utterance over the words known so far and returns a token;
+    `extend` (more words arrived — the model is still writing the sentence), `advance`,
+    `complete` and `cancelled` take that token and are ignored if a newer utterance has started
+    since — so a `say` that ends after the next one began (speaking again cuts off the earlier
+    speech) never has its ending stamped onto the newer one. The panel keeps showing the last
+    utterance, complete or cancelled, until the next one starts."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -49,6 +50,10 @@ class SpeakingSlot:
             self._token += 1
             self._current = Speaking(tuple(text.split()), 0, "speaking")
             return self._token
+
+    def extend(self, token: int, text: str) -> None:
+        """The utterance's text so far, as it grows: the words to come, the spoken count kept."""
+        self._set(token, lambda s: Speaking(tuple(text.split()), s.spoken, s.state))
 
     def advance(self, token: int) -> None:
         """One more word spoken."""

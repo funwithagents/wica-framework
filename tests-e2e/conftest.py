@@ -86,7 +86,7 @@ def write_report(
     request: pytest.FixtureRequest, report_dir: Path | None
 ) -> Callable[[Report], None]:
     """Writes a report as `<report_dir>/<test node name>.json` — the node name carries the
-    provider id, e.g. `test_plain_text_round_trip[e2e.openai.config]` — or does nothing when no
+    provider id, e.g. `test_spoken_reply_round_trip[e2e.openai.config]` — or does nothing when no
     directory was given."""
 
     def write(report: Report) -> None:

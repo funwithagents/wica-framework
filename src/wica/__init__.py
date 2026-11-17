@@ -11,6 +11,7 @@ from wica.config import (
 from wica.content import Content, ContentPart, ImagePart, TextPart
 from wica.events import Event
 from wica.instrumentation import CommandTrace, ReactionTrace, TokenUsage, TriggerTrace
+from wica.text_output import OutputStream
 from wica.wica import Wica
 from wica.world import World, WorldEntry, WorldEntryConfig, WorldEntryVersion
 
@@ -33,6 +34,7 @@ __all__ = [
     "Event",
     "ImagePart",
     "MissingEnvError",
+    "OutputStream",
     "ReactionTrace",
     "TextPart",
     "TokenUsage",

@@ -9,7 +9,7 @@ tests:
 
 # Wica (the facade)
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -25,22 +25,21 @@ A `Wica` instance owns exactly one `World` and one `Agent`, constructed together
 
 | Member | Kind | Role |
 |---|---|---|
-| `Wica.init(config, *, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, return the `Wica`. The one construction path. It takes **no application callables**: the output sink and the output Command are wired afterwards through the two setters below, so the objects they reference can themselves be built against the `Wica` (see "Output wiring is delegated"). |
+| `Wica.init(config, *, coalesce_window=…, loop=…)` | classmethod | Build a `World` + `Agent` from a `WicaConfig`, wire them, return the `Wica`. The one construction path. It takes **no application callables**: the output Command is wired afterwards through the setter below, so the objects it references can themselves be built against the `Wica` (see "Output wiring is delegated"). |
 | `wica.world` | attribute (`World`) | The owned World — the home for **all** World-schema work (`register`/`update`/`get`/listeners). Not duplicated onto `Wica`. |
 | `wica.agent` | attribute (`Agent`) | The owned Agent. Directly reachable, but the common paths (command registration, lifecycle, instrumentation) are surfaced on `Wica` so a consumer rarely needs it. |
 | `wica.start()` / `wica.stop()` | methods | The restartable shared lifecycle — start or pause the World and Agent together (see "Lifecycle"). |
 | `wica.is_running` | attribute (`bool`) | Read-only flag; `True` between a successful `start()` and `stop()` (mirrors `world.is_running` — see [world.md](world.md), "Lifecycle"). |
 | `wica.close()` | method | Permanently stop the instance and close its owned event loop. Idempotent; a closed instance cannot be restarted. |
 | `wica.register_command(fn)` | method | Delegates to `agent.register_command` — mirrored onto `Wica` since it's part of the everyday setup flow. Takes one argument, `fn: Callable \| Command`; override name/description by passing a `Command(fn, name=…, description=…)` (see [commands.md](commands.md), "The `Command` object"). |
-| `wica.set_output_sink(sink)` | method | Delegates to `agent.set_output_sink` — sets (or, with `None`, clears) the async sink that receives the model's free text each step (see [agent.md](agent.md), "Output"). A single replaceable slot, hence `set_`, not `register_`. |
-| `wica.set_output_command(fn)` | method | Delegates to `agent.set_output_command` — sets (or, with `None`, clears) the user-facing output Command (`Callable \| Command`; see [agent.md](agent.md), "Output"). When set, free text becomes the agent's private reasoning stream. A single replaceable slot. |
+| `wica.set_output_command(fn)` | method | Delegates to `agent.set_output_command` — sets (or, with `None`, clears) the output Command (`Callable \| Command`), the one channel through which the model addresses its user: the model writes a tag of that name in its text and the tag's body is delivered to the Command, as an `OutputStream` or a whole `str` by its signature (see [agent.md](agent.md), "Output: tags in the model's text"; [commands.md](commands.md), "The output Command"). With none set, all of the model's text is private. A single replaceable slot, hence `set_`, not `register_`. |
 | `wica.add_response_guard(guard, *, name=None)` / `wica.remove_response_guard(name)` / `wica.response_guards` | methods / mapping | Delegate to the Agent's response guards (see [agent.md](agent.md), "Response guards"): remove a default guard by name, or — **experimental** — add an application guard. Mirrored for the same reason `register_command` is: it is setup. |
 | `wica.on_world_trigger` | `Event[WorldEntry]` | The World's **raw** trigger — fires on every qualifying update, pre-coalescing (= `world.on_trigger`). |
 | `wica.on_agent_trigger` | `Event[WorldEntry]` | The Agent's **filtered** trigger — fires once per trigger a run-to-completion step actually observes (= `agent.on_trigger`). |
 | `wica.on_agent_prompt` | `Event[list[BaseMessage]]` | Fires with the exact rendered messages before each reaction's first model call (= `agent.on_prompt`). |
 | `wica.on_agent_response_rejected` | `Event[ResponseRejection]` | Fires once per response attempt the response guards reject (= `agent.on_response_rejected`; see [agent.md](agent.md), "Response guards"). |
-| `wica.on_agent_command` | `Event[CommandIssued]` | Fires with each Command the model issues, at dispatch time (= `agent.on_command`). |
-| `wica.on_agent_text` | `Event[str]` | Fires with the model's complete free text for a step, right before the output sink receives it (= `agent.on_text`). Observation only — the sink stays the delivery slot. |
+| `wica.on_agent_command` | `Event[CommandIssued]` | Fires with each Command the model issues, at dispatch time, and with each output once its body is complete (= `agent.on_command`). |
+| `wica.on_agent_private_text` | `Event[str]` | Fires with the text the model wrote outside its output tags in a step, when non-empty: its private notes, which nobody hears (= `agent.on_private_text`). |
 | `wica.on_agent_reaction_ended` | `Event[ReactionTrace]` | Fires once at the end of every reaction that started, whatever its outcome (= `agent.on_reaction_ended`; see [instrumentation.md](instrumentation.md)). |
 | `wica.on_agent_trigger_dropped` | `Event[WorldEntry]` | Fires once per trigger dropped because a reaction was already in flight (= `agent.on_trigger_dropped`). |
 | `wica.on_agent_command_ended` | `Event[CommandTrace]` | Fires once per dispatched Command when its terminal state is written (= `agent.on_command_ended`). |
@@ -53,11 +52,11 @@ The **asymmetry is deliberate**: command registration and output wiring are mirr
 
 1. Creates the single asyncio event **loop** the whole system runs on (or adopts one passed in — see "The event loop, restartable `start()`/`stop()`, and terminal `close()`").
 2. Builds a fresh `World(loop)` (no global — see [world.md](world.md)).
-3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`, `self.on_agent_text = self.agent.on_text`, `self.on_agent_reaction_ended = self.agent.on_reaction_ended`, `self.on_agent_trigger_dropped = self.agent.on_trigger_dropped`, `self.on_agent_command_ended = self.agent.on_command_ended`.
+3. Builds the `Agent` from `config.agent`, injecting the same `loop` and the owned World: `Agent(config.agent, world=self.world, loop=self._loop, coalesce_window=…)`. It then **surfaces the Events** rather than adapting hooks (below): `self.on_world_trigger = self.world.on_trigger`, `self.on_agent_trigger = self.agent.on_trigger`, `self.on_agent_prompt = self.agent.on_prompt`, `self.on_agent_command = self.agent.on_command`, `self.on_agent_private_text = self.agent.on_private_text`, `self.on_agent_reaction_ended = self.agent.on_reaction_ended`, `self.on_agent_trigger_dropped = self.agent.on_trigger_dropped`, `self.on_agent_command_ended = self.agent.on_command_ended`.
 
 `init` **does not configure logging** — WICA is a library, so it only emits under the `wica.*` loggers and leaves handlers/levels to the embedding application (see [config.md](config.md), "Logging is not framework config").
 
-The runtime values a config object should not express — `coalesce_window` and optionally a `loop` — are keyword arguments to `init`. The config carries provider/model/key/prompt; `init`'s kwargs carry runtime objects that must exist at construction (the loop cannot be injected later). **`init` takes no application callables.** The output sink and the output Command are wired *after* construction through `set_output_sink` / `set_output_command` (see "Output wiring is delegated"), for the same reason Commands are registered after construction: they are code, never configuration data, and the objects they reference — a transcript, a UI, a TTS engine — typically need the `Wica` (its World, its `Event`s, its Agent's output Command name) to be built. Taking them at `init` forced consumers into a construction cycle (build the sink before the `Wica`, then attach the `Wica` to the sink later); the setters let the consumer **build, then wire, then start**.
+The runtime values a config object should not express — `coalesce_window` and optionally a `loop` — are keyword arguments to `init`. The config carries provider/model/key/prompt; `init`'s kwargs carry runtime objects that must exist at construction (the loop cannot be injected later). **`init` takes no application callables.** The output Command is wired *after* construction through `set_output_command` (see "Output wiring is delegated"), for the same reason Commands are registered after construction: it is code, never configuration data, and the objects it references — a UI, a TTS engine — typically need the `Wica` (its World, its `Event`s) to be built. Taking it at `init` would force consumers into a construction cycle (build the output before the `Wica`, then attach the `Wica` to it later); the setter lets the consumer **build, then wire, then start**.
 
 `init` takes an **already-created `WicaConfig`**, not a path. The caller may construct it directly or obtain it through `WicaConfig.from_dict` / `WicaConfig.from_json` / `WicaConfig.from_json_file` (see [config.md](config.md)). There is deliberately **no `Wica.from_json_file`**: a path-taking convenience would privilege one config source, save only one line, and hide the config object the caller often wants. For a dedicated file, startup remains two honest calls:
 
@@ -65,9 +64,8 @@ The runtime values a config object should not express — `coalesce_window` and 
 config = WicaConfig.from_json_file(path)
 wica = Wica.init(config, coalesce_window=0.2)
 wica.world.register("speech_input", str, serialize_fn=…, triggers_llm_call=True)
-transcript = Transcript(wica)            # application object that needs the Wica to exist
-wica.set_output_sink(transcript.sink)
-wica.set_output_command(speak)
+voice = Voice(wica)                      # application object that needs the Wica to exist
+wica.set_output_command(voice.say)       # the model writes: <say>Hello there!</say>
 wica.register_command(dance)
 wica.start()
 ```
@@ -86,7 +84,7 @@ wica.start()
 
 **Injected loop.** `Wica.init(config, …, loop=…)` accepts an existing loop for an app that already runs one; then `Wica` does not own the thread, and `start()`/`stop()`/`close()` leave the loop itself alone (only attaching/detaching World and Agent). The batteries-included default — no `loop` passed — has `Wica` create the loop and run it in a fresh daemon thread for each running cycle.
 
-**Shutdown from the loop thread.** For an **owned** loop, `stop()` and `close()` called from that loop's own thread — from an output sink, a Command, or an Event subscriber — raise `RuntimeError` **before changing any state**; the system keeps running. A synchronous facade must join its thread, and there is no correct synchronous answer on that thread. To stop from inside the loop, hand the call to another thread (e.g. `threading.Thread(target=wica.stop).start()`). The injected-loop behavior described above (a same-thread `stop()` requests cancellation and returns) is unchanged.
+**Shutdown from the loop thread.** For an **owned** loop, `stop()` and `close()` called from that loop's own thread — from a Command (the output Command included) or an Event subscriber — raise `RuntimeError` **before changing any state**; the system keeps running. A synchronous facade must join its thread, and there is no correct synchronous answer on that thread. To stop from inside the loop, hand the call to another thread (e.g. `threading.Thread(target=wica.stop).start()`). The injected-loop behavior described above (a same-thread `stop()` requests cancellation and returns) is unchanged.
 
 **A non-running injected loop is rejected at `start()`.** `start()` with an injected loop that is **not running** raises `RuntimeError` (in addition to the existing closed-loop check): World dispatch and the Agent's trigger shim need a running loop, so accepting a stopped one would queue callbacks forever.
 
@@ -100,15 +98,15 @@ Because the objects never change identity within one `Wica`'s life (there is no 
 
 ### Command registration is delegated
 
-`wica.register_command(fn)` forwards verbatim to `agent.register_command` ([agent.md](agent.md)) — one argument, `fn: Callable | Command`, no `name`/`description` kwargs (override via `Command(fn, name=…, description=…)`; wrap an off-the-shelf tool as `Command(tool)` — see [commands.md](commands.md), "The `Command` object"). It's mirrored onto `Wica` because registering the agent's capabilities is part of every setup. Everything else command-related (the auto-registered `cancel_command` and `noop`, execution-as-World-entry) stays entirely inside the Agent.
+`wica.register_command(fn)` forwards verbatim to `agent.register_command` ([agent.md](agent.md)) — one argument, `fn: Callable | Command`, no `name`/`description` kwargs (override via `Command(fn, name=…, description=…)`; wrap an off-the-shelf tool as `Command(tool)` — see [commands.md](commands.md), "The `Command` object"). It's mirrored onto `Wica` because registering the agent's capabilities is part of every setup. Everything else command-related (the auto-registered `cancel_command`, execution-as-World-entry) stays entirely inside the Agent.
 
 ### Output wiring is delegated
 
-`wica.set_output_sink(sink)` and `wica.set_output_command(fn)` forward verbatim to `agent.set_output_sink` / `agent.set_output_command`; the rules (validation, prompt recomposition, attach timing, `None` to clear) are specified in [agent.md](agent.md), "Output wiring", and `Wica` adds nothing to them. They are mirrored onto `Wica` for the same reason `register_command` is: wiring the output channel is part of every setup, and it is done at the same point of the flow.
+`wica.set_output_command(fn)` forwards verbatim to `agent.set_output_command`; the rules (validation of the name and the signature, prompt recomposition, `None` to clear) are specified in [agent.md](agent.md), "Output wiring", and `Wica` adds nothing to them. It is mirrored onto `Wica` for the same reason `register_command` is: wiring the output channel is part of every setup, and it is done at the same point of the flow. It is the only output wiring there is: the model speaks by writing the output Command's tag in its text, and there is no separate sink for the rest of its text, which is private and observable on `on_agent_private_text`.
 
-- **They are setters of single slots, not registrations.** An Agent has at most one sink and at most one output Command; calling either again replaces the previous value, and `None` clears it. Hence `set_`, not `register_`.
-- **Wire before `start()`.** Both setters accept a call at any time (a sink change takes effect at the next step; an output Command set while running is attached immediately), but the intended flow is build → wire → start, which is also the only flow the demo uses. Setting while running carries the same caveat as `register_command` while running: the model binding is swapped without a lock, and a step already in flight keeps the binding it captured.
-- **Ordering is the point.** Because neither is a constructor argument, a consumer can build the `Wica` first, build the objects that need it (a transcript subscribed to its `Event`s, a UI that reads its World), and only then hand those objects' callables to the `Wica`. The conversation demo is the reference for this order (see [conversation-demo.md](conversation-demo.md), "Composition: build, then wire, then start").
+- **It is a setter of a single slot, not a registration.** An Agent has at most one output Command; calling the setter again replaces the previous value, and `None` clears it. Hence `set_`, not `register_`.
+- **Wire before `start()`.** The setter accepts a call at any time, but the intended flow is build → wire → start, which is also the only flow the demo uses. Set while running, the new output Command and the recomposed prompt apply from the next step; a step already in flight keeps the ones it started with. The model binding is untouched: the output Command is not a tool.
+- **Ordering is the point.** Because it is not a constructor argument, a consumer can build the `Wica` first, build the objects that need it (a UI that reads its World, a voice that writes to it), and only then hand those objects' callables to the `Wica`. The conversation demo is the reference for this order (see [conversation-demo.md](conversation-demo.md), "Composition: build, then wire, then start").
 
 ### `Event`s are surfaced, not adapted
 
@@ -120,15 +118,15 @@ The World and the Agent each own their instrumentation as `Event`s (see [world.m
 | `wica.on_agent_trigger` | `agent.on_trigger` | `Event[WorldEntry]` — **filtered** trigger, per trigger a step observed |
 | `wica.on_agent_prompt` | `agent.on_prompt` | `Event[list[BaseMessage]]` — the rendered messages before each reaction's first model call |
 | `wica.on_agent_response_rejected` | `agent.on_response_rejected` | `Event[ResponseRejection]` — once per response attempt the response guards reject |
-| `wica.on_agent_command` | `agent.on_command` | `Event[CommandIssued]` — each Command issued, at dispatch |
-| `wica.on_agent_text` | `agent.on_text` | `Event[str]` — the step's complete free text, before the sink receives it |
+| `wica.on_agent_command` | `agent.on_command` | `Event[CommandIssued]` — each Command issued, at dispatch; each output, once its body is complete |
+| `wica.on_agent_private_text` | `agent.on_private_text` | `Event[str]` — the text the model wrote outside its output tags in a step, when non-empty |
 | `wica.on_agent_reaction_ended` | `agent.on_reaction_ended` | `Event[ReactionTrace]` — once at the end of every reaction that started, whatever its outcome |
 | `wica.on_agent_trigger_dropped` | `agent.on_trigger_dropped` | `Event[WorldEntry]` — once per trigger dropped because a reaction was in flight |
 | `wica.on_agent_command_ended` | `agent.on_command_ended` | `Event[CommandTrace]` — once per dispatched Command when its terminal state lands |
 
 **Two triggers, on purpose.** `on_world_trigger` and `on_agent_trigger` are kept distinct because they answer different questions: the World's is "an input qualified to wake the agent" (fires even for triggers the busy single-in-flight loop later drops); the Agent's is "a step actually processed this trigger." A consumer showing every incoming input uses the former; one showing only what the robot reacted to uses the latter. The demo uses `on_agent_trigger` for its input panel (matching today's behavior).
 
-**`CommandIssued`** is a small frozen dataclass (`name: str`, `args: dict[str, Any]`, `call_id: str`) — a named, evolvable payload preferred over a bare `(name, args)` tuple. `call_id` names the Command's `agent:command:<call_id>` World entry, and the Event fires once that entry is registered, so a subscriber can attach a per-key listener to follow the execution (see [agent.md](agent.md), "Instrumentation"). It is defined in `agent.py` (the Agent emits it) and re-exported from the package.
+**`CommandIssued`** is a small frozen dataclass (`name: str`, `args: dict[str, Any]`, `call_id: str`) — a named, evolvable payload preferred over a bare `(name, args)` tuple. `call_id` names the Command's `agent:command:<call_id>` World entry, and the Event fires once that entry is registered, so a subscriber can attach a per-key listener to follow the execution; for an output the entry is already `running` by then (see [agent.md](agent.md), "Instrumentation"). It is defined in `agent.py` (the Agent emits it) and re-exported from the package. A response that does nothing (`<noop/>`) issues no Command and fires nothing on `on_agent_command`: the reaction record's `noop` flag reports it.
 
 **No `Wica`-level adapters or guards.** Because each signal is already an `Event`, `Wica` holds a reference and nothing more — no `emit` shims, no payload adapters. Subscriber isolation is provided by `Event.emit` itself (catch-log-continue — see [events.md](events.md)), uniformly for every `Event` in the system, so neither `Wica` nor the Agent needs a guard of its own. The prompt Event carrying `list[BaseMessage]` (a LangChain type) lives naturally on the Agent, the framework's LangChain I/O boundary, and does not leak into the `Event` primitive, which stays a pure project-agnostic leaf.
 
@@ -151,4 +149,4 @@ These are deferrals, not blockers to what's specified above.
 2. **Raw-model injection — available at the `Agent` layer.** `Agent.__init__` takes an optional `model=` override: config builds the model unless a bespoke `BaseChatModel` is passed (see [agent.md](agent.md), "Provider-agnostic model, from config"). `Wica.init` deliberately does **not** surface it — the facade stays config-only (provider/model/key/prompt from the file); a caller needing a raw model constructs the `Agent` directly. Whether the facade should ever expose it is left open, but no facade-level case has appeared.
 3. **Context-manager sugar.** `Wica` could implement `__enter__`/`__exit__` (calling `start()`/`close()`) so `with Wica.init(config) as wica:` reads naturally. Deferred as pure ergonomics on top of the explicit lifecycle methods.
 4. **Config-driven World/Command wiring.** World-entry schema and Command registration remain **code**, run against `wica.world`/`wica.register_command` after `init` — a JSON file can't express the callables involved (see [config.md](config.md), open question #3). If a future config ever seeds part of the World, `Wica.init` is where that would be applied.
-5. **Async shutdown.** `astop()`/`aclose()` coroutines that a sink or subscriber could `await` to stop the system from the loop thread are a possible addition; deferred until a consumer needs it — today the rule is "reject on the owned loop thread" (see "Shutdown from the loop thread").
+5. **Async shutdown.** `astop()`/`aclose()` coroutines that a Command or subscriber could `await` to stop the system from the loop thread are a possible addition; deferred until a consumer needs it — today the rule is "reject on the owned loop thread" (see "Shutdown from the loop thread").

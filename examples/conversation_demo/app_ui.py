@@ -6,8 +6,8 @@ reusable components (`wica.contrib.gradio`: `conversation_panel`, `world_state_p
 `reaction_panel` — see specs/gradio-contrib.md); the UI **owns their presenters**: it creates the
 `TranscriptLog` and `ReactionLog` (each subscribed to the Wica's Events in its constructor, both
 given the demo's `display_entry` hook) and the Speaking panel's `SpeakingSlot`, and returns the
-transcript and the slot on the `DemoUi` handle so the app can wire them into the robot — the
-transcript's `output_sink` onto the Wica, the slot into `say`. The Speaking panel and the sensor
+slot on the `DemoUi` handle so the app can wire it into the robot's `say` (the transcript needs
+no wiring: it only listens). The Speaking panel and the sensor
 inputs are the demo's own. The app file (`app.py`) builds the Wica first, calls this, then wires
 and starts (see specs/conversation-demo.md, "Composition").
 """
@@ -81,11 +81,10 @@ def _speaking_html(speaking: Speaking | None) -> str:
 
 @dataclass(frozen=True)
 class DemoUi:
-    """What build_ui() returns: the page, plus the two presenters the app wires into the robot
-    (`transcript.output_sink` → `wica.set_output_sink`, `speaking` → `say`)."""
+    """What build_ui() returns: the page, plus the Speaking slot the app wires into the robot
+    (`speaking` → `say`)."""
 
     blocks: gr.Blocks
-    transcript: TranscriptLog
     speaking: SpeakingSlot
 
 
@@ -133,10 +132,11 @@ def build_ui(
             "running in the background, so a later input can start a new step that sees or cancels "
             "it. Inputs appear on the **right**; on the **left**, each **reasoning step is one "
             "collapsible group** (`💬 reaction N`), and inside it every item is labelled by the "
-            "framework channel it came from: **🗣️ say** (the robot's spoken reply — its `say` output "
-            "Command, what the person hears), **💭 output sink** (the model's free text, now private "
-            "reasoning), **🦾** command calls, and **🚫 noop** (the robot explicitly choosing not to "
-            "react — often its own re-triggered step, since speaking wakes the agent again). "
+            "framework channel it came from: **🗣️ say** (the robot's spoken reply — what the model wrote "
+            "inside a `<say>` tag, delivered to its `say` output Command: what the person hears), "
+            "**💭 private text** (what the model wrote outside the tag, which nobody hears), **🦾** "
+            "command calls, and **🚫 noop** (the robot explicitly choosing not to react, typically "
+            "to a change it was not asked about). "
             "Every Command item shows its **execution state live**: a spinner while it runs, then "
             "✅ complete / ❌ failed / ⏹ cancelled with its result and duration. The **Speaking** "
             "panel under the conversation shows the current `say` word by word."
@@ -183,4 +183,4 @@ def build_ui(
             lambda: _speaking_html(speaking.read()), outputs=speaking_view
         )
 
-    return DemoUi(blocks=demo, transcript=transcript, speaking=speaking)
+    return DemoUi(blocks=demo, speaking=speaking)

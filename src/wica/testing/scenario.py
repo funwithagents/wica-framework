@@ -25,7 +25,6 @@ from typing import Any
 from wica.testing.checks import (
     CHECKS,
     CANCEL,
-    NOOP,
     Check,
     CheckContext,
     CheckSpec,
@@ -41,9 +40,9 @@ _TOP_KEYS = {"name", "description", "checks", "steps", "timeout_s", "params"}
 _DEFAULT_TIMEOUT_S = 300.0
 _WAIT_WITHIN_S = 60.0
 _EXPECT_WITHIN_S = 30.0
-_NATIVE_COMMANDS = frozenset({NOOP, CANCEL})
+_NATIVE_COMMANDS = frozenset({CANCEL})
 _WAIT_WORDS = frozenset({"idle", "ready", "speaking"})
-_EXPECT_KINDS = ("output", "action", "text", "no_action", "world", "latency")
+_EXPECT_KINDS = ("output", "action", "private_text", "no_action", "world", "latency")
 _EXPECT_EXTRAS = {"action": {"where", "state", "result_contains"}}
 _OUTPUT_CHECKS = frozenset({"answers_each_input", "quiet_on_background_change"})
 
@@ -67,10 +66,14 @@ class Requires:
         commands: Mapping[str, Any] | set[str] | frozenset[str],
         output_command_name: str | None,
     ) -> list[str]:
-        """The requirements the given SUT surface does not satisfy, as reasons."""
+        """The requirements the given SUT surface does not satisfy, as reasons. *commands* are
+        the SUT's Commands (the Probe's, which leave the output Command out); a step naming the
+        output Command as an action is satisfied by *output_command_name*."""
         reasons = [f"input {key!r}" for key in self.inputs if key not in inputs]
         reasons += [
-            f"command {name!r}" for name in self.commands if name not in commands
+            f"command {name!r}"
+            for name in self.commands
+            if name not in commands and name != output_command_name
         ]
         if self.output_command and output_command_name is None:
             reasons.append("an output Command")
@@ -91,7 +94,7 @@ class WaitStep:
 
 @dataclass(frozen=True)
 class ExpectStep:
-    """`what` is one of output, action, text, no_action, world, latency; `spec` its value, `extra`
+    """`what` is one of output, action, private_text, no_action, world, latency; `spec` its value, `extra`
     the action's where / state / result_contains."""
 
     what: str
@@ -122,7 +125,7 @@ class Scenario:
     @property
     def requires(self) -> Requires:
         """Derived from the steps: the Inputs written, the Commands named (waits, expects, check
-        arguments; WICA's native `noop` / `cancel_command` excepted), and whether an output Command
+        arguments; WICA's native `cancel_command` excepted), and whether an output Command
         is needed (a "speaking" wait, an output expect, a check that reads it)."""
         inputs: list[str] = []
         commands: list[str] = []
@@ -303,10 +306,14 @@ def _expect(raw: dict[str, Any], fail: Any) -> ExpectStep:
     spec = body[what]
     if what in ("action", "no_action") and not isinstance(spec, str):
         raise fail(f"'expect' {what!r} is a Command name")
-    if what in ("output", "text") and not (
+    if what == "output" and not (
         isinstance(spec, dict) and not set(spec) - {"contains", "arg"}
     ):
-        raise fail(f"'expect' {what!r} is an object with optional 'contains' / 'arg'")
+        raise fail("'expect' 'output' is an object with optional 'contains' / 'arg'")
+    if what == "private_text" and not (
+        isinstance(spec, dict) and not set(spec) - {"contains"}
+    ):
+        raise fail("'expect' 'private_text' is an object with an optional 'contains'")
     if what == "world" and not (
         isinstance(spec, dict) and set(spec) == {"key", "equals"}
     ):
@@ -416,8 +423,8 @@ def _play_expect(run: TestRun, step: ExpectStep) -> Finding:
             result_contains=step.extra.get("result_contains"),
             within=within,
         )
-    if step.what == "text":
-        return run.expect_text(contains=spec.get("contains"), within=within)
+    if step.what == "private_text":
+        return run.expect_private_text(contains=spec.get("contains"), within=within)
     if step.what == "no_action":
         return run.expect_no_action(spec, for_=step.for_ or 0.0)
     if step.what == "world":
@@ -430,7 +437,7 @@ def check_context(run: TestRun, scenario: Scenario) -> CheckContext:
     inputs = run.probe.inputs
     timeline = run.timeline()
     return CheckContext(
-        output_command_name=run.probe.output_command_name,
+        output_command_name=run.probe.output_command,
         inputs=tuple(inputs),
         triggering_inputs=tuple(k for k, c in inputs.items() if c.triggers_llm_call),
         commands=tuple(run.probe.commands),
@@ -504,8 +511,8 @@ def _expect_call(step: ExpectStep, call: Any) -> dict[str, Any]:
         return call("expect_output", within=within, **spec)
     if step.what == "action":
         return call("expect_action", name=spec, within=within, **step.extra)
-    if step.what == "text":
-        return call("expect_text", within=within, **spec)
+    if step.what == "private_text":
+        return call("expect_private_text", within=within, **spec)
     if step.what == "no_action":
         return call("expect_no_action", name=spec, for_=step.for_)
     if step.what == "world":

@@ -1,6 +1,6 @@
 # Commands
 
-A Command is the agent's unit of action on the world: speech, movement, a display change, an API call. You register functions; the Agent binds them as the model's native tool calls, runs each as a cancellable task, and tracks it as a World entry so a later step can see it running and stop it. The API in one place is [../reference/api.md](../reference/api.md#command); the design is [specs/commands.md](../../specs/commands.md).
+A Command is the agent's unit of action on the world: speech, movement, a display change, an API call. You register functions; the Agent binds them as the model's native tool calls, runs each as a cancellable task, and tracks it as a World entry so a later step can see it running and stop it. One Command is different: the **output Command**, what the model says to its user, which the model issues by writing a tag in its text ([Make your agent speak](#make-your-agent-speak)). The API in one place is [../reference/api.md](../reference/api.md#command); the design is [specs/commands.md](../../specs/commands.md).
 
 ## A function is a Command
 
@@ -19,7 +19,7 @@ wica.register_command(dance)
 
 The function's name is the tool's name, its docstring the description the model reads, its signature the arguments schema: write them for the model. Return a string (or anything printable): it is the result the model observes. Sync and async functions both work ([Cancellation](#cancellation-reaches-the-task-not-always-the-work) says why async is preferred). Register before `start()`.
 
-- **Names are unique**, and `noop` and `cancel_command` are reserved by WICA: a duplicate or reserved name raises `ValueError`.
+- **Names are unique**, and `noop`, `next` and `cancel_command` are reserved by WICA: a duplicate or reserved name raises `ValueError`.
 - **`Command(...)`** is for the cases a bare function cannot express: `Command(fn, name="sum", description="…")` overrides the inferred metadata; `Command(existing_tool)` registers an off-the-shelf LangChain `BaseTool` unmodified; `Command(fn, triggers_on_completion=False)` is below.
 
 ## What happens when the model calls one
@@ -28,20 +28,32 @@ Every issued Command runs as an asyncio task on the Wica's loop and is tracked a
 
 The model receives an immediate acknowledgement that the Command was **dispatched**, not its result: the result arrives later, when the entry turns terminal, as an observation in a new reasoning step. The runtime primer tells the model so. Two consequences:
 
-- **A completion wakes the Agent** (the entry triggers), so the model sees what happened and can continue, chain a second action, or call `noop`. `Command(fn, triggers_on_completion=False)` turns this off for a Command whose outcome never deserves a step (setting an LED): the terminal entry is then observed by the next input-driven step.
+- **A completion wakes the Agent** (the entry triggers), so the model sees what happened and can continue, chain a second action, or do nothing ([Staying silent](#staying-silent)). `Command(fn, triggers_on_completion=False)` turns this off for a Command whose outcome never deserves a step (setting an LED): the terminal entry is then observed by the next input-driven step.
 - **All the Commands of one response start at once** and run concurrently, in no guaranteed order; WICA does not serialize them. A resource two Commands share (a speaker, a motor) is yours to guard with a lock inside the Commands, and sequencing is the model's job, which the primer tells it: issue the first, issue the next in a later step once the first is observed complete.
 
 A long Command does not block the Agent: once a step has dispatched its Commands, the Agent is free to react to the next input while they run.
 
 ## Cancelling
 
-The Agent auto-registers **`cancel_command(call_id)`**: the model can abort its own in-flight Command when it sees it still `running` in a later step (the person said "Stop!" while the dance runs). `stop()` and `close()` cancel every in-flight Command too. A cancelled Command's entry turns `cancelled`, and the completion wakes the Agent like any other.
+The Agent auto-registers **`cancel_command(call_id)`**: the model can abort its own in-flight Command when it sees it still `running` in a later step (the person said "Stop!" while the dance runs). `stop()` and `close()` cancel every in-flight Command too. A cancelled Command's entry turns `cancelled`, and the completion wakes the Agent like any other. A running output is cancelled the same way, and wakes nothing ([Interruption](#interruption-and-what-was-heard)).
 
 The transcript panel and the `on_agent_command` / `on_agent_command_ended` Events show every issuance and its end ([latency-and-traces.md](latency-and-traces.md)).
 
-## The output Command
+## Make your agent speak
 
-By default the model replies as free text, which the output sink receives. Set an **output Command** and the model must address the user by calling it; its free text becomes private reasoning that still reaches the sink:
+Set one **output Command**: the function that receives what the model says to its user, whether it drives a voice, a chat bubble or a robot's mouth. The model speaks by writing a tag named after it in its response text:
+
+```
+<say emotion="happy">Hello there!</say>
+```
+
+Only the tag's body reaches your function. Text the model writes outside a tag is private: nobody hears it, and `wica.on_agent_private_text` reports it. The output Command is not a tool and is not in `wica.agent.commands`; speaking does not depend on the provider's tool calling. With no output Command set, no tag is taught and all the model's text is private, which suits an agent that only acts. The contract in full is [../reference/api.md](../reference/api.md#the-output-command).
+
+Set it **before `start()`**: `set_output_command` recomposes the system prompt (the primer teaches the tag, with your docstring), and setting it after the first step rebuilds the system message and drops the cached prefix.
+
+### The whole text, or the words as they are written
+
+The first parameter receives the text, and its annotation chooses how. Annotated `str`, the function is called once the tag closes, with the whole text:
 
 ```python
 async def say(text: str) -> str:
@@ -53,16 +65,82 @@ async def say(text: str) -> str:
 wica.set_output_command(say)
 ```
 
-What this buys, compared with a sink that calls the voice itself: speech becomes a tracked, **cancellable** action. A new input arriving while `say` runs starts a step that sees `say … (running)` and can `cancel_command` it, which is barge-in; and the model decides per step whether to say anything at all.
+Annotated `OutputStream`, the function is called at the output's first words and receives them as the model writes them, so a voice can start before the response is complete. It must be `async def`:
 
-- Set it **before `start()`**: it recomposes the system prompt (the primer's reply clause names the Command), and setting it after the first step rebuilds the system message and drops the cached prefix.
-- Its name follows the uniqueness rule; its signature is yours (`say(text)` here), the model fills it from the description.
-- While it is bound, **every model call must call a tool** (`force_tool_call`, default `true`): the output Command to speak, another Command to act, or `noop` to do nothing. Without it a weak model can answer in plain text, which in this mode is private reasoning nobody hears. Forced, models rarely write free text at all, so expect little private reasoning in the sink. Anthropic extended thinking cannot be forced: the choice is dropped with a warning, and `force_tool_call: false` silences it ([../reference/configuration.md](../reference/configuration.md#the-agent-block)).
-- By default its completion wakes the Agent (one more model call per utterance, so the model can chain or `noop`); pass `Command(say, triggers_on_completion=False)` to make speaking go straight to idle.
+```python
+from wica import OutputStream
 
-## `noop`
 
-The Agent also auto-registers **`noop`**, a zero-argument Command the model calls to react to nothing: it creates no entry, spawns no task and never triggers. It is the terminator of the completion chain (the dance finished, there is nothing to add) and the way the model declines to react to an observation that does not concern it. The primer allows it conservatively: a request or a question must still be answered. `noop` is reported on `on_agent_command` like any issuance, so a UI can show that the agent chose not to react.
+async def say(text: OutputStream) -> str:
+    """Speak out loud to the person in front of you."""
+    async for piece in text:  # ends when the tag closes
+        await tts.feed(piece)
+    return "Said it."
+```
+
+`text.text` is everything received so far and `await text.read()` waits for the end and returns the whole body. The return value is the execution's result, which the model can observe.
+
+### Attributes
+
+Every other parameter is a tag attribute, for what an utterance carries besides its words. Annotate it `str` or a `Literal` of strings and give it a string default:
+
+```python
+from typing import Literal
+
+from wica import OutputStream
+
+
+async def say(
+    text: OutputStream, emotion: Literal["happy", "sad", "neutral"] = "neutral"
+) -> None:
+    """Speak out loud to the person in front of you."""
+    await tts.speak(text, style=emotion)
+```
+
+The primer lists each attribute with its allowed values. An attribute the model omits, misspells or gives a value outside the `Literal` falls back to the default, and the text is still delivered. Keep attributes few: each is one more thing for the model to get right.
+
+### Each utterance is a tracked execution
+
+Each tag is its own output, with an `agent:command:<call_id>` entry like any Command: `running` from its first words, then `complete`, `failed` or `cancelled`, its `args` holding the attributes and the `text`. A response with several tags delivers them one after the other, in the order written. `on_agent_command` reports an output once its body is complete, and `on_agent_command_ended` its end.
+
+The model is not obliged to tag: a response with text and no tag at all is delivered whole, as one output, when the response ends. It is not streamed, since until then a tag may still come.
+
+### Interruption and what was heard
+
+There is one voice. When a response speaks, every output still running or waiting from an earlier response is cancelled: the person says "Stop, please", the model answers "Okay", and the story it was telling is cut off. Other Commands are left alone, since speaking is not a request to stop acting. The model can also stop its own speech without saying anything, with `cancel_command` on the output's `call_id`.
+
+A cancelled output raises `asyncio.CancelledError` in your function at its next `await`. Set `text.heard` there to what was actually delivered, and the model's history keeps that instead of the whole body, so the model does not believe it said what nobody heard:
+
+```python
+async def say(text: OutputStream) -> str:
+    """Speak out loud to the person in front of you."""
+    spoken: list[str] = []
+    try:
+        async for piece in text:
+            await tts.speak(piece)
+            spoken.append(piece)
+    except asyncio.CancelledError:
+        text.heard = "".join(spoken)  # what the person heard before the cut
+        raise
+    return "Said it."
+```
+
+A function that leaves `heard` unset keeps its whole text in history. An output of the same response that never started is removed from it.
+
+### Continuing after speaking: the `<next>` note
+
+The end of an output does not call the model again. When something remains to be done once it has finished speaking, the model writes a private note in the same response:
+
+```
+<say>Give me a moment.</say>
+<next>look it up, then tell them what I found</next>
+```
+
+When the response's last output ends, a step runs and shows the model its note. `max_next_steps` (default `1`) caps how many steps in a row a note may wake; `0` turns the mechanism off and `null` removes the cap ([../reference/configuration.md](../reference/configuration.md#the-agent-block)). A cancelled output wakes nothing. A Command issued as a tool call in the same response still wakes a step on completion by its own `triggers_on_completion`, so "speak and act, then speak about the result" needs no note.
+
+### Staying silent
+
+An observation does not oblige a reaction. The model declines by writing `<noop/>` as its whole response; an empty response counts the same. Nothing is dispatched, no Command Event fires, and the reaction's record has `noop=True` ([latency-and-traces.md](latency-and-traces.md)). The primer allows it conservatively: a request or a question must still be answered. `noop` is not a Command; the name stays reserved.
 
 ## Cancellation reaches the task, not always the work
 

@@ -36,7 +36,7 @@ SutEventKind = Literal[
     "command_issued",
     "command_state",
     "command_ended",
-    "output_text",
+    "private_text",
     "reaction_ended",
     "action",
 ]
@@ -58,7 +58,7 @@ class SutEvent:
     state: str | None = None  # running / complete / failed / cancelled
     result: str | None = None
     error: str | None = None
-    text: str | None = None  # output_text; the prompt text when recorded
+    text: str | None = None  # private_text; the prompt text when recorded
     message_count: int | None = None  # prompt only
     reaction: ReactionTrace | None = (
         None  # reaction_ended: the framework's record, whole
@@ -74,7 +74,7 @@ RunOutcome = Literal["completed", "failed"]
 class Finding:
     """The outcome of one expectation: a hard pass/fail with what matched or why it did not."""
 
-    expectation: str  # e.g. "expect_text(contains='hi')", or a check's name
+    expectation: str  # e.g. "expect_output(contains='hi')", or a check's name
     ok: bool
     detail: str
     t: float
@@ -137,6 +137,7 @@ def metric_samples(
         add("reaction_latency", reaction_latency(reaction))
         add("model_latency", reaction.model_latency)
         add("time_to_first_content", reaction.time_to_first_content)
+        add("time_to_first_output", reaction.time_to_first_output)
         add("generation_time", reaction.generation_time)
         add("coalescing_wait", reaction.coalescing_wait)
         add("busy_time", reaction.busy_time)
@@ -159,24 +160,27 @@ def metric_samples(
             sum(1 for e in timeline[start:end] if e.kind == "prompt"),
         )
 
-    # barge_in: an input written while the output Command runs → the next cancel_command.
+    # barge_in: an input written while an output runs → that output's `cancelled` state, whether
+    # `cancel_command` or a new utterance cut it off. One sample per output cut off, from the
+    # first input written while it ran.
     if output_command_name is not None:
-        running_output: set[str] = set()
-        pending_inputs: list[float] = []
+        talked_over: dict[
+            str, float | None
+        ] = {}  # running output → that first input's time
         for event in timeline:
             if event.kind == "command_state" and event.name == output_command_name:
-                if event.state == "running" and event.call_id is not None:
-                    running_output.add(event.call_id)
-                elif event.call_id is not None:
-                    running_output.discard(event.call_id)
-            elif event.kind == "input_written" and running_output:
-                pending_inputs.append(event.t)
-            elif (
-                event.kind == "command_issued"
-                and event.name == "cancel_command"
-                and pending_inputs
-            ):
-                add("barge_in", event.t - pending_inputs.pop(0))
+                if event.call_id is None:
+                    continue
+                if event.state == "running":
+                    talked_over.setdefault(event.call_id, None)
+                    continue
+                written = talked_over.pop(event.call_id, None)
+                if event.state == "cancelled" and written is not None:
+                    add("barge_in", event.t - written)
+            elif event.kind == "input_written":
+                for call_id, written in talked_over.items():
+                    if written is None:
+                        talked_over[call_id] = event.t
 
     return samples
 

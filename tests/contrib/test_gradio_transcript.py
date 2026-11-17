@@ -8,16 +8,30 @@ key-less `provider: "fake"` model. See specs/gradio-contrib.md ("Component 3", "
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage
 
 from tests.support import command_entry, item_titled, make_entry, titles
-from wica import CommandExecution, CommandIssued, ReactionTrace, WorldEntry
+from wica import (
+    Command,
+    CommandExecution,
+    CommandIssued,
+    OutputStream,
+    ReactionTrace,
+    TextPart,
+    Wica,
+    WicaConfig,
+    WorldEntry,
+)
 from wica.contrib.gradio import EntryDisplay, TranscriptLog
 
 
-def reaction_trace(reaction_id: int, busy_time: float) -> ReactionTrace:
+def reaction_trace(
+    reaction_id: int, busy_time: float, *, noop: bool = False
+) -> ReactionTrace:
     """A hand-built ReactionTrace for on_reaction_ended tests — only reaction_id and busy_time
     (derived from window_closed_at -> ended_at) matter to the transcript."""
     t0 = datetime(2026, 9, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -32,9 +46,8 @@ def reaction_trace(reaction_id: int, busy_time: float) -> ReactionTrace:
         outcome="ok",
         error=None,
         text_length=0,
-        sink_duration=None,
         command_call_ids=(),
-        noop=False,
+        noop=noop,
         usage=None,
         ended_at=t0 + timedelta(seconds=busy_time),
         trace_id=None,
@@ -80,7 +93,7 @@ def test_hook_overrides_and_none_falls_back_to_default():
     assert log.display(make_entry("other", 1)).label == "⚡ other = 1"
 
 
-# --- trigger / prompt / sink callbacks -----------------------------------------------
+# --- trigger / prompt / private-text callbacks ---------------------------------------
 
 
 def test_on_trigger_shows_input_on_the_user_side_via_the_hook():
@@ -138,15 +151,15 @@ def test_reaction_ended_for_an_unknown_id_is_ignored():
     assert after.conv_sig == before.conv_sig
 
 
-def test_output_sink_ignores_blank_and_records_private_reasoning():
+def test_private_text_ignores_blank_and_is_shown_under_the_reaction():
     log = TranscriptLog(None)
     log.on_prompt([HumanMessage(content="hi")])
-    asyncio.run(log.output_sink("   "))
-    assert titles(log.snapshot().conversation).count("💭 output sink") == 0
+    log.on_private_text("   ")
+    assert titles(log.snapshot().conversation).count("💭 private text") == 0
 
-    asyncio.run(log.output_sink("private reasoning"))
-    thought = item_titled(log.snapshot().conversation, "💭 output sink")
-    assert thought["content"] == "private reasoning"
+    log.on_private_text("a note to myself")
+    thought = item_titled(log.snapshot().conversation, "💭 private text")
+    assert thought["content"] == "a note to myself"
     assert thought["metadata"]["parent_id"] == "reaction-1"
 
 
@@ -166,13 +179,81 @@ def test_on_command_creates_a_pending_item_under_the_current_reaction():
     )  # in progress from the moment it's issued
 
 
-def test_noop_is_shown_as_choosing_not_to_react_without_state():
+def test_declined_reaction_is_shown_from_its_record_without_state():
+    """A declined reaction issues no Command: the item comes from the reaction record's `noop`
+    flag, nested under that reaction's group, and a record without the flag adds nothing."""
     log = TranscriptLog(None)
     log.on_prompt([HumanMessage(content="hi")])
-    log.on_command(CommandIssued(name="noop", args={}, call_id="c2"))
+    log.on_reaction_ended(reaction_trace(1, 0.5))
+    assert "🚫 noop" not in titles(log.snapshot().conversation)
+
+    log.on_prompt([HumanMessage(content="a background change")])
+    log.on_reaction_ended(reaction_trace(2, 0.5, noop=True))
     item = item_titled(log.snapshot().conversation, "🚫 noop")
     assert item["content"] == "chose not to react"
+    assert item["metadata"]["parent_id"] == "reaction-2"
     assert "status" not in item["metadata"]  # no execution to follow
+
+
+def test_output_item_is_created_from_an_entry_already_running(unstarted_wica):
+    """An output is reported once its text is complete, its entry by then already `running`: no
+    listener call will ever carry that state, so the log reads it when it attaches — the item
+    is rendered through the hook at once, and its duration counts from that version."""
+    wica = unstarted_wica("say")
+    log = TranscriptLog(wica, robot_hook)
+    log.on_prompt([HumanMessage(content="hi")])
+    key = "agent:command:o1"
+    wica.world.register(key, CommandExecution, serialize_fn=lambda value, previous: [])
+    wica.start()  # the World takes updates only while running
+    wica.world.update(
+        key, CommandExecution(name="say", args={"text": "hi there"}, state="running")
+    )
+    running_at = wica.world.get_entry(key).current.timestamp
+
+    log.on_command(CommandIssued(name="say", args={"text": "hi there"}, call_id="o1"))
+    item = item_titled(log.snapshot().conversation, "🗣️ say")
+    assert item["content"] == "hi there"  # through the hook, not `say(text=…)`
+    assert item["metadata"]["status"] == "pending"
+
+    ended = command_entry("o1", "say", {"text": "hi there"}, "cancelled")
+    ended = replace(
+        ended,
+        current=replace(ended.current, timestamp=running_at + timedelta(seconds=2.5)),
+    )
+    asyncio.run(log.on_command_update(ended))
+    item = item_titled(log.snapshot().conversation, "🗣️ say")
+    assert item["metadata"]["title"] == "🗣️ say ⏹ cancelled"
+    assert item["metadata"]["duration"] == 2.5
+    assert "status" not in item["metadata"]
+
+
+def test_output_item_is_created_from_an_entry_already_over(unstarted_wica):
+    """A short output may be over before its text is reported: the item shows the outcome at
+    once, timed from the running version before it."""
+    wica = unstarted_wica("say")
+    log = TranscriptLog(wica, robot_hook)
+    key = "agent:command:o1"
+    wica.world.register(key, CommandExecution, serialize_fn=lambda value, previous: [])
+    wica.start()
+    wica.world.update(
+        key, CommandExecution(name="say", args={"text": "hi"}, state="running")
+    )
+    wica.world.update(
+        key,
+        CommandExecution(
+            name="say", args={"text": "hi"}, state="complete", result="Said."
+        ),
+    )
+    entry = wica.world.get_entry(key)
+    assert entry.previous is not None
+    ran = (entry.current.timestamp - entry.previous.timestamp).total_seconds()
+
+    log.on_command(CommandIssued(name="say", args={"text": "hi"}, call_id="o1"))
+    item = item_titled(log.snapshot().conversation, "🗣️ say")
+    assert item["metadata"]["title"] == "🗣️ say ✅"
+    assert item["content"] == "hi\n→ Said."
+    assert "status" not in item["metadata"]
+    assert item["metadata"]["duration"] == round(ran, 1)
 
 
 def test_command_item_follows_running_then_complete(unstarted_wica):
@@ -259,3 +340,101 @@ def test_signature_tracks_in_place_state_edits_and_is_stable_otherwise():
 
     asyncio.run(log.on_command_update(command_entry("c1", "dance", {}, "complete")))
     assert log.snapshot().conv_sig != first.conv_sig  # a state flip is a real change
+
+
+# --- over a running Wica: the transcript of real reactions ---------------------------
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.01)
+
+
+def test_transcript_of_a_spoken_reaction_then_a_declined_one():
+    """The whole seam over a scripted model: a response with private text and two output tags
+    gives one 🗣️ item per tag (each with its whole text and its outcome) and a 💭 item; a
+    `<noop/>` response gives a 🚫 item under its own reaction and no Command item."""
+    config = WicaConfig.from_dict(
+        {
+            "agent": {
+                "provider": "fake",
+                "model": "scripted",
+                "system_prompt": "You are a test robot.",
+                "model_kwargs": {
+                    "delay_s": 0,
+                    "script": [
+                        {
+                            "text": "They greeted me. <say>Hello there</say>"
+                            '<say emotion="happy">How are you?</say>'
+                        },
+                        {"text": "<noop/>"},
+                    ],
+                },
+            }
+        }
+    )
+    wica = Wica.init(config)
+    try:
+
+        async def say(text: OutputStream, emotion: str = "neutral") -> str:
+            """Speak to the person."""
+            return f"Said {len((await text.read()).split())} words."
+
+        wica.set_output_command(Command(say))
+        for key in ("speech_input", "light"):
+            wica.world.register(
+                key,
+                str,
+                serialize_fn=lambda v, p, key=key: [TextPart(f"{key}: {v}")],
+                triggers_llm_call=True,
+            )
+        log = TranscriptLog(wica)
+        wica.start()
+
+        def finished(count: int) -> bool:
+            return (
+                sum(
+                    str(t).startswith("🗣️ say ✅")
+                    for t in titles(log.snapshot().conversation)
+                )
+                == count
+            )
+
+        wica.world.update("speech_input", "hello")
+        # Both outputs over and the reaction ended: the next input is not dropped as busy.
+        _wait_for(
+            lambda: (
+                finished(2)
+                and "status"
+                not in item_titled(log.snapshot().conversation, "💬 reaction 1")[
+                    "metadata"
+                ]
+            )
+        )
+        wica.world.update("light", "on")
+        _wait_for(lambda: "🚫 noop" in titles(log.snapshot().conversation))
+        convo = log.snapshot().conversation
+    finally:
+        wica.close()
+
+    spoken = [
+        m for m in convo if str(m.get("metadata", {}).get("title", "")).startswith("🗣️")
+    ]
+    assert [m["content"] for m in spoken] == [
+        "say(text='Hello there')\n→ Said 2 words.",
+        "say(emotion='happy', text='How are you?')\n→ Said 3 words.",
+    ]
+    assert all(m["metadata"]["parent_id"] == "reaction-1" for m in spoken)
+    assert all("status" not in m["metadata"] for m in spoken)
+    private = item_titled(convo, "💭 private text")
+    assert private["content"] == "They greeted me."
+    assert private["metadata"]["parent_id"] == "reaction-1"
+    # The declined reaction: one item under its own group, and no Command item for it.
+    noop = item_titled(convo, "🚫 noop")
+    assert noop["metadata"]["parent_id"] == "reaction-2"
+    assert [t for t in titles(convo) if str(t).startswith(("🗣️", "🦾"))] == [
+        "🗣️ say ✅",
+        "🗣️ say ✅",
+    ]

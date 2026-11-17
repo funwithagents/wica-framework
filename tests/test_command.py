@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import pytest
 from langchain_core.tools import BaseTool, tool
 
+from wica import OutputStream
 from wica.command import Command
 
 
@@ -89,3 +92,38 @@ def test_triggers_on_completion_defaults_true_and_is_settable_for_callables_and_
     )
     with pytest.raises(ValueError):
         Command(existing, name="renamed")
+
+
+def test_callable_and_description_expose_what_the_command_was_built_from():
+    def speak(text: str) -> str:
+        """Speak out loud."""
+        return text
+
+    @tool
+    def existing(a: int) -> int:
+        """An existing tool."""
+        return a
+
+    # The output Command is called through `callable`, not through the tool, and the runtime
+    # primer quotes `description` (see specs/commands.md, "The output Command").
+    assert Command(speak).callable is speak
+    assert Command(speak).description == "Speak out loud."
+    renamed = Command(speak, name="say", description="Say it.")
+    assert renamed.callable is speak
+    assert renamed.description == "Say it."
+    # A wrapped tool has no callable to hand an output to.
+    assert Command(existing).callable is None
+    assert Command(existing).description == "An existing tool."
+
+
+def test_a_command_can_be_built_from_a_function_taking_an_output_stream():
+    async def say(
+        text: OutputStream, emotion: Literal["happy", "sad"] = "happy"
+    ) -> None:
+        """Speak out loud."""
+
+    command = Command(say)
+
+    assert command.name == "say"
+    assert command.callable is say
+    assert command.description == "Speak out loud."

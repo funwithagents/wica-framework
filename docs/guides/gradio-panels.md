@@ -1,6 +1,6 @@
 # Gradio panels: watch the World, the prompts and the transcript
 
-Three browser panels ship in the package behind the `gradio` extra, lifted from the conversation demo: the **live World-state table**, the **reaction history** (each step's exact prompt and its timing) and the **conversation transcript** (inputs, Command executions with their live state, the model's text). Each is a presenter built over your `Wica` plus a panel you drop into your own `gr.Blocks`. Core `wica` never imports Gradio; the design is [specs/gradio-contrib.md](../../specs/gradio-contrib.md).
+Three browser panels ship in the package behind the `gradio` extra, lifted from the conversation demo: the **live World-state table**, the **reaction history** (each step's exact prompt and its timing) and the **conversation transcript** (inputs, Command executions and utterances with their live state, the model's private text). Each is a presenter built over your `Wica` plus a panel you drop into your own `gr.Blocks`. Core `wica` never imports Gradio; the design is [specs/gradio-contrib.md](../../specs/gradio-contrib.md).
 
 ```
 uv add "wica[anthropic,gradio] @ git+https://github.com/funwithagents/wica-framework"
@@ -69,7 +69,8 @@ with gr.Blocks() as page:
     )
 
 
-# 3. Wire: the Commands (the voice as the output Command), the transcript's sink.
+# 3. Wire: the voice as the output Command, the other Commands. The presenters need no
+#    wiring: they subscribed to the Wica's Events when they were built.
 async def say(text: str) -> str:
     """Speak out loud to the person in front of you."""
     ...  # your voice
@@ -82,8 +83,7 @@ async def dance() -> str:
     return "Finished the dance."
 
 
-wica.set_output_sink(transcript.output_sink)  # the model's free text → the 💭 item
-wica.set_output_command(say)  # the user-facing channel → the 🗣️ item
+wica.set_output_command(say)  # what the model writes in <say>…</say> → the 🗣️ item
 wica.register_command(dance)
 
 # 4. Start the system, then serve the page; tear down when the server returns.
@@ -100,7 +100,7 @@ finally:
 |---|---|---|---|
 | World state | none (reads the World) | `world_state_panel(world, *, refresh_s=0.2) -> gr.HTML` | Every prompt entry: key, value (a running Command as `name(args) [state]`), last update |
 | Reaction history | `ReactionLog(wica, display_entry=None)` | `reaction_panel(reactions, *, refresh_s=0.2, lines=16) -> tuple[gr.Dropdown, gr.Textbox, gr.Textbox]` | One dropdown per reaction, a Prompt tab (the exact messages sent) and an Instrumentation tab (the reaction's measures) |
-| Transcript | `TranscriptLog(wica, display_entry=None)` | `conversation_panel(transcript, *, refresh_s=0.2, height=420) -> gr.Chatbot` | The inputs the Agent reacted to, each Command execution as an item that updates with its state, the free text as the 💭 item |
+| Transcript | `TranscriptLog(wica, display_entry=None)` | `conversation_panel(transcript, *, refresh_s=0.2, height=420) -> gr.Chatbot` | The inputs the Agent reacted to, each Command execution and each output (🗣️) as an item that updates with its state, the model's private text as the 💭 item, a declined reaction as the 🚫 item |
 
 A presenter with `wica=None` renders empty and subscribes to nothing, for an explore-only page when the model cannot be built (the demo does this when no key is set). Each panel owns the `gr.Timer` that keeps it live and returns its component(s), so the layout is yours: they are building blocks, not a page.
 
@@ -109,9 +109,9 @@ A presenter with `wica=None` renders empty and subscribes to nothing, for an exp
 ## The ordering rules
 
 - **Presenters after `Wica.init`.** They subscribe to the Wica's Events in their constructor. They are plain objects: build them before or outside the `gr.Blocks` context. Panels create Gradio components and **must** be called inside one.
-- **Wire before `start()`.** `set_output_command` recomposes the system prompt; the order among the sink, the output Command and the Commands does not matter, nor does the order between registering entries and building presenters.
-- **The sink's meaning follows the output Command.** With one set, the free text the transcript's sink receives is the model's private reasoning (the 💭 item) and the 🗣️ Command item is what the person hears; without one, the sink text is the utterance. The transcript renders both the same way.
+- **Wire before `start()`.** `set_output_command` recomposes the system prompt; the order between the output Command and the Commands does not matter, nor does the order between registering entries and building presenters. The transcript reads which Command is the voice from the Agent when it renders, so it may be built before `set_output_command` runs.
+- **🗣️ is heard, 💭 is not.** The 🗣️ item is one output: the body of one tag of the output Command, shown once the tag closes and updated as it turns `complete` or `cancelled`. The 💭 item is the model's private text, what it wrote outside its tags; with no output Command set, all its text ([commands.md](commands.md#make-your-agent-speak)).
 - **Input widgets update the World, which works only while running**: start the Wica before `launch()`.
-- **Tear down from the Gradio thread.** `launch()` blocks until the server exits; call `wica.close()` after it returns, never from a sink, a Command or an Event subscriber.
+- **Tear down from the Gradio thread.** `launch()` blocks until the server exits; call `wica.close()` after it returns, never from a Command, the output Command or an Event subscriber.
 
 The shipped demo does exactly this with a Speaking panel, sensor buttons and the explore-only fallback: [`app_ui.py`](../../examples/conversation_demo/app_ui.py) owns the presenters and hands them back, [`app.py`](../../examples/conversation_demo/app.py) wires and starts ([specs/conversation-demo.md](../../specs/conversation-demo.md)).

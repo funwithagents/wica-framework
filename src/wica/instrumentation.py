@@ -67,7 +67,6 @@ class ReactionTrace:
     outcome: ReactionOutcome
     error: str | None
     text_length: int
-    sink_duration: float | None
     command_call_ids: tuple[str, ...]
     noop: bool
     usage: TokenUsage | None
@@ -85,6 +84,9 @@ class ReactionTrace:
     # When the last attempt's first streamed chunk carrying text or a tool call arrived; None when
     # none did. See specs/instrumentation.md ("The first content").
     first_content_at: datetime | None = None
+    # When the reaction's first output opened: its first words handed to the output Command. None
+    # when it delivered nothing. See specs/agent.md ("Output: tags in the model's text").
+    first_output_at: datetime | None = None
 
     @property
     def coalescing_wait(self) -> float:
@@ -107,6 +109,12 @@ class ReactionTrace:
         if self.model_started_at is None or self.first_content_at is None:
             return None
         return (self.first_content_at - self.model_started_at).total_seconds()
+
+    @property
+    def time_to_first_output(self) -> float | None:
+        if self.model_started_at is None or self.first_output_at is None:
+            return None
+        return (self.first_output_at - self.model_started_at).total_seconds()
 
     @property
     def generation_time(self) -> float | None:
@@ -142,16 +150,18 @@ def parent_trigger(triggers: Sequence[TriggerTrace]) -> TriggerTrace:
 
 
 def reaction_latency(reaction: ReactionTrace) -> float | None:
-    """written_at of the earliest external trigger -> ended_at, for a reaction that issued at least
-    one Command or delivered text (command_call_ids non-empty or text_length > 0); else None.
-    A reaction whose every trigger is a Command completion has no external trigger -> None."""
-    if not reaction.command_call_ids and reaction.text_length <= 0:
+    """written_at of the earliest external trigger -> the moment the reaction first reached the
+    outside: first_output_at when it opened an output, else ended_at when it dispatched a Command
+    (command_call_ids non-empty); else None. A reaction whose every trigger is a Command
+    completion has no external trigger -> None."""
+    if not reaction.command_call_ids:
         return None
     externals = [t for t in reaction.triggers if not t.is_command_completion]
     if not externals:
         return None
     earliest = min(t.written_at for t in externals)
-    return (reaction.ended_at - earliest).total_seconds()
+    reached = reaction.first_output_at or reaction.ended_at
+    return (reached - earliest).total_seconds()
 
 
 def reactions_per_input(reactions: Sequence[ReactionTrace]) -> list[int]:

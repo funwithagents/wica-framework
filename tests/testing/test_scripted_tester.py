@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any
 
-from sut_support import ADD_THEN_TEXT, describe_timeline, identity_serialize, wait_until
+from sut_support import (
+    ADD_THEN_TEXT,
+    Voice,
+    describe_timeline,
+    identity_serialize,
+    wait_until,
+)
 
-from wica import Wica
+from wica import ReactionTrace, Wica
 from wica.fake_model import FakeChatModel
 from wica.testing import TESTER_COMMANDS, TestRun, build_tester, run_script
 
@@ -25,7 +32,7 @@ def test_script_drives_the_sut_and_yields_a_passing_report(
     script = [
         _calls("set_prompt", value="Add 2 and 2."),
         _calls("expect_action", name="add", state="complete", result_contains="4"),
-        _calls("expect_text", contains="sum"),
+        _calls("expect_private_text", contains="sum"),
         _calls("finish", verdict="pass", summary="all good"),
     ]
     tester = build_tester(run, script)
@@ -123,9 +130,13 @@ def test_tester_commands_match_what_the_scripted_tester_registers(
         registered = {
             name
             for name in tester.agent.commands
-            if name not in ("noop", "cancel_command") and not name.startswith("set_")
+            if name != "cancel_command" and not name.startswith("set_")
         }
         assert registered == TESTER_COMMANDS
+        assert "expect_private_text" in registered and "expect_text" not in registered
+        assert (
+            tester.agent.output_command_name is None
+        )  # all the tester's text is private
         assert "set_prompt" in tester.agent.commands  # the one open-ended family
     finally:
         tester.close()
@@ -149,6 +160,36 @@ def test_missing_finish_times_out_with_a_failed_finding(
     assert not report.ok
 
 
+def test_a_spent_script_ends_on_noop_and_wakes_nothing(
+    sut_factory: Callable[..., Wica],
+):
+    """Past its last step the fake answers `<noop/>`: the step `set_prompt`'s completion wakes
+    declines, issues nothing and wakes nothing, so the chain ends there."""
+    sut = sut_factory(ADD_THEN_TEXT)
+    sut.start()
+    run = TestRun(sut)
+    tester = build_tester(run, [_calls("set_prompt", value="Add 2 and 2.")])
+    reactions: list[ReactionTrace] = []
+    issued: list[str] = []
+    tester.on_agent_reaction_ended.subscribe(reactions.append)
+    tester.on_agent_command.subscribe(lambda c: issued.append(c.name))
+    tester.start()
+    try:
+        tester.world.update("scenario", "no finish")
+        wait_until(lambda: len(reactions) == 2)
+        time.sleep(0.3)
+        assert len(reactions) == 2  # the chain ended: nothing woke a third step
+        assert [r.noop for r in reactions] == [False, True]
+        assert reactions[1].outcome == "ok" and reactions[1].command_call_ids == ()
+        assert issued == ["set_prompt"]  # no `noop` Command exists to issue
+        assert not run.finished.is_set()
+        model = tester.agent.model
+        assert isinstance(model, FakeChatModel) and len(model.calls) == 2
+    finally:
+        tester.close()
+        run.close()
+
+
 def test_mirror_entries_follow_the_sut(sut_factory: Callable[..., Wica]):
     sut = sut_factory(ADD_THEN_TEXT)
     sut.start()
@@ -157,7 +198,7 @@ def test_mirror_entries_follow_the_sut(sut_factory: Callable[..., Wica]):
         run,
         [
             _calls("set_prompt", value="Add 2 and 2."),
-            _calls("expect_text", contains="sum"),
+            _calls("expect_private_text", contains="sum"),
             _calls("finish", verdict="pass"),
         ],
     )
@@ -173,3 +214,37 @@ def test_mirror_entries_follow_the_sut(sut_factory: Callable[..., Wica]):
     finally:
         tester.close()
         run.close()
+
+
+def test_the_output_mirror_holds_what_the_sut_said_not_what_it_thought(
+    sut_factory: Callable[..., Wica],
+):
+    sut = sut_factory(
+        [{"text": 'They greeted me. <say emotion="happy">Hello there.</say>'}],
+        commands=(),
+    )
+    sut.set_output_command(Voice().say)
+    sut.start()
+    run = TestRun(sut)
+    tester = build_tester(
+        run,
+        [
+            _calls("set_prompt", value="Hi!"),
+            _calls("expect_output", contains="Hello"),
+            _calls("wait_for", condition="idle", within=5),
+            _calls("finish", verdict="pass"),
+        ],
+    )
+    tester.start()
+    try:
+        tester.world.update("scenario", "mirror")
+        assert run.finished.wait(10)
+        wait_until(lambda: tester.world.get("sut:output") is not None)
+        heard = tester.world.get("sut:output")
+        assert "Hello there." in heard and "happy" in heard and "greeted" not in heard
+        assert tester.world.get("sut:reasoning") == "They greeted me."
+        wait_until(lambda: "complete" in str(tester.world.get("sut:action")))
+    finally:
+        tester.close()
+        run.close()
+    assert run.report().ok, run.report().findings

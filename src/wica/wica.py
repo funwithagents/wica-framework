@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -60,7 +60,7 @@ class Wica:
             agent.on_response_rejected
         )
         self.on_agent_command: Event[CommandIssued] = agent.on_command
-        self.on_agent_text: Event[str] = agent.on_text
+        self.on_agent_private_text: Event[str] = agent.on_private_text
         self.on_agent_reaction_ended: Event[ReactionTrace] = agent.on_reaction_ended
         self.on_agent_trigger_dropped: Event[WorldEntry] = agent.on_trigger_dropped
         self.on_agent_command_ended: Event[CommandTrace] = agent.on_command_ended
@@ -82,8 +82,8 @@ class Wica:
 
         Runtime values the config object should not express — ``coalesce_window`` and optionally
         ``loop`` — are keyword arguments here; the config carries provider/model/key/prompt. ``init``
-        takes no application callables: the output sink and the output Command are wired after
-        construction through :meth:`set_output_sink` / :meth:`set_output_command`, so the objects
+        takes no application callables: the output Command is wired after
+        construction through :meth:`set_output_command`, so the objects
         they belong to can be built against this Wica first (build, then wire, then start — see
         specs/wica.md, "Output wiring is delegated"). Resolution (env key, prompt file) happens
         inside ``Agent.__init__``, so a ``MissingEnvError`` or unreadable prompt surfaces here, at
@@ -187,13 +187,13 @@ class Wica:
             self._closed = True
 
     def _reject_if_on_owned_loop_thread(self, operation: str) -> None:
-        """Reject a shutdown call made from an owned loop's own thread (a sink, Command, or Event
+        """Reject a shutdown call made from an owned loop's own thread (a Command or Event
         subscriber) *before* any state changes — a synchronous facade must join that thread, and
         there is no correct synchronous answer on it. `_loop_thread` is None when stopped, so this
         is a no-op then. See specs/wica.md ("Shutdown from the loop thread")."""
         if self._owns_loop and threading.current_thread() is self._loop_thread:
             raise RuntimeError(
-                f"cannot {operation} Wica from its own event-loop thread (an output sink, Command, "
+                f"cannot {operation} Wica from its own event-loop thread (a Command, "
                 "or Event subscriber); call it from another thread"
             )
 
@@ -232,17 +232,10 @@ class Wica:
         ``agent.remove_response_guard``."""
         self.agent.remove_response_guard(name)
 
-    def set_output_sink(self, sink: Callable[[str], Awaitable[None]] | None) -> None:
-        """Set (or, with None, clear) the async sink receiving the model's free text each step —
-        delegates verbatim to ``agent.set_output_sink``. A single replaceable slot, wired after
-        ``init`` and, in the intended flow, before ``start()``. See specs/wica.md ("Output wiring is
-        delegated"), specs/agent.md ("Output wiring")."""
-        self.agent.set_output_sink(sink)
-
     def set_output_command(self, fn: Callable[..., Any] | Command | None) -> None:
         """Set (or, with None, clear) the user-facing output Command — delegates verbatim to
-        ``agent.set_output_command`` (a callable or a ``Command``; when set, free text becomes the
-        agent's private reasoning stream). A reserved or already-registered name raises
-        ``ValueError``. See specs/wica.md ("Output wiring is delegated"), specs/agent.md ("Output
+        ``agent.set_output_command`` (a callable or a ``Command``): the model then speaks by
+        writing that Command's tag in its text. A reserved or already-registered name, or a
+        signature that cannot be an output's, raises ``ValueError``. See specs/wica.md ("Output wiring is delegated"), specs/agent.md ("Output
         wiring")."""
         self.agent.set_output_command(fn)

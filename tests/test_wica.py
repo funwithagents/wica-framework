@@ -53,14 +53,18 @@ def fake_config(
     )
 
 
-class RecordingSink:
+class RecordingVoice:
+    """A recording output Command: `say` receives the whole text of each output."""
+
     def __init__(self) -> None:
         self.texts: list[str] = []
         self.event = threading.Event()
 
-    async def __call__(self, text: str) -> None:
+    async def say(self, text: str) -> str:
+        """Say something to the user."""
         self.texts.append(text)
         self.event.set()
+        return "said"
 
 
 @pytest.fixture
@@ -68,13 +72,13 @@ def wica_factory() -> Iterator[Callable[..., Wica]]:
     created: list[Wica] = []
 
     def _make(
-        config: WicaConfig, *, output_sink: RecordingSink | None = None, **kwargs: Any
+        config: WicaConfig, *, voice: RecordingVoice | None = None, **kwargs: Any
     ) -> Wica:
-        # The sink is wired after construction (build, then wire, then start — see specs/wica.md,
-        # "Output wiring is delegated"); the factory just folds that step in for the tests.
+        # The output Command is wired after construction (build, then wire, then start — see
+        # specs/wica.md, "Output wiring is delegated"); the factory just folds that step in.
         w = Wica.init(config, **kwargs)
-        if output_sink is not None:
-            w.set_output_sink(output_sink)
+        if voice is not None:
+            w.set_output_command(voice.say)
         created.append(w)
         return w
 
@@ -94,24 +98,18 @@ def test_init_wires_world_and_agent_sharing_one_loop(wica_factory):
 
 
 def test_output_wiring_is_set_after_init_and_delegated_to_the_agent(wica_factory):
-    """Build, then wire, then start: the sink and the output Command are set on the facade after
-    construction (so the objects they belong to can be built against the Wica first) and reach
-    the Agent — free text goes to the sink as private reasoning, the user-facing text goes
-    through the output Command, and its name is reserved from register_command."""
+    """Build, then wire, then start: the output Command is set on the facade after construction
+    (so the objects it belongs to can be built against the Wica first) and reaches the Agent —
+    the body of its tag goes through it, the text outside is reported on on_agent_private_text,
+    and its name is taken from register_command."""
     wica = wica_factory(
-        fake_config(
-            [
-                {
-                    "text": "thinking",
-                    "tool_calls": [{"name": "speak", "args": {"text": "hello"}}],
-                },
-                {"tool_calls": [{"name": "noop", "args": {}}]},
-            ]
-        ),
+        fake_config([{"text": "thinking <speak>hello</speak>"}]),
         coalesce_window=0,
     )
     spoken: list[str] = []
     spoke = threading.Event()
+    private: list[str] = []
+    thought = threading.Event()
 
     async def speak(text: str) -> str:
         """Say something to the user."""
@@ -119,9 +117,12 @@ def test_output_wiring_is_set_after_init_and_delegated_to_the_agent(wica_factory
         spoke.set()
         return "spoken"
 
-    sink = RecordingSink()
-    wica.set_output_sink(sink)
+    def on_private(text: str) -> None:
+        private.append(text)
+        thought.set()
+
     wica.set_output_command(speak)
+    wica.on_agent_private_text.subscribe(on_private)
     assert wica.agent.output_command_name == "speak"
     with pytest.raises(ValueError, match="output Command"):
         wica.register_command(speak)
@@ -132,9 +133,34 @@ def test_output_wiring_is_set_after_init_and_delegated_to_the_agent(wica_factory
     wica.world.update("input", "greet")
 
     assert spoke.wait(timeout=WAIT_TIMEOUT)
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert thought.wait(timeout=WAIT_TIMEOUT)
     assert spoken == ["hello"]
-    assert sink.texts == ["thinking"]
+    assert private == ["thinking"]
+
+
+def test_set_output_command_validates_and_clears_through_the_facade(wica_factory):
+    wica = wica_factory(fake_config())
+
+    def needs_an_attribute(text: str, emotion: str) -> None:
+        """An attribute without a default: not an output's signature."""
+
+    def speak(text: str) -> None:
+        """Say something to the user."""
+
+    with pytest.raises(ValueError, match="output Command"):
+        wica.set_output_command(needs_an_attribute)
+    with pytest.raises(ValueError, match="reserved"):
+        wica.set_output_command(Command(speak, name="next"))
+    assert wica.agent.output_command_name is None
+
+    wica.set_output_command(speak)
+    assert wica.agent.output_command_name == "speak"
+    assert "<speak>" in wica.agent.system_prompt
+    wica.set_output_command(None)
+    assert wica.agent.output_command_name is None
+    assert "<speak>" not in wica.agent.system_prompt
+    # The output sink is gone: the output Command is the one output path.
+    assert not hasattr(wica, "set_output_sink")
 
 
 def test_surfaced_events_are_the_same_objects(wica_factory):
@@ -144,6 +170,8 @@ def test_surfaced_events_are_the_same_objects(wica_factory):
     assert wica.on_agent_trigger is wica.agent.on_trigger
     assert wica.on_agent_prompt is wica.agent.on_prompt
     assert wica.on_agent_command is wica.agent.on_command
+    assert wica.on_agent_private_text is wica.agent.on_private_text
+    assert not hasattr(wica, "on_agent_text")
 
 
 def test_facade_surfaces_the_instrumentation_events(wica_factory):
@@ -154,58 +182,19 @@ def test_facade_surfaces_the_instrumentation_events(wica_factory):
     assert wica.on_agent_response_rejected is wica.agent.on_response_rejected
 
 
-def test_a_free_text_reply_while_unforced_is_retried_into_the_output_command(
-    wica_factory,
-):
-    """With an output Command bound but the call unforced, a plain-text answer reaches no one: the
-    default output_command_required guard sends it back, and the retry speaks — through the config
-    path end to end. See specs/agent.md ("Response guards")."""
-    config = fake_config(
-        [
-            {"text": "Hello!"},
-            {"tool_calls": [{"name": "say", "args": {"text": "Hello!"}}]},
-            {"tool_calls": [{"name": "noop", "args": {}}]},
-        ]
-    )
-    wica = wica_factory(
-        dataclasses.replace(
-            config, agent=dataclasses.replace(config.agent, force_tool_call=False)
-        ),
-        coalesce_window=0,
-    )
-    spoken: list[str] = []
-    spoken_event = threading.Event()
-
-    async def say(text: str) -> str:
-        """Say something to the user."""
-        spoken.append(text)
-        spoken_event.set()
-        return "spoken"
-
-    wica.set_output_command(say)
-    rejected: list[Any] = []
-    wica.on_agent_response_rejected.subscribe(rejected.append)
-    wica.world.register(
-        "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
-    )
-    wica.start()
-
-    wica.world.update("speech", "hi")
-    assert spoken_event.wait(timeout=WAIT_TIMEOUT)
-
-    assert spoken == ["Hello!"]
-    assert len(rejected) == 1 and rejected[0].response.text == "Hello!"
-
-
 def test_response_guards_are_delegated_to_the_agent(wica_factory):
     wica = wica_factory(fake_config())
-    wica.remove_response_guard("output_command_required")
+    assert list(wica.response_guards) == [
+        "incomplete_response",
+        "unknown_command",
+        "invalid_args",
+    ]
+    wica.remove_response_guard("invalid_args")
     wica.add_response_guard(lambda response: None, name="mine")
     assert list(wica.response_guards) == list(wica.agent.response_guards)
     assert list(wica.response_guards) == [
         "incomplete_response",
         "unknown_command",
-        "invalid_args",
         "mine",
     ]
 
@@ -263,10 +252,8 @@ def test_register_command_reaches_the_agent(wica_factory):
 
 
 def test_input_drives_world_and_agent_triggers_and_a_command_event(wica_factory):
-    sink = RecordingSink()
     wica = wica_factory(
         fake_config([{"tool_calls": [{"name": "wave", "args": {}}]}, {"text": "hi"}]),
-        output_sink=sink,
     )
 
     async def wave() -> str:
@@ -277,7 +264,13 @@ def test_input_drives_world_and_agent_triggers_and_a_command_event(wica_factory)
     agent_triggers: list[str] = []
     commands: list[CommandIssued] = []
     texts: list[str] = []
-    wica.on_agent_text.subscribe(texts.append)
+    thought = threading.Event()
+
+    def on_private(text: str) -> None:
+        texts.append(text)
+        thought.set()
+
+    wica.on_agent_private_text.subscribe(on_private)
     wica.on_world_trigger.subscribe(lambda e: world_triggers.append(e.key))
     wica.on_agent_trigger.subscribe(lambda e: agent_triggers.append(e.key))
     wica.on_agent_command.subscribe(commands.append)
@@ -289,14 +282,14 @@ def test_input_drives_world_and_agent_triggers_and_a_command_event(wica_factory)
     wica.start()
 
     wica.world.update("speech", "hello robot")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert thought.wait(timeout=WAIT_TIMEOUT)
 
     # The raw World trigger fired for the input; the filtered Agent trigger observed it too.
     assert "speech" in world_triggers
     assert "speech" in agent_triggers
     # The model issued the wave Command; on_agent_command carried a CommandIssued at dispatch.
     assert [(c.name, c.args) for c in commands] == [("wave", {})]
-    # The step's free text was observable on on_agent_text as well as delivered to the sink.
+    # With no output Command set, the step's text is private: on_agent_private_text carried it.
     assert texts == ["hi"]
 
 
@@ -333,10 +326,8 @@ def test_multiple_subscribers_fire_and_a_raising_one_does_not_block_others(
 def test_stop_with_an_in_flight_command_tears_down_cleanly(wica_factory):
     # Teardown is agent→world→loop: agent.stop() cancels the in-flight command while the World is
     # still running, so its terminal write is tolerated rather than raising, and stop() completes.
-    sink = RecordingSink()
     wica = wica_factory(
         fake_config([{"tool_calls": [{"name": "block_forever", "args": {}}]}]),
-        output_sink=sink,
     )
     block = asyncio.Event()
 
@@ -378,10 +369,12 @@ def test_update_after_stop_raises(wica_factory):
 
 
 def test_owned_wica_can_stop_and_start_again(wica_factory):
-    sink = RecordingSink()
+    voice = RecordingVoice()
     wica = wica_factory(
-        fake_config([{"text": "first cycle"}, {"text": "second cycle"}]),
-        output_sink=sink,
+        fake_config(
+            [{"text": "<say>first cycle</say>"}, {"text": "<say>second cycle</say>"}]
+        ),
+        voice=voice,
         coalesce_window=0,
     )
     wica.world.register(
@@ -391,8 +384,8 @@ def test_owned_wica_can_stop_and_start_again(wica_factory):
     wica.start()
     first_thread = wica._loop_thread
     wica.world.update("speech", "one")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
-    assert sink.texts == ["first cycle"]
+    assert voice.event.wait(timeout=WAIT_TIMEOUT)
+    assert voice.texts == ["first cycle"]
 
     wica.stop()
     assert wica.is_running is False
@@ -400,14 +393,14 @@ def test_owned_wica_can_stop_and_start_again(wica_factory):
     assert not wica._loop.is_closed()
     assert wica._loop_thread is None
 
-    sink.event.clear()
+    voice.event.clear()
     wica.start()
     second_thread = wica._loop_thread
     assert second_thread is not None and second_thread is not first_thread
     wica.world.update("speech", "two")
-    assert sink.event.wait(timeout=WAIT_TIMEOUT)
+    assert voice.event.wait(timeout=WAIT_TIMEOUT)
 
-    assert sink.texts == ["first cycle", "second cycle"]
+    assert voice.texts == ["first cycle", "second cycle"]
     assert wica.world.get("speech") == "two"
 
 
@@ -449,28 +442,28 @@ def test_injected_loop_wica_can_restart_without_owning_the_loop():
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
-    sink = RecordingSink()
+    voice = RecordingVoice()
     wica = Wica.init(
-        fake_config([{"text": "one"}, {"text": "two"}]),
+        fake_config([{"text": "<say>one</say>"}, {"text": "<say>two</say>"}]),
         coalesce_window=0,
         loop=loop,
     )
-    wica.set_output_sink(sink)
+    wica.set_output_command(voice.say)
     wica.world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
     )
     try:
         wica.start()
         wica.world.update("speech", "first")
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert voice.event.wait(timeout=WAIT_TIMEOUT)
         wica.stop()
 
-        sink.event.clear()
+        voice.event.clear()
         wica.start()
         wica.world.update("speech", "second")
-        assert sink.event.wait(timeout=WAIT_TIMEOUT)
+        assert voice.event.wait(timeout=WAIT_TIMEOUT)
 
-        assert sink.texts == ["one", "two"]
+        assert voice.texts == ["one", "two"]
         wica.close()
         assert not loop.is_closed()
     finally:
@@ -490,10 +483,12 @@ def _no_consecutive_human_messages(messages: list[BaseMessage]) -> bool:
 def test_stop_cancels_reasoning_before_a_restart(wica_factory):
     # The fake consumes a script step only once its delay elapses, so the call cancelled by stop()
     # consumes nothing and this reply belongs to the post-restart step.
-    sink = RecordingSink()
+    voice = RecordingVoice()
     wica = wica_factory(
-        fake_config([{"text": "only the post-restart step replies"}], delay_s=0.5),
-        output_sink=sink,
+        fake_config(
+            [{"text": "<say>only the post-restart step replies</say>"}], delay_s=0.5
+        ),
+        voice=voice,
         coalesce_window=0,
     )
     wica.world.register(
@@ -509,13 +504,13 @@ def test_stop_cancels_reasoning_before_a_restart(wica_factory):
     wica.start()
     time.sleep(0.6)
 
-    assert sink.texts == []
+    assert voice.texts == []
 
     # The cancelled step's observation stays in history; the next step renders it merged with its
     # own observation, never as back-to-back user messages.
     wica.world.update("speech", "after the restart")
-    assert sink.event.wait(WAIT_TIMEOUT)
-    assert sink.texts == ["only the post-restart step replies"]
+    assert voice.event.wait(WAIT_TIMEOUT)
+    assert voice.texts == ["only the post-restart step replies"]
     assert len(prompts) == 2
     assert _no_consecutive_human_messages(prompts[1])
 
@@ -523,23 +518,23 @@ def test_stop_cancels_reasoning_before_a_restart(wica_factory):
 # --- Safe shutdown from the loop thread --------------------------------
 
 
-def test_stop_from_an_output_sink_is_rejected_and_the_system_keeps_running(
+def test_stop_from_an_output_command_is_rejected_and_the_system_keeps_running(
     wica_factory,
 ):
     wica_ref: list[Wica] = []
     errors: list[BaseException] = []
     done = threading.Event()
 
-    async def sink(text: str) -> None:
+    async def say(text: str) -> None:
+        """Say something to the user."""
         try:
             wica_ref[0].stop()
         except BaseException as exc:  # noqa: BLE001 - we want the exact error
             errors.append(exc)
         done.set()
 
-    wica = wica_factory(
-        fake_config([{"text": "hi"}]), output_sink=sink, coalesce_window=0
-    )
+    wica = wica_factory(fake_config([{"text": "<say>hi</say>"}]), coalesce_window=0)
+    wica.set_output_command(say)
     wica_ref.append(wica)
     wica.world.register(
         "speech", str, serialize_fn=identity_serialize, triggers_llm_call=True
@@ -645,10 +640,10 @@ def test_is_running_polled_from_the_loop_thread_does_not_deadlock_stop():
 
 def test_model_timeout_from_config_bounds_the_model_call(wica_factory):
     # The fake model sleeps 5 s per call; the config's 0.1 s deadline abandons the step.
-    config = fake_config([{"text": "too late"}], delay_s=5)
+    config = fake_config([{"text": "<say>too late</say>"}], delay_s=5)
     config = WicaConfig(agent=dataclasses.replace(config.agent, model_timeout=0.1))
-    sink = RecordingSink()
-    wica = wica_factory(config, output_sink=sink, coalesce_window=0)
+    voice = RecordingVoice()
+    wica = wica_factory(config, voice=voice, coalesce_window=0)
     traces: list[ReactionTrace] = []
     done = threading.Event()
 
@@ -665,7 +660,7 @@ def test_model_timeout_from_config_bounds_the_model_call(wica_factory):
     wica.world.update("speech", "hello")
     assert done.wait(timeout=WAIT_TIMEOUT)
     assert traces[0].outcome == "model_timeout"
-    assert sink.texts == []
+    assert voice.texts == []
 
 
 # --- openai-chat-completions-compatible: a local server, played by an httpx MockTransport --------
@@ -760,13 +755,14 @@ def test_a_compatible_server_is_reached_at_its_base_url_with_a_placeholder_key(
     sends a placeholder — never the OPENAI_API_KEY meant for OpenAI. See specs/config.md
     ("Providers")."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-meant-for-openai")
-    server = ChatCompletionsServer("Hello there!")
-    sink = RecordingSink()
-    wica = wica_factory(compatible_config(server), output_sink=sink, coalesce_window=0)
+    server = ChatCompletionsServer("<say>Hello there!</say>")
+    voice = RecordingVoice()
+    wica = wica_factory(compatible_config(server), voice=voice, coalesce_window=0)
 
     trace = run_one_reaction(wica)
 
-    assert sink.texts == ["Hello there!"]
+    assert voice.event.wait(timeout=WAIT_TIMEOUT)
+    assert voice.texts == ["Hello there!"]
     assert trace.outcome == "ok"
     assert trace.usage is not None
     assert (trace.usage.input_tokens, trace.usage.output_tokens) == (120, 4)
@@ -778,6 +774,10 @@ def test_a_compatible_server_is_reached_at_its_base_url_with_a_placeholder_key(
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
     assert body["messages"][-1]["role"] == "user"
+    # The output Command is not a tool, and no tool choice is sent (several self-hosted servers
+    # ignore it): the model speaks through the tag in its text.
+    assert [tool["function"]["name"] for tool in body["tools"]] == ["cancel_command"]
+    assert "tool_choice" not in body
     authorization = request.headers["authorization"]
     assert "sk-meant-for-openai" not in authorization
     assert authorization.startswith("Bearer ") and authorization != "Bearer "

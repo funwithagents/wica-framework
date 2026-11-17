@@ -55,6 +55,12 @@ class FakeChatModel(BaseChatModel):
     Each `ainvoke`/`invoke` consumes the next `script` step. Once the script is spent, `default` is
     returned (unless `loop` is set, which cycles the script). `bind_tools` records the bound tool
     names and, on the first call, validates that every scripted tool call names one of them.
+
+    Speech and silence are text, as for a real model: a step that speaks writes the output
+    Command's tag in its `text` (`{"text": "<say>Hello!</say>"}`), one that declines writes
+    `{"text": "<noop/>"}` (an empty text, the `default`, counts the same). Neither is a tool call,
+    so neither name is among those `bind_tools` checks; the fake does not interpret the text, the
+    Agent parses it. See specs/agent.md ("Output: tags in the model's text").
     """
 
     # Scripted config — JSON-expressible, so it rides through `model_kwargs`.

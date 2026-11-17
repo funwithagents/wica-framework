@@ -60,11 +60,13 @@ config = WicaConfig.from_json_file("agent.config.json")
 | `agent.history_reactions` | no | A positive integer: keep the last N reactions in the prompt. Default unbounded. See [History bounds](#history-bounds) |
 | `agent.history_budget` | no | A number in `(0, 1]`: keep the prompt under this fraction of the model's context window. Default off. See [History bounds](#history-bounds) |
 | `agent.model_timeout` | no | Seconds one model call may take, the provider's retries included; past it the step is abandoned with the `model_timeout` outcome and the Agent is free for the next input. Default `10`; `null` removes the deadline. Raise it for a slow reasoning model. See [specs/agent.md](../../specs/agent.md), "Model-call deadline" |
-| `agent.force_tool_call` | no | Read only while an output Command is bound: every model call must call a tool (the output Command to speak, `noop` to do nothing), so the model cannot reply in plain text that nobody hears. Default `true`. With Anthropic extended thinking, which cannot be forced, `langchain-anthropic` drops the forced choice with a warning; set `false` to silence it. See [specs/agent.md](../../specs/agent.md), "Forcing a tool call" |
+| `agent.max_next_steps` | no | Read only with an output Command. The end of an output does not call the model again unless the model wrote a `<next>` note beside it ([api.md](api.md#the-output-command)); this is how many steps in a row such a note may wake before something other than the Agent's own output triggers a step. A non-negative integer. Default `1`; `0` turns the mechanism off (the note is not taught and no output wakes a step); `null` removes the cap. Past the cap the note is still shown to the model at its next step, and a WARNING is logged. See [specs/agent.md](../../specs/agent.md), "Continuing after an output" |
 | `agent.max_retries` | no | How many times one reaction may call the model again after a response guard rejects its response ([api.md](api.md#response-guards)). Default `1`; `0` never retries (a rejected response ends the reaction as `rejected`). Each retry is a full model call, under its own `model_timeout`. See [specs/agent.md](../../specs/agent.md), "Response guards" |
 | `agent.context_window` | no | The context window in tokens, for `history_budget`; absent, the model's LangChain profile supplies it. Unused without a budget |
 
-Runtime values that are callables or runtime objects are not configuration and stay on `Wica.init` and the wiring calls: the coalescing window (`Wica.init(config, coalesce_window=0.2)`), an injected event loop (`loop=`), the output sink and output Command (`set_output_sink`, `set_output_command`).
+Runtime values that are callables or runtime objects are not configuration and stay on `Wica.init` and the wiring calls: the coalescing window (`Wica.init(config, coalesce_window=0.2)`), an injected event loop (`loop=`), the output Command (`set_output_command`).
+
+`agent.force_tool_call` no longer exists and is rejected as an unknown key: remove it from your config ([api.md](api.md#migrating-from-the-output-sink)).
 
 ## API key
 
@@ -72,7 +74,7 @@ Give a literal `api_key`, or an `api_key_env` naming the environment variable to
 
 ## System prompt
 
-Exactly one of `system_prompt` (inline) or `system_prompt_file` (a path, read when the Agent is built; relative handling per loader as above). This is the **persona**, kept verbatim. WICA appends a short **runtime primer** after it: how to read the observations (the user messages are the current World, not a chat transcript), that Commands run asynchronously and all the calls of one response run at once, how to reply (as text, or through the output Command when one is set), that a bounded history holds only the latest reactions (only when a bound is set), and that `noop` may be called to not react. The primer is recomposed only when the output Command is set or cleared, so in the intended flow (wire, then `start()`) the system message is fixed before the first step and stays in the model's cached prefix. It cannot be turned off in v1 ([specs/agent.md](../../specs/agent.md), "System prompt composition").
+Exactly one of `system_prompt` (inline) or `system_prompt_file` (a path, read when the Agent is built; relative handling per loader as above). This is the **persona**, kept verbatim. WICA appends a short **runtime primer** after it: how to read the observations (the user messages are the current World, not a chat transcript), that Commands run asynchronously and all the calls of one response run at once, that a bounded history holds only the latest reactions (only when a bound is set), how to speak (the output Command's tag, its description and its attributes, when one is set; otherwise that nobody reads the model's text), that `<noop/>` may be written to not react, and how to continue after speaking (the `<next>` note, with an output Command and `max_next_steps` other than `0`). The primer is recomposed only when the output Command is set or cleared, so in the intended flow (wire, then `start()`) the system message is fixed before the first step and stays in the model's cached prefix. It cannot be turned off in v1 ([specs/agent.md](../../specs/agent.md), "System prompt composition").
 
 ## History bounds
 
@@ -123,7 +125,6 @@ WICA runs no model itself. Any server that implements OpenAI's Chat Completions 
 - **No key is needed** for a server that checks none; give `api_key`/`api_key_env` for one that does.
 - **`context_window`** is needed with `history_budget`: a local model has no LangChain profile. Set it to the server's own context size (`-c` on `llama-server`).
 - **`model_timeout`**: the default 10 s is tight for a first request that loads the model, or for a long prompt on a small machine.
-- **`force_tool_call`** sends `tool_choice: "required"`, which servers honour, ignore or reject differently; set it `false` for a server that rejects it.
 - **An output cap** (`model_kwargs.max_tokens`) bounds a model that writes text without end.
 
 Which servers were tried, which model sizes work and how cancellation behaves: [guides/local-models.md](../guides/local-models.md). `provider: "openai"` stays OpenAI's own API; a `base_url` in its `model_kwargs` still reaches a proxy in front of OpenAI.

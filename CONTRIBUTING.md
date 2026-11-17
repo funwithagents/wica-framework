@@ -17,7 +17,7 @@ This file will say so when that changes.
 Issues are the way in, at [github.com/funwithagents/wica-framework/issues](https://github.com/funwithagents/wica-framework/issues), and every kind of feedback is welcome:
 
 - **Bug reports.** Say what you ran: the provider and model, your config with secrets removed, the World entries and Commands involved, the OS and Python version; what you expected, what happened, and the `wica` logs at `DEBUG`. A small script on `provider: "fake"` that reproduces it is the best possible report.
-- **Reports from models and providers the author does not test on.** The live set runs one model per provider; a report that another model drives a WICA agent well, or does not (ignores the primer, mis-sequences Commands, never calls `noop`), is especially valuable, with a benchmark row where you can ([docs/guides/benchmarking.md](docs/guides/benchmarking.md)).
+- **Reports from models and providers the author does not test on.** The live set runs one model per provider; a report that another model drives a WICA agent well, or does not (ignores the primer, mis-sequences Commands, never writes the output tag or `<noop/>`), is especially valuable, with a benchmark row where you can ([docs/guides/benchmarking.md](docs/guides/benchmarking.md)).
 - **API and design feedback.** What you would want the World, the Commands, the config or the panels to do differently, and why. At this stage the design is cheap to change and this is the most useful input there is. Pointing at the spec you are reacting to helps.
 - **Questions.** If the README, a page under [docs/](docs/index.md) or a spec left you guessing, that is a documentation bug worth an issue too.
 

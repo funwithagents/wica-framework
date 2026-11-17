@@ -1,6 +1,7 @@
 """The checks and measures (specs/wica-tester.md, "Scenarios") over hand-built timelines with real
 `ReactionTrace` / `TriggerTrace` records: each built-in kept and broken, the windows they judge,
-and the registry."""
+and the registry. In these timelines an output is a `command_issued` named `say` (the output
+Command) and a declined reaction a record whose `noop` flag is set — there is no `noop` Command."""
 
 from __future__ import annotations
 
@@ -56,6 +57,7 @@ def _reaction(
     noop: bool = False,
     error: str | None = None,
     usage: TokenUsage | None = None,
+    first_output_at: datetime | None = None,
 ) -> ReactionTrace:
     return ReactionTrace(
         reaction_id=reaction_id,
@@ -68,13 +70,13 @@ def _reaction(
         outcome=outcome,
         error=error,
         text_length=0,
-        sink_duration=None,
         command_call_ids=call_ids,
         noop=noop,
         usage=usage,
         ended_at=_at(1.0),
         trace_id=None,
         span_id=None,
+        first_output_at=first_output_at,
     )
 
 
@@ -94,6 +96,10 @@ def _set(t: float, key: str, value: Any) -> SutEvent:
 
 def _issued(t: float, name: str, cid: str, /, **args: Any) -> SutEvent:
     return _ev("command_issued", t, name=name, call_id=cid, args=args)
+
+
+def _state(t: float, name: str, cid: str, state: str) -> SutEvent:
+    return _ev("command_state", t, name=name, call_id=cid, state=state)
 
 
 def _answered_turn(version: int, t: float, reaction_id: int) -> list[SutEvent]:
@@ -127,18 +133,39 @@ def test_answers_each_input_kept_when_every_turn_says_something():
     assert finding.ok and "2 turn(s)" in finding.detail and finding.kind == "check"
 
 
-def test_answers_each_input_broken_by_a_turn_without_the_output_command():
-    unanswered = [
+def _unanswered_turn(*during: SutEvent, noop: bool = False) -> list[SutEvent]:
+    """A second turn, opened at t=5, in which the SUT reports no output; *during* is what it did
+    instead."""
+    call_ids = tuple(
+        e.call_id for e in during if e.kind == "command_issued" and e.call_id
+    )
+    return [
         _set(5.0, "speech_input", "hello?"),
         _ev("input_written", 5.0, key="speech_input", version_id=2),
         _ev("trigger_observed", 5.01, key="speech_input", version_id=2),
-        _issued(5.5, "noop", "n2"),
+        *during,
         _ev(
             "reaction_ended",
             5.6,
-            reaction=_reaction(2, [_trigger("speech_input", 2)], noop=True),
+            reaction=_reaction(
+                2, [_trigger("speech_input", 2)], noop=noop, call_ids=call_ids
+            ),
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    "unanswered",
+    [
+        _unanswered_turn(noop=True),  # declined
+        _unanswered_turn(_ev("private_text", 5.5, text="I should say hello.")),
+        _unanswered_turn(_issued(5.5, "dance", "d2")),  # acted, said nothing
+    ],
+    ids=["declined", "private text only", "a Command only"],
+)
+def test_answers_each_input_broken_by_a_turn_without_an_output(
+    unanswered: list[SutEvent],
+):
     timeline = _answered_turn(1, 0.0, 1) + unanswered
     finding = _check("answers_each_input", timeline)
     assert not finding.ok
@@ -174,18 +201,27 @@ def test_a_dropped_write_opens_no_turn_and_coalesced_writes_open_one():
 # --- no_noop_on_input, no_failed_reactions ------------------------------------------------------
 
 
-def test_no_noop_on_input_broken_by_noop_alone_on_a_scenario_input_only():
-    noop_on_speech = [
-        _ev(
-            "reaction_ended",
-            0.6,
-            reaction=_reaction(1, [_trigger("speech_input", 1)], noop=True),
-        )
-    ]
-    finding = _check("no_noop_on_input", noop_on_speech)
-    assert not finding.ok and "noop only" in finding.detail
+def test_no_noop_on_input_reads_the_noop_flag_of_a_reaction_to_a_scenario_input():
+    declined = _ev(
+        "reaction_ended",
+        0.6,
+        reaction=_reaction(1, [_trigger("speech_input", 1)], noop=True),
+    )
+    finding = _check("no_noop_on_input", [declined])
+    assert not finding.ok and finding.event is declined
+    assert "reaction 1" in finding.detail and "'speech_input'" in finding.detail
+    # An empty response declines just the same: the flag is set, whatever the outcome.
+    empty = _ev(
+        "reaction_ended",
+        0.6,
+        reaction=_reaction(
+            1, [_trigger("speech_input", 1)], noop=True, outcome="empty"
+        ),
+    )
+    assert not _check("no_noop_on_input", [empty]).ok
     allowed = [
-        # a completion, a passive entry, and noop alongside a real Command
+        # declining a completion or a passive entry is fine; so is answering the input (the flag
+        # is what is read, never a Command's name)
         _ev(
             "reaction_ended",
             1.0,
@@ -198,12 +234,11 @@ def test_no_noop_on_input_broken_by_noop_alone_on_a_scenario_input_only():
             2.0,
             reaction=_reaction(3, [_trigger("emotion", 1)], noop=True),
         ),
+        _issued(2.9, "say", "c4", text="hi"),
         _ev(
             "reaction_ended",
             3.0,
-            reaction=_reaction(
-                4, [_trigger("speech_input", 2)], noop=True, call_ids=("c4",)
-            ),
+            reaction=_reaction(4, [_trigger("speech_input", 2)], call_ids=("c4",)),
         ),
     ]
     assert _check("no_noop_on_input", allowed).ok
@@ -256,7 +291,10 @@ def test_no_colliding_cancel_broken_only_by_a_new_call_of_the_cancelled_command(
     # stopping" is what a person does: neither collides.
     assert _check("no_colliding_cancel", _cancel_reaction("dance", "set_emotion")).ok
     assert _check("no_colliding_cancel", _cancel_reaction("dance", "say")).ok
+    # A cancel whose target is an output never collides: the check reads tool calls only, and a
+    # response that speaks replaces the running output anyway.
     assert _check("no_colliding_cancel", _cancel_reaction("say", "say")).ok
+    assert _check("no_colliding_cancel", _cancel_reaction("say", "say", "dance")).ok
 
 
 def test_no_colliding_cancel_resolves_a_prefixed_target_and_skips_an_unknown_one():
@@ -275,6 +313,51 @@ def test_cancels_when_asked_kept_only_when_the_cancel_is_in_the_window():
     assert kept.ok and "t=2.500" in kept.detail
     broken = _check("cancels_when_asked", window[:1])
     assert not broken.ok and "never issued" in broken.detail
+
+
+def test_cancels_when_asked_kept_by_speaking_over_the_running_output():
+    """Speaking again cuts off the output that was running when the input was written, with no
+    `cancel_command`: a correct way to stop talking."""
+    before = [
+        _state(0.4, "say", "s1", "running"),
+        _issued(0.5, "say", "s1", text="Once upon a time"),
+    ]
+    window = [
+        _set(2.0, "speech_input", "Stop!"),
+        _state(2.4, "say", "s1", "cancelled"),  # cut off by the new utterance
+        _state(2.5, "say", "s2", "running"),
+        _issued(2.6, "say", "s2", text="Okay, stopping."),
+    ]
+    timeline = before + window
+    assert input_windows(timeline) == [(2, 6)]
+    kept = _check("cancels_when_asked", window)
+    assert kept.ok and kept.event is window[1]
+    assert "say (s1) cut off at t=2.400" in kept.detail
+
+
+def test_cancels_when_asked_is_not_kept_by_what_only_looks_like_a_stop():
+    stop = _set(2.0, "speech_input", "Stop!")
+    # The running output finished by itself, and the SUT just spoke again.
+    finished = [
+        stop,
+        _state(2.4, "say", "s1", "complete"),
+        _state(2.5, "say", "s2", "running"),
+        _issued(2.6, "say", "s2", text="And then…"),
+    ]
+    assert not _check("cancels_when_asked", finished).ok
+    # An output said in the window and cut off in it was not running when the window opened.
+    own = [
+        stop,
+        _state(2.5, "say", "s2", "running"),
+        _issued(2.6, "say", "s2", text="Okay"),
+        _state(2.9, "say", "s2", "cancelled"),
+    ]
+    assert not _check("cancels_when_asked", own).ok
+    # For any other Command only cancel_command counts: a dance that ended `cancelled` by
+    # itself (its own timeout) is not the SUT stopping it.
+    dance = [stop, _state(2.4, "dance", "d1", "cancelled")]
+    broken = _check("cancels_when_asked", dance)
+    assert not broken.ok and "no running output was cut off" in broken.detail
 
 
 def test_acts_when_asked_matches_the_command_and_its_args():
@@ -302,14 +385,29 @@ def test_command_arg_accepts_a_name_or_a_single_command_with_args():
 
 
 def test_quiet_on_background_change_broken_when_the_robot_comments_on_it():
-    quiet = [_set(1.5, "emotion", "happy"), _issued(3.0, "noop", "n1")]
+    quiet = [
+        _set(1.5, "emotion", "happy"),
+        _ev(
+            "reaction_ended",
+            3.0,
+            reaction=_reaction(1, [_trigger("emotion", 1)], noop=True),
+        ),
+    ]
     assert _check("quiet_on_background_change", quiet).ok
+    # Private text and a Command issued as a tool call are not speech.
+    busy_but_silent = [
+        _set(1.5, "emotion", "happy"),
+        _ev("private_text", 2.9, text="The user looks happy; nothing to say."),
+        _issued(3.0, "set_emotion", "e1", emotion="happy"),
+    ]
+    assert _check("quiet_on_background_change", busy_but_silent).ok
     chatty = [
         _set(1.5, "emotion", "happy"),
         _issued(3.0, "say", "c2", text="I feel happy!"),
     ]
     finding = _check("quiet_on_background_change", chatty)
-    assert not finding.ok and "say issued at t=3.000" in finding.detail
+    assert not finding.ok and "say output at t=3.000" in finding.detail
+    assert finding.event is chatty[1]
 
 
 def test_input_windows_run_from_one_input_to_the_next():
@@ -343,8 +441,9 @@ def test_run_check_prefixes_the_window_label_to_the_detail():
 
 def test_measures_count_outputs_extra_replies_noops_failures_words_and_turns():
     timeline = _answered_turn(1, 0.0, 1) + [
-        # the chained reply: a reaction woken only by say's completion says again
-        _issued(1.5, "say", "c2", text="and one more thing"),
+        # the chained reply: a reaction woken only by say's completion says again (words are
+        # counted in the text, not in the attributes)
+        _issued(1.5, "say", "c2", text="and one more thing", emotion="happy"),
         _ev(
             "reaction_ended",
             1.6,
@@ -371,6 +470,20 @@ def test_measures_count_outputs_extra_replies_noops_failures_words_and_turns():
         "turns_answered": 1.0,
         "noops_on_input": 0.0,
     }
+
+
+def test_measures_count_a_declined_input_from_the_noop_flag():
+    timeline = _answered_turn(1, 0.0, 1) + _unanswered_turn(noop=True)
+    m = measures(timeline, CONTEXT)
+    assert m["noop_steps"] == 1.0 and m["noops_on_input"] == 1.0
+    assert m["turns"] == 2.0 and m["turns_answered"] == 1.0 and m["output_calls"] == 1.0
+    # A turn answered with private text only is unanswered, but it is not a noop.
+    silent = _answered_turn(1, 0.0, 1) + _unanswered_turn(
+        _ev("private_text", 5.5, text="hm")
+    )
+    m = measures(silent, CONTEXT)
+    assert m["noop_steps"] == 0.0 and m["noops_on_input"] == 0.0
+    assert m["turns_answered"] == 1.0
 
 
 def _split_answer(version: int, t: float) -> list[SutEvent]:
@@ -409,6 +522,30 @@ def test_an_answer_over_two_steps_is_one_answer_timed_to_its_first_word():
     assert _check("no_noop_on_input", timeline).ok
     # the split turn's first word is 1.2 s after the input, the plain turn's 0.5 s
     assert answer_latencies(timeline, CONTEXT) == pytest.approx([1.2, 0.5])
+
+
+def test_answer_latency_ends_at_the_first_words_of_the_output_not_at_its_report():
+    """An output is reported once its body is complete; its first words were heard earlier, at
+    the reaction's `first_output_at`."""
+    opened = T0.timestamp()
+    timeline = [
+        _set(0.0, "speech_input", "tell me a story"),
+        _ev("input_written", 0.0, key="speech_input", version_id=1),
+        _ev("trigger_observed", 0.01, key="speech_input", version_id=1),
+        _issued(3.0, "say", "c1", text="Once upon a time, a very long story."),
+        _ev(
+            "reaction_ended",
+            3.0,
+            reaction=_reaction(
+                1,
+                [_trigger("speech_input", 1)],
+                call_ids=("c1",),
+                first_output_at=_at(0.7),
+            ),
+        ),
+    ]
+    assert timeline[1].t == opened
+    assert answer_latencies(timeline, CONTEXT) == pytest.approx([0.7])
 
 
 def test_an_unanswered_turn_gives_no_answer_latency():

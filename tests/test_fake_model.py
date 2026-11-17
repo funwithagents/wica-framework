@@ -227,6 +227,43 @@ def test_astream_splits_a_step_into_chunks_that_sum_to_the_ainvoke_message():
     asyncio.run(scenario())
 
 
+def test_astream_cuts_an_output_tag_across_chunks_and_never_interprets_it():
+    """Speech is text the Agent parses: the fake only splits it at word boundaries, which cuts
+    the tag across chunks, and a tag's name is not a tool name bind_tools checks."""
+
+    async def scenario() -> None:
+        model = FakeChatModel(
+            script=[
+                {"text": '<say emotion="happy">Hello there!</say>'},
+                {"text": "<noop/>"},
+            ],
+            delay_s=0,
+        )
+        model.bind_tools([add])  # neither `say` nor `noop` is bound: nothing to reject
+        spoken = await _collect(model, "q")
+        assert [c.text for c in spoken if c.text] == [
+            "<say ",
+            'emotion="happy">Hello ',
+            "there!</say>",
+        ]
+        assert all(c.tool_call_chunks == [] for c in spoken)
+        silent = await _collect(model, "q")
+        assert [c.text for c in silent if c.text] == ["<noop/>"]
+
+    asyncio.run(scenario())
+
+
+def test_a_scripted_noop_tool_call_is_rejected_as_an_unbound_tool():
+    """Doing nothing is `{"text": "<noop/>"}`: `noop` is no longer a tool, so a script still
+    calling it fails the bound-name check like any typo."""
+    model = FakeChatModel(
+        script=[{"tool_calls": [{"name": "noop", "args": {}}]}], delay_s=0
+    )
+    model.bind_tools([add])
+    with pytest.raises(ValueError, match="noop"):
+        asyncio.run(_collect(model, "q"))
+
+
 def test_astream_of_an_empty_step_yields_only_the_usage():
     async def scenario() -> None:
         chunks = await _collect(FakeChatModel(script=[{}], delay_s=0), "four")

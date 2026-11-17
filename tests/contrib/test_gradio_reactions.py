@@ -71,12 +71,11 @@ def test_render_reaction_trace_shows_only_present_measures():
         prompt_ready_at=None,
         model_started_at=None,
         model_ended_at=None,
-        sink_duration=None,
     )
     out = render_reaction_trace(cancelled)
     assert "model latency" not in out
     assert "render time" not in out
-    assert "sink duration" not in out
+    assert "time to first output" not in out
     assert (
         "busy time" in out
     )  # always present — derived from window_closed_at/ended_at only
@@ -85,9 +84,10 @@ def test_render_reaction_trace_shows_only_present_measures():
     out = render_reaction_trace(normal)
     assert "model latency" in out
     assert "render time" in out
-    assert "sink duration" in out
     # No first-content stamp on that record: neither half of the model latency is shown.
     assert "time to first content" not in out and "generation time" not in out
+    # It opened no output either.
+    assert "time to first output" not in out
 
     assert normal.model_started_at is not None
     streamed = make_reaction_trace(
@@ -96,6 +96,11 @@ def test_render_reaction_trace_shows_only_present_measures():
     out = render_reaction_trace(streamed)
     assert "time to first content: 0.300s" in out
     assert "generation time: 0.150s" in out
+
+    spoke = make_reaction_trace(
+        first_output_at=normal.model_started_at + timedelta(seconds=0.4)
+    )
+    assert "time to first output: 0.400s" in render_reaction_trace(spoke)
 
 
 def test_render_reaction_trace_shows_usage_commands_noop_and_error():

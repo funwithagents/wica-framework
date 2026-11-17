@@ -1,6 +1,6 @@
 # Benchmarking your application
 
-A benchmark answers "how well does model X drive my agent": the same scripted sessions run k times per model, read as one row per model with its pass rate, its latencies and its token costs. `wica.benchmark` is the runner an application's benchmark imports: a **matrix** of configurations, a directory of **scenarios**, a **`Target`** you implement to stand your application up, and one CLI. The repo's own benchmark, the conversation demo over nineteen models, is the worked example ([benchmarks/README.md](../../benchmarks/README.md)); the design is [specs/benchmark.md](../../specs/benchmark.md).
+A benchmark answers "how well does model X drive my agent": the same scripted sessions run k times per model, read as one row per model with its pass rate, its latencies and its token costs. `wica.benchmark` is the runner an application's benchmark imports: a **matrix** of configurations, a directory of **scenarios**, a **`Target`** you implement to stand your application up, and one CLI. The repo's own benchmark, the conversation demo over a matrix of models, is the worked example ([benchmarks/README.md](../../benchmarks/README.md)); the design is [specs/benchmark.md](../../specs/benchmark.md).
 
 ## The target
 
@@ -95,8 +95,8 @@ A scenario is a fixed user written as data: one JSON file, `name` equal to the f
 
 - **`input`** writes one Input of your agent, as the user would.
 - **`wait`** paces the session, and nothing is implicit. `"idle"` waits until the agent has finished, its Commands included. `"ready"` waits until the agent can take an input, while a speech or an action may still run. `"speaking"` and `{"running": "<Command>"}` wait until that Command has started since the last input. `{"seconds": n}` is the only timer. A wait that times out fails the run.
-- **`expect`** asserts something must happen (an output, a Command, a World value); a miss fails the run. A benchmark uses few of them, because a failed run is not scored.
-- **`check`** is a rule judged after a completed run: on a step, over the window from the input it follows to the next input; in the top-level `checks`, over the whole run. The built-ins are `answers_each_input`, `no_noop_on_input`, `no_failed_reactions`, `no_colliding_cancel`, `cancels_when_asked`, `acts_when_asked` and `quiet_on_background_change`. Add your own through the CLI's `extra_checks` (`wica.testing.Check`).
+- **`expect`** asserts something must happen (an output, a Command, private text, a World value); a miss fails the run. A benchmark uses few of them, because a failed run is not scored.
+- **`check`** is a rule judged after a completed run: on a step, over the window from the input it follows to the next input; in the top-level `checks`, over the whole run. The built-ins are `answers_each_input`, `no_noop_on_input` (the model did not decline with `<noop/>`), `no_failed_reactions`, `no_colliding_cancel`, `cancels_when_asked`, `acts_when_asked` and `quiet_on_background_change`. Add your own through the CLI's `extra_checks` (`wica.testing.Check`).
 - **Write `{"wait": "ready"}` before any input that talks over the agent.** The agent runs one reaction at a time and drops an input that arrives during one; a scenario that writes into that window measures the drop, not the model.
 - **What the target must expose is derived from the steps** (the Inputs written, the Commands named, whether an output Command is needed); a pair whose target lacks one is skipped and said so, so one directory can mix generic and application-specific scenarios.
 - **Matchers stay loose**: one script runs against every model, so a step asserts that the right kind of thing happened (an output, a Command by name, a silence), not its wording.
