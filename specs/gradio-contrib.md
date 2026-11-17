@@ -16,7 +16,7 @@ tests:
 
 # Gradio contrib components
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 

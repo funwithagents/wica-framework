@@ -19,7 +19,7 @@ tests:
 
 # WICA benchmark: comparing models over scenarios
 
-**Status:** Updated
+**Status:** Implemented
 
 ## Purpose
 
