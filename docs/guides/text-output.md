@@ -35,7 +35,8 @@ wica.set_output_command(say, as_tool=True)  # the tool call
 | It declines by | writing `<noop/>` | calling a `noop` tool |
 | Text outside the speech | private | private |
 | A reply with no speech in it | plain text is delivered as speech | rejected and retried (`output_command_required`) |
-| First words reach your function | as the model writes them (with an `OutputStream`) | once the whole response is complete |
+| First words reach your function | as the model writes them (with an `OutputStream`), once the first 80 characters are checked for garbled text; with `stream_output: false`, once the whole response is checked | once the whole response is complete (`stream_output: true` is not supported) |
+| Garbled text (dots, ellipses, a loop) | checked as it is written: held back, or cut off and kept out of history if it turns garbled after it started | checked on the call's `text` before anything is said |
 | Speaking, then continuing | only if the model asks, with a `<next>` note | every output's end wakes a step, where it speaks again or calls `noop`, up to `max_next_steps` |
 | Depends on the provider's `tool_choice` | no | yes, to force the call (`force=False` to not force) |
 | Servers that ignore `tool_choice` (`mlx_lm.server`, Ollama) | work | not helped: the model may answer in text nobody hears |

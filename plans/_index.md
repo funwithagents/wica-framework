@@ -62,6 +62,7 @@ Implementation plans for WICA — each plan turns a settled part of a spec (see 
 | [202611171500_output-fields.md](202611171500_output-fields.md) | Outputs reported as fields (`is_output`, `triggers_step`, `on_command_started`) so the test tooling, the benchmark and the panels stop inferring how the Agent implements outputs; the `noop` flag covers a decline with private text, an empty response is not a failed reaction, two tags are one reply | Done |
 | [202611172011_output-as-tool.md](202611172011_output-as-tool.md) | The output Command as a forced tool call, as an option (`set_output_command(fn, as_tool=True, force=True)`): the output tool and a `noop` tool bound, the wake after each output under `max_next_steps`, `output_command_required` back in tool mode; the test robot can run the gate in that mode | Done |
 | [202611171800_local-models-guide.md](202611171800_local-models-guide.md) | Local models: the guide rewritten by server (`llama-server`, `mlx_lm.server`, Ollama with its context, keep-alive and `extra_body` cap settings), three opt-in `local` benchmark rows for one model on the three servers | Done |
+| [202611172000_garbled-text.md](202611172000_garbled-text.md) | Garbled text and `stream_output`: a model-free check for degenerate text (filler, a loop cut by the cap) as a fourth default guard, run on each output as it streams (start held back 80 characters, garbage after delivery retracted from history and the World), `stream_output: false` to deliver only guarded responses, one voice cut at the first words | Done |
 
 ## Status legend
 

@@ -177,13 +177,15 @@ class ParseResult:
     # ("note", str) | ("noop", "").
     segments: list[tuple[str, Any]] = field(default_factory=list)
 
-    def rebuilt(self, name: str, kept: dict[int, str]) -> str:
+    def rebuilt(self, name: str, kept: dict[int, str], *, private: bool = True) -> str:
         """The response's text with each output in `kept` cut to what it maps to (an output
-        mapped to "" is removed). See specs/agent.md ("History keeps what the model wrote")."""
+        mapped to "" is removed), and without its private text when `private` is False. See
+        specs/agent.md ("History keeps what the model wrote", "Garbled text")."""
         pieces: list[str] = []
         for kind, value in self.segments:
             if kind == "text":
-                pieces.append(value)
+                if private:
+                    pieces.append(value)
             elif kind == "note":
                 pieces.append(f"<{NEXT_TAG}>{value}</{NEXT_TAG}>")
             elif kind == "noop":
@@ -256,6 +258,11 @@ class TextOutputParser:
         )
         self._open = False
         self._noop = False
+
+    @property
+    def text(self) -> str:
+        """The text fed so far, exactly as the model wrote it."""
+        return "".join(self._raw)
 
     @property
     def started(self) -> bool:
