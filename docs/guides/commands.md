@@ -144,15 +144,13 @@ An observation does not oblige a reaction. The model declines by writing `<noop/
 
 ### Tag or tool call
 
-The same output Command can be bound to the model as a tool instead. The model then speaks by calling it, `say(text="Hello there!", emotion="happy")`, and declines by calling a `noop` tool bound beside it:
+The same output Command can be bound to the model as a tool instead: the model then speaks by calling it, `say(text="Hello there!", emotion="happy")`, and declines by calling a `noop` tool bound beside it.
 
 ```python
 wica.set_output_command(say, as_tool=True)
 ```
 
-A tool call is forced on every model call, so the model cannot answer in plain text nobody hears; its free text stays private. `force=False` binds the tool without forcing, for Anthropic extended thinking or a backend that rejects `tool_choice`. Your function is unchanged, but the text arrives whole once the response is complete (an `OutputStream` gets one piece), no `<next>` note is read, and the end of every output wakes a step instead, bounded by `max_next_steps`, where the model speaks again or calls `noop`.
-
-Which one is better depends on the model. On the live gate (tests passed of 48, three runs, before the tag landed), ministral-14b passed 47 with the tool call and 37 with the tag, gpt-4o-mini 35 and 44, Qwen2.5 7B on Ollama 5 and 36. The tool call helps a model that describes its actions instead of calling them, and keeps some models quieter on background sounds. The tag works on local servers, which may ignore `tool_choice` ([local-models.md](local-models.md)), gets the first word out earlier, and ran away less on gpt-4o-mini. Measure on yours ([benchmarking.md](benchmarking.md)). The differences in full are in [../reference/api.md](../reference/api.md#the-output-command-as-a-tool-call).
+Which one is better depends on the model, measurably, in both directions: [tag-or-tool-call.md](tag-or-tool-call.md) gives what differs, what was measured on seven models, how to choose and how to compare them on yours.
 
 ## Cancellation reaches the task, not always the work
 

@@ -163,7 +163,7 @@ With `as_tool=True` the same function is bound to the model as a tool, and the m
 - **History and the World.** The output is kept as the model's tool call, and its entry renders as `Calling say(text='…')…`.
 - **Every response is guarded**, and `output_command_required` rejects one with no tool call ([Response guards](#response-guards)).
 
-Neither the output tool nor `noop` is listed in `wica.agent.commands`. Which mode suits a model is a measurement, not a rule: [../guides/commands.md](../guides/commands.md#tag-or-tool-call); [specs/agent.md](../../specs/agent.md), "The output Command as a tool call".
+Neither the output tool nor `noop` is listed in `wica.agent.commands`. Which mode suits a model is a measurement, not a rule: [../guides/tag-or-tool-call.md](../guides/tag-or-tool-call.md); [specs/agent.md](../../specs/agent.md), "The output Command as a tool call".
 
 ## Response guards
 
