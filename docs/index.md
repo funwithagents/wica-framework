@@ -10,6 +10,7 @@ The documentation of WICA, by what you want to do. The [README](../README.md) is
 | feed the agent a perception (speech, a sensor, a camera frame) | [guides/world-and-inputs.md](guides/world-and-inputs.md): registering an entry, serializing it to the prompt, what wakes the Agent, TTLs, bursts |
 | give the agent an action it can take | [guides/commands.md](guides/commands.md): functions as Commands, cancellation, what runs concurrently |
 | make the agent speak to its user | [guides/commands.md](guides/commands.md#make-your-agent-speak): the output Command, streamed or whole text, attributes, interruption, the `<next>` note, staying silent |
+| separate what the agent thinks from what it says, by a tag or a tool call | [guides/text-output.md](guides/text-output.md): the two ways, what was measured on seven models, how to choose, how to compare them in a benchmark |
 | run on a model I host, locally or on my own server | [guides/local-models.md](guides/local-models.md): a server speaking OpenAI's Chat Completions API (`llama-server`, `mlx_lm.server`, Ollama), the config, each server's setup and quirks, how to measure a model |
 | configure the model, the key, the prompt, the history | [reference/configuration.md](reference/configuration.md): every field, the loaders, the providers |
 | watch the World, the prompts and the transcript in a browser | [guides/gradio-panels.md](guides/gradio-panels.md): the three `wica[gradio]` panels in your own `gr.Blocks` |

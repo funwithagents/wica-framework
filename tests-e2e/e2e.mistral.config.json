@@ -1,4 +1,5 @@
 {
+  "output": "tool",
   "agent": {
     "provider": "mistral",
     "model": "ministral-14b-latest",

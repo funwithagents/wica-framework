@@ -30,6 +30,9 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.tool import invalid_tool_call, tool_call
 from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from pydantic import Field, create_model
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 
@@ -438,7 +441,11 @@ def _has_content(piece: AIMessage) -> bool:
     return bool(piece.text or piece.tool_calls or piece.invalid_tool_calls)
 
 
-def _model_response(response: AIMessage, bound: Mapping[str, Command]) -> ModelResponse:
+def _model_response(
+    response: AIMessage,
+    bound: Mapping[str, Command],
+    output_command_name: str | None = None,
+) -> ModelResponse:
     """The neutral view of a response the guards (and on_response_rejected) receive: its own
     copies, so a guard or a subscriber cannot rewrite what gets dispatched."""
     return ModelResponse(
@@ -458,6 +465,7 @@ def _model_response(response: AIMessage, bound: Mapping[str, Command]) -> ModelR
         ),
         truncated=_was_truncated(response),
         output_tokens=(response.usage_metadata or {}).get("output_tokens"),
+        output_command_name=output_command_name,
     )
 
 
@@ -677,6 +685,77 @@ _NO_NEXT_PROMPT = (
 )
 
 
+# Tool mode (specs/agent.md, "The output Command as a tool call"): the output Command is bound as a
+# tool, with a zero-argument noop tool beside it, and the binding forces a tool call.
+_NOOP_COMMAND_DESCRIPTION = (
+    "Take no action this step. Call this when the current observation needs no response from you — "
+    "you have nothing to say and no command to issue. This is how you explicitly choose to do "
+    "nothing; do not try to reply with empty text."
+)
+# The tool_result paired with a recorded noop call: a plain acknowledgement (no entry to point at).
+_NOOP_ACK = "Acknowledged — no action taken."
+_TOOL_OUTPUT_PROMPT = (
+    "\n- Anything you want to communicate to the user must be said by calling {name}. Your "
+    "free-text responses are private reasoning and are not shown to the user.{description} "
+    "What you send with {name} is delivered in the background, like any command: it appears in "
+    "your World as a command entry, running and then finished, and you can be called again "
+    "while it is still being delivered. Calling {name} again replaces what is being delivered: "
+    "the earlier one is cut off."
+)
+_TOOL_SILENCE_PROMPT = (
+    "\n- You need not act on every observation. If one genuinely calls for nothing from you — "
+    f"passive background state, for example — call {NOOP_TAG} to do nothing. But a request, a "
+    f"question, or anything addressed to you should be answered; never use {NOOP_TAG} to skip "
+    "an expected response."
+)
+
+
+def _bind_tools_forced(
+    model: BaseChatModel, tools: list[BaseTool]
+) -> Runnable[Any, AIMessage]:
+    """Bind `tools` so the model must call one of them. LangChain's portable value is
+    `tool_choice="any"`, which each integration maps to its API. `ChatHuggingFace.bind_tools`
+    refuses any tool_choice with more than one tool — a LangChain-side check, not an API limit — so
+    it is bound directly with the `required` the Hub client passes through to the router. See
+    specs/agent.md ("The output Command as a tool call")."""
+    try:
+        from langchain_huggingface import ChatHuggingFace
+    except ImportError:  # the huggingface-hub extra is not installed
+        pass
+    else:
+        if isinstance(model, ChatHuggingFace):
+            return model.bind(
+                tools=[convert_to_openai_tool(tool) for tool in tools],
+                tool_choice="required",
+            )
+    return model.bind_tools(tools, tool_choice="any")
+
+
+def _output_tool(command: Command, signature: OutputSignature) -> Command:
+    """The output Command as a tool: `text`, then the attributes (a Literal as an enum), each with
+    its default; the Command's description. Never invoked: the Agent intercepts its calls and
+    delivers them as outputs."""
+    fields: dict[str, Any] = {
+        "text": (str, Field(description="What to say to the user.")),
+    }
+    for name, allowed in signature.attributes.items():
+        kind: Any = Literal[allowed] if allowed else str  # type: ignore[valid-type]
+        fields[name] = (kind, Field(default=signature.defaults[name]))
+    schema = create_model(f"{command.name}_output", **fields)
+
+    async def _never(**_: Any) -> str:
+        raise RuntimeError("the output tool is delivered by the Agent, never invoked")
+
+    tool = StructuredTool.from_function(
+        coroutine=_never,
+        name=command.name,
+        description=command.description
+        or f"Say something to the user with {command.name}.",
+        args_schema=schema,
+    )
+    return Command(tool)
+
+
 @dataclass
 class _OutputPart:
     """One output of a response (one tag): its stream and its Command execution."""
@@ -703,6 +782,8 @@ class _OutputSession:
     # The history record of what the model wrote (replaced when an output is cut short).
     record: AssistantTextRecord | None = None
     last_task: asyncio.Task[None] | None = None
+    # Tool mode: each output's recorded tool call, by part index (rewritten when it is cut).
+    tool_records: dict[int, CommandRecord] = field(default_factory=dict)
 
 
 def _command_ack(call_id: str) -> str:
@@ -904,6 +985,14 @@ class Agent:
             name=_CANCEL_COMMAND_NAME,
             description=_CANCEL_COMMAND_DESCRIPTION,
         )
+        # Tool mode (set_output_command(as_tool=True)): the output Command's tool and the noop tool,
+        # bound beside the Commands but not among them, and whether the binding is forced.
+        self._noop_command = Command(
+            self._noop_action, name=NOOP_TAG, description=_NOOP_COMMAND_DESCRIPTION
+        )
+        self._output_as_tool = False
+        self._output_force = True
+        self._output_tool: Command | None = None
         # The system prompt the model receives is composed: the resolved persona (verbatim) followed
         # by the WICA runtime primer (+ the output clause when an output Command is set). The persona
         # is resolved once here (reading the prompt file if that's the form given) and kept, so
@@ -1062,6 +1151,13 @@ class Agent:
         if command is None or signature is None:
             return self._persona + primer + _NO_OUTPUT_PROMPT + _SILENCE_PROMPT
         name = command.name
+        description = command.description.strip()
+        if self._output_as_tool:
+            primer += _TOOL_OUTPUT_PROMPT.format(
+                name=name,
+                description=f" What {name} does: {description}" if description else "",
+            )
+            return self._persona + primer + _TOOL_SILENCE_PROMPT
         attributes = ""
         if signature.attributes:
             described = "; ".join(
@@ -1074,7 +1170,6 @@ class Agent:
             attributes = _OUTPUT_ATTRIBUTES_PROMPT.format(
                 name=name, attributes=described, example=example
             )
-        description = command.description.strip()
         primer += _OUTPUT_PROMPT.format(
             name=name,
             description=f" What {name} does: {description}" if description else "",
@@ -1087,7 +1182,13 @@ class Agent:
             primer += _NEXT_PROMPT.format(name=name)
         return self._persona + primer
 
-    def set_output_command(self, fn: Callable[..., Any] | Command | None) -> None:
+    def set_output_command(
+        self,
+        fn: Callable[..., Any] | Command | None,
+        *,
+        as_tool: bool = False,
+        force: bool = True,
+    ) -> None:
         """Set (or, with None, clear) the application's output Command — what the model says to
         its user. The model issues it by writing a tag of its name in its response text; the
         tag's body is delivered to the Command (as a stream or as a whole, by its first
@@ -1099,9 +1200,12 @@ class Agent:
         happens before any state changes: a reserved name (``noop``, ``next``,
         ``cancel_command``), a name already registered as an application Command, a name that is
         not a valid tag name, a Command wrapping an off-the-shelf tool, or a signature that
-        cannot be an output's raises ``ValueError``. The system prompt is then recomposed. The
-        output Command is not a tool: the model binding is untouched. An output of a replaced
-        Command that is still running finishes normally."""
+        cannot be an output's raises ``ValueError``. The system prompt is then recomposed.
+
+        With ``as_tool=True`` the output Command is bound to the model as a tool instead, with a
+        ``noop`` tool beside it, and the binding forces a tool call (``force=False`` leaves it
+        unforced). See specs/agent.md ("The output Command as a tool call"). An output of a
+        replaced Command that is still running finishes normally."""
         command: Command | None = None
         signature: OutputSignature | None = None
         if fn is not None:
@@ -1130,8 +1234,32 @@ class Agent:
         self._output_command = command
         self._output_command_name = None if command is None else command.name
         self._output_signature = signature
+        tool_mode = command is not None and signature is not None and as_tool
+        self._output_as_tool = tool_mode
+        self._output_force = force
+        self._output_tool = (
+            _output_tool(command, signature)
+            if tool_mode and command is not None and signature is not None
+            else None
+        )
         self.system_prompt = self._compose_system_prompt()
-        _logger.debug("output command set to %r", self._output_command_name)
+        if self._started:
+            self._rebind_model()
+        _logger.debug(
+            "output command set to %r%s",
+            self._output_command_name,
+            " (as a tool)" if tool_mode else "",
+        )
+
+    def _wica_tools(self) -> list[Command]:
+        """The tools bound beside the Commands in tool mode: the output tool and noop."""
+        if not self._output_as_tool or self._output_tool is None:
+            return []
+        return [self._output_tool, self._noop_command]
+
+    async def _noop_action(self) -> str:
+        """Backing for the noop tool. Never invoked: the step intercepts a noop call."""
+        return _NOOP_ACK
 
     def register_command(self, fn: Callable[..., Any] | Command) -> None:
         """Register a Command. Takes one argument: a plain callable (auto-wrapped — name from
@@ -1160,15 +1288,19 @@ class Agent:
         _logger.debug("registered command %r", command.name)
 
     def _rebind_model(self) -> None:
-        """Bind the model to the current tool set. Every attach/detach comes through here. No
-        tool choice is forced: the model speaks in its text (see specs/agent.md, "Output: tags
-        in the model's text")."""
-        if not self._commands:
+        """Bind the model to the current tool set. Every attach/detach comes through here. In tag
+        mode no tool choice is forced: the model speaks in its text. In tool mode the output tool
+        and noop are bound too, and the binding is forced unless `force=False` (see
+        specs/agent.md, "The output Command as a tool call")."""
+        tools = [c.tool for c in self._commands.values()] + [
+            c.tool for c in self._wica_tools()
+        ]
+        if not tools:
             self._bound_model = self.model
-            return
-        self._bound_model = self.model.bind_tools(
-            [c.tool for c in self._commands.values()]
-        )
+        elif self._output_as_tool and self._output_force:
+            self._bound_model = _bind_tools_forced(self.model, tools)
+        else:
+            self._bound_model = self.model.bind_tools(tools)
 
     def _register_builtin(self, command: Command) -> None:
         """Idempotent attach for WICA's own Command (used by start(), which may run again after
@@ -1500,7 +1632,11 @@ class Agent:
         # accepted response goes on below. See specs/agent.md ("Response guards").
         bound_model = self._bound_model
         guards = list(self._guards.items())
-        bound: Mapping[str, Command] = MappingProxyType(dict(self._commands))
+        bound: Mapping[str, Command] = MappingProxyType(
+            {**self._commands, **{c.name: c for c in self._wica_tools()}}
+        )
+        # Tool mode: the output Command is a tool the response must call (output_command_required).
+        tool_output = self._output_command_name if self._output_as_tool else None
         prompt = messages
         while True:
             builder.attempts += 1
@@ -1522,7 +1658,7 @@ class Agent:
                 break
             if response is None:
                 return
-            candidate = _model_response(response, bound)
+            candidate = _model_response(response, bound, tool_output)
             retry = await self._run_guards(guards, candidate, attempt, builder)
             if retry is None:
                 break
@@ -1540,7 +1676,7 @@ class Agent:
             self.on_response_rejected.emit(
                 ResponseRejection(
                     attempt=attempt,
-                    response=_model_response(response, bound),
+                    response=_model_response(response, bound, tool_output),
                     feedback=retry.feedback,
                     show_response=show,
                     will_retry=will_retry,
@@ -1577,19 +1713,38 @@ class Agent:
         builder.outcome = "ok" if said_or_did else "empty"
         # Doing nothing: a <noop/>, or no text at all, and no tool call. See specs/agent.md
         # ("The agent may choose not to act").
-        builder.noop = parsed.noop and not response.tool_calls
+        # In tool mode a noop call is the decline, and does not count as acting.
+        acted = [
+            c
+            for c in response.tool_calls
+            if not (self._output_as_tool and c["name"] == NOOP_TAG)
+        ]
+        builder.noop = parsed.noop and not acted
         if parsed.private:
             self.on_private_text.emit(parsed.private)
 
+        tool_session: _OutputSession | None = None
         for call in response.tool_calls:
             # The provider's tool-call id reconstructs the native tool_call/tool_result pair; the
             # model is pointed at a short id WICA mints instead (see _mint_call_id).
             tool_call_id = call["id"] or uuid.uuid4().hex
             call_id = self._mint_call_id()
             args = copy.deepcopy(call["args"])
-            self._history.append(
-                CommandRecord(call_id, tool_call_id, call["name"], copy.deepcopy(args))
+            record = CommandRecord(
+                call_id, tool_call_id, call["name"], copy.deepcopy(args)
             )
+            self._history.append(record)
+            if self._output_as_tool and call["name"] == NOOP_TAG:
+                continue  # the decline: recorded, nothing dispatched
+            if self._output_as_tool and call["name"] == self._output_command_name:
+                if tool_session is None:
+                    tool_session = _OutputSession(
+                        command=self._output_command,
+                        signature=self._output_signature,
+                        reaction_id=builder.reaction_id,
+                    )
+                self._deliver_tool_output(tool_session, call_id, record, args, builder)
+                continue
             self._dispatch_command(call_id, call["name"], args)
             builder.command_call_ids.append(call_id)
         if builder.first_input_tokens is not None:
@@ -1739,7 +1894,7 @@ class Agent:
             session.parts[-1].stream.close()
 
         session.parser = TextOutputParser(
-            None if command is None else command.name,
+            None if command is None or self._output_as_tool else command.name,
             on_open=on_open,
             on_delta=on_delta,
             on_close=on_close,
@@ -1751,7 +1906,8 @@ class Agent:
         session: _OutputSession,
         attributes: dict[str, str],
         builder: _ReactionBuilder,
-    ) -> None:
+        call_id: str | None = None,
+    ) -> _OutputPart:
         """An output's first words arrived: open its execution — a Command entry, running — and
         start delivering, before the response is complete. A response's outputs are delivered
         one after the other; its first one cuts off what an earlier response is still saying
@@ -1780,7 +1936,7 @@ class Agent:
                     False  # cut off, not finished: wakes nothing
                 )
                 old_task.cancel()
-        call_id = self._mint_call_id()
+        call_id = call_id or self._mint_call_id()
         key = f"{_COMMAND_KEY_PREFIX}{call_id}"
         part = _OutputPart(len(session.parts), OutputStream(), call_id, key, kept)
         session.parts.append(part)
@@ -1790,7 +1946,12 @@ class Agent:
         self._world.register(
             key,
             CommandExecution,
-            serialize_fn=_serialize_output_execution,
+            # In tool mode the output is a tool call, and its entry says so.
+            serialize_fn=(
+                _serialize_command_execution
+                if self._output_as_tool
+                else _serialize_output_execution
+            ),
             include_in_prompt=True,
             triggers_llm_call=True,
             trigger_condition_fn=lambda old, new: (
@@ -1826,6 +1987,57 @@ class Agent:
         session.last_task = task
         self._running_tasks[key] = task
         self._live_outputs[key] = task
+        return part
+
+    def _deliver_tool_output(
+        self,
+        session: _OutputSession,
+        call_id: str,
+        record: CommandRecord,
+        args: dict[str, Any],
+        builder: _ReactionBuilder,
+    ) -> None:
+        """Tool mode: an output tool call, its arguments whole. Open the output, hand it the whole
+        text, publish it, and let its end wake a step under max_next_steps. See specs/agent.md
+        ("The output Command as a tool call")."""
+        command = session.command
+        assert command is not None
+        text = str(args.get("text", ""))
+        attributes = {k: str(v) for k, v in args.items() if k != "text"}
+        part = self._open_output(session, attributes, builder, call_id=call_id)
+        session.tool_records[part.index] = record
+        part.stream.push(text)
+        part.stream.close()
+        published = {**part.attributes, "text": text.strip()}
+        if part.key in self._running_tasks:
+            self._world.update(
+                part.key,
+                CommandExecution(name=command.name, args=published, state="running"),
+            )
+        self.on_command.emit(
+            CommandIssued(
+                command.name, copy.deepcopy(published), call_id, is_output=True
+            )
+        )
+        builder.command_call_ids.append(call_id)
+        self._grant_output_wake(part)
+
+    def _grant_output_wake(self, part: _OutputPart) -> None:
+        """Let the end of this output wake a step, unless the chain of steps woken by the Agent's
+        own output has reached max_next_steps, or the output is already cut off."""
+        if part.key not in self._running_tasks:
+            return  # already cut off
+        cap = self._max_next_steps
+        if cap is not None and self._next_chain >= cap:
+            _logger.warning(
+                "output %s: its end wakes no step — %d step(s) in a row already woken by the "
+                "Agent's own output (max_next_steps)",
+                part.key,
+                self._next_chain,
+            )
+            return
+        self._next_chain += 1
+        self._output_wake[part.key] = True
 
     def _settle_text(
         self, session: _OutputSession, parsed: ParseResult, builder: _ReactionBuilder
@@ -1859,20 +2071,7 @@ class Agent:
             )
             builder.command_call_ids.append(part.call_id)
         if session.parts and notes and parsed.note is not None:
-            last = session.parts[-1]
-            if last.key not in self._running_tasks:
-                return  # already cut off
-            cap = self._max_next_steps
-            if cap is not None and self._next_chain >= cap:
-                _logger.warning(
-                    "output %s: its end wakes no step — %d step(s) in a row already woken by "
-                    "a <next> note (max_next_steps)",
-                    last.key,
-                    self._next_chain,
-                )
-                return
-            self._next_chain += 1
-            self._output_wake[last.key] = True
+            self._grant_output_wake(session.parts[-1])
 
     def _set_next_note(self, note: str, reaction_id: int) -> None:
         self._next_note = note
@@ -1984,7 +2183,23 @@ class Agent:
 
     def _cut_text_record(self, session: _OutputSession) -> None:
         """An output was cut short: the response's history record keeps only what was heard of
-        it, and loses an output that never got its turn."""
+        it, and loses an output that never got its turn. In tool mode the recorded tool call's
+        `text` is replaced by what was heard."""
+        for index, part in enumerate(session.parts):
+            tool_record = session.tool_records.get(index)
+            if tool_record is None or part.kept is None:
+                continue
+            cut = CommandRecord(
+                tool_record.call_id,
+                tool_record.tool_call_id,
+                tool_record.name,
+                {**tool_record.args, "text": part.kept},
+            )
+            for position, item in enumerate(self._history):
+                if item is tool_record:
+                    self._history[position] = cut
+                    session.tool_records[index] = cut
+                    break
         record, parsed, command = session.record, session.parsed, session.command
         if record is None or parsed is None or command is None:
             return
@@ -2410,6 +2625,10 @@ class Agent:
                         "id": record.tool_call_id,
                     }
                 )
-                pending_acks[record.tool_call_id] = _command_ack(record.call_id)
+                pending_acks[record.tool_call_id] = (
+                    _NOOP_ACK
+                    if record.name == NOOP_TAG
+                    else _command_ack(record.call_id)
+                )
         flush_assistant()
         return messages

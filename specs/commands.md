@@ -79,13 +79,15 @@ How the Agent parses the tag, delivers it, sequences several of them and records
 
 `set_output_command` raises `ValueError` for anything above that does not hold, and for a reserved or already-registered name.
 
+**The same Command can be a tool.** `set_output_command(say, as_tool=True)` binds it to the model as a tool, with `text` and the attributes as its arguments, and forces a tool call each step (`force=False` to leave it unforced). The signature rules above are unchanged, with one difference in effect: the attributes are tool arguments, so a value outside a `Literal` is rejected by `invalid_args` and the model asked again, where a tag falls back to the default. The first parameter still receives the text, whole. Which mode suits a model, and what changes with it, is in [agent.md](agent.md), "The output Command as a tool call".
+
 **Why a Command at all**, when the body could simply be handed to a callback: the Command lifecycle is what makes output **observable** and **cancellable**. Each output runs as a tracked task with an `agent:command:<call_id>` entry that is `include_in_prompt=True`, so a later step *sees* "saying … (running)" and can cut it off with `cancel_command` — barge-in.
 
-**`triggers_on_completion` is not read for the output Command.** Whether the end of an output wakes a step is decided per response, by the model's `<next>` note, under `AgentConfig.max_next_steps` ([agent.md](agent.md), "Continuing after an output"). An unconditional wake was the earlier design (a forced `say` tool call whose completion re-triggered, ended by a `noop` call): it cost a second model call per utterance and was where runaway chains started.
+**`triggers_on_completion` is not read for the output Command.** Whether the end of an output wakes a step is the Agent's decision. In tag mode it is decided per response, by the model's `<next>` note, under `AgentConfig.max_next_steps` ([agent.md](agent.md), "Continuing after an output"). In tool mode the end of every spoken output wakes a step, ended by a `noop` call, under the same cap: an unconditional wake costs a second model call per utterance and is where runaway chains started, which the cap bounds.
 
 ### Doing nothing is not a Command
 
-Declining to react is written in the model's text, as `<noop/>` — see [agent.md](agent.md), "The agent may choose not to act". It was a zero-argument `noop` Command until the model's speech moved into its text: with speech as a tag and silence as a tool call, models stopped reaching for the tool. The name `noop` stays reserved so no application Command can be confused with it.
+Declining to react is written in the model's text, as `<noop/>` — see [agent.md](agent.md), "The agent may choose not to act". With speech as a tag and silence as a tool call, models stopped reaching for the tool, so silence follows speech: in tool mode, where the output Command is a tool, a zero-argument `noop` tool is bound with it, and calling it is the decline. Either way it issues no Command and only the reaction record's `noop` flag reports it. The name `noop` is reserved.
 
 ## Command execution as a World entry (event-driven)
 

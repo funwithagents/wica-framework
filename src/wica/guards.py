@@ -2,7 +2,9 @@
 is retried within the same reaction, and only the accepted one enters history. See specs/agent.md
 ("Response guards").
 
-The default guards (`incomplete_response`, `unknown_command`, `invalid_args`) are supported;
+The default guards (`incomplete_response`, `unknown_command`, `invalid_args`,
+`output_command_required` — the last active only when the output Command is a tool) are
+supported;
 writing an application guard — `Agent.add_response_guard` / `Wica.add_response_guard` and the types
 here — is **experimental**: the shape may change without a deprecation period.
 
@@ -29,8 +31,14 @@ __all__ = [
     "combine",
     "incomplete_response",
     "invalid_args",
+    "output_command_required",
     "unknown_command",
 ]
+
+
+# The `noop` tool of tool mode, named in feedback. Duplicated from wica.text_output on purpose:
+# this module stays a leaf.
+_NOOP_COMMAND_NAME = "noop"
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,9 @@ class ModelResponse:
     # The output tokens the provider reported for this response; None when it reported none. For a
     # truncated response it is the cap that was hit.
     output_tokens: int | None = None
+    # The output Command's name when it is bound as a tool (tool mode), else None: the
+    # response must then call a tool. See specs/agent.md ("The output Command as a tool call").
+    output_command_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,7 +125,9 @@ def incomplete_response(response: ModelResponse) -> Retry | None:
     last one is incomplete, however well-formed it looks). Nothing of it is executed and the model
     is asked again. A reminder, never shown: a broken or cut response cannot be replayed. The
     feedback gives a length to stay under where one is known — "be shorter" alone does not make
-    a model shorten. Text cut at the cap is accepted: an output is delivered as far as it got."""
+    a model shorten. Text cut at the cap is accepted: an output is delivered as far as it got.
+    In tool mode a response cut before it made any call is incomplete too: the call the output
+    Command requires is missing."""
     parts = []
     for call in response.malformed:
         name = f"`{call.name}`" if call.name else "a command"
@@ -145,6 +158,13 @@ def incomplete_response(response: ModelResponse) -> Retry | None:
             "Your response was cut off at the output length limit while you were writing the "
             f"call to `{last}`, so that call is incomplete and nothing was executed. Respond "
             f"again with much less in it. {limit}",
+            show_response=False,
+        )
+    if response.output_command_name is not None:
+        return Retry(
+            "Your response was cut off at the output length limit before you called any "
+            "command, so the user heard nothing. Respond again and call "
+            f"`{response.output_command_name}` (or `{_NOOP_COMMAND_NAME}`) right away. {limit}",
             show_response=False,
         )
     return None
@@ -203,11 +223,28 @@ def _describe_validation_error(exc: ValueError) -> str:
     return ", ".join(parts) or str(exc)
 
 
+def output_command_required(response: ModelResponse) -> Retry | None:
+    """The output Command is a tool and the response calls no tool at all: its free text, if
+    any, is private reasoning the user never hears. A response whose only call is malformed, or
+    that was cut at the output cap, is incomplete_response's case. Inactive in tag mode, where
+    `output_command_name` is None."""
+    name = response.output_command_name
+    if name is None or response.commands or response.malformed or response.truncated:
+        return None
+    return Retry(
+        "Your response called no command, so the user heard nothing: your free text is private. "
+        f"Call `{name}` to reply to the user, or `{_NOOP_COMMAND_NAME}` to do nothing.",
+        # An empty response cannot be shown (providers reject an empty assistant message).
+        show_response=bool(response.text),
+    )
+
+
 # Installed at Agent construction, in this order, before any application guard.
 DEFAULT_GUARDS: tuple[tuple[str, ResponseGuard], ...] = (
     ("incomplete_response", incomplete_response),
     ("unknown_command", unknown_command),
     ("invalid_args", invalid_args),
+    ("output_command_required", output_command_required),
 )
 
 # --- The correction frames ---------------------------------------------------------------------

@@ -188,6 +188,7 @@ def test_response_guards_are_delegated_to_the_agent(wica_factory):
         "incomplete_response",
         "unknown_command",
         "invalid_args",
+        "output_command_required",
     ]
     wica.remove_response_guard("invalid_args")
     wica.add_response_guard(lambda response: None, name="mine")
@@ -195,6 +196,7 @@ def test_response_guards_are_delegated_to_the_agent(wica_factory):
     assert list(wica.response_guards) == [
         "incomplete_response",
         "unknown_command",
+        "output_command_required",
         "mine",
     ]
 

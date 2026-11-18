@@ -37,7 +37,8 @@ The one constructor. It builds a `World` and an `Agent` from the config and wire
 ```
 wica.world                      # the World (below); wica.agent — the Agent, rarely needed
 wica.register_command(fn_or_command)              # a plain callable, or Command(...) for options
-wica.set_output_command(fn_or_command | None)     # the one output channel: what the model says to its user
+wica.set_output_command(fn_or_command | None, *, as_tool=False, force=True)
+                                                  # the one output channel: what the model says to its user
 wica.start(); wica.stop(); wica.start()           # restartable: stop() is a pause
 wica.close()                                      # terminal: releases an owned loop; no restart
 wica.is_running                                   # True between start() and stop()
@@ -47,7 +48,7 @@ wica.on_<event>.subscribe(handler)                # the ten Events (below)
 ```
 
 - **`register_command(fn)`**: a sync or async function (its name and docstring become the tool's name and description), or a `Command`. Names are unique and `noop`, `next` and `cancel_command` are reserved: a duplicate or reserved name raises `ValueError`. Register before `start()`. [../guides/commands.md](../guides/commands.md).
-- **`set_output_command(fn)`**: the one function that receives what the model says to its user (speech, a chat bubble). The model speaks by writing a tag named after it in its response text; the function is not a tool. Setting it recomposes the system prompt, so set it before `start()`. `None` clears it: no tag is taught and all the model's text is private. The contract is [The output Command](#the-output-command).
+- **`set_output_command(fn, *, as_tool=False, force=True)`**: the one function that receives what the model says to its user (speech, a chat bubble). By default the model speaks by writing a tag named after it in its response text, and the function is not a tool; `as_tool=True` binds it as a tool the model calls instead ([The output Command as a tool call](#the-output-command-as-a-tool-call)). Setting it recomposes the system prompt, so set it before `start()`. `None` clears it: no tag is taught and all the model's text is private. The contract is [The output Command](#the-output-command).
 - **Lifecycle**: `start()` starts the World then the Agent (and the loop thread when owned); `stop()` cancels in-flight Commands and stops both, keeping registrations, values, subscriptions and history; `close()` stops if needed and releases the loop. `start()` on a running Wica is a no-op; `start()` after `close()` raises `RuntimeError`.
 - **Response guards** check every model response before it is used, and send a wrong one back to the model: [Response guards](#response-guards).
 - **`wica.world` and `wica.agent` are borrowed references**, valid for the life of the Wica.
@@ -93,7 +94,7 @@ Wraps a callable (name from `__name__`, description from the docstring, both ove
 ## The output Command
 
 ```
-wica.set_output_command(fn_or_command | None)
+wica.set_output_command(fn_or_command | None, *, as_tool=False, force=True)
 
 async def say(text: OutputStream, emotion: Literal["happy", "sad", "neutral"] = "neutral") -> str | None
 def say(text: str, emotion: str = "neutral") -> str | None        # sync or async
@@ -144,19 +145,40 @@ The parsing is lenient: a response with text and no output tag is delivered whol
 
 [specs/agent.md](../../specs/agent.md), "Output: tags in the model's text"; [specs/commands.md](../../specs/commands.md), "The output Command".
 
+### The output Command as a tool call
+
+```python
+wica.set_output_command(say, as_tool=True)               # a tool call is forced every step
+wica.set_output_command(say, as_tool=True, force=False)  # bound, not forced
+```
+
+With `as_tool=True` the same function is bound to the model as a tool, and the model speaks by calling it: `say(text="Hello there!", emotion="happy")`. The signature rules above are unchanged. What differs from the tag:
+
+- **The tool.** Its arguments are `text`, whatever the first parameter is called, then the attributes, each with its default; a `Literal` becomes an enum. An attribute outside its values is rejected by the `invalid_args` guard and retried, rather than falling back to the default. The description is the Command's.
+- **Forcing.** Every model call forces a tool call (`tool_choice`), so the model cannot reply in plain text nobody hears. `force=False` binds the tool without forcing, for Anthropic extended thinking (whose API rejects a forced choice) or a backend that rejects `tool_choice`. A server that ignores `tool_choice` (`mlx_lm.server`, Ollama) is not helped by this mode: use the tag there ([../guides/local-models.md](../guides/local-models.md)).
+- **Doing nothing is a tool.** A zero-argument `noop` tool is bound beside it. Calling it declines like `<noop/>`: `ReactionTrace.noop` is set, no Command Event fires.
+- **All text is private.** No tag is taught and no `<next>` note is read; text the model writes beside its calls is reported on `on_agent_private_text`.
+- **Each output's end wakes a step**, where the model speaks again or calls `noop`, bounded by `max_next_steps` ([configuration.md](configuration.md#the-agent-block)). A cancelled output wakes nothing; `CommandTrace.triggers_step` reports the decision.
+- **The text arrives whole.** The output opens when the response is complete and its call is dispatched: `on_agent_command_started` and `on_agent_command` fire then, and an `OutputStream` receives a single piece. One voice, `is_output`, `cancel_command` and the history correction from `stream.heard` work as with the tag.
+- **History and the World.** The output is kept as the model's tool call, and its entry renders as `Calling say(text='…')…`.
+- **Every response is guarded**, and `output_command_required` rejects one with no tool call ([Response guards](#response-guards)).
+
+Neither the output tool nor `noop` is listed in `wica.agent.commands`. Which mode suits a model is a measurement, not a rule: [../guides/text-output.md](../guides/text-output.md); [specs/agent.md](../../specs/agent.md), "The output Command as a tool call".
+
 ## Response guards
 
 Before a model response is used (its Commands dispatched, its text recorded), WICA checks it with its **response guards**. A guard that finds a mistake rejects the response: the model is called again, over the same conversation plus a correction, up to `max_retries` times (default `1`, [configuration.md](configuration.md#the-agent-block)). Only the accepted response enters the history, so later prompts never show the mistake. Out of retries, the reaction ends with the `rejected` outcome: nothing is done, and an ERROR log line carries the reason.
 
-**A response that has started an output is not guarded.** An output is delivered as the response streams, so by the end of the response part of it has been heard and cannot be taken back: the response is accepted as it is and no guard runs. An unknown or invalid Command call beside the output is dispatched and ends as a `failed` entry the model observes. The guards therefore cover the responses that only act or do nothing.
+**A response that has started an output is not guarded** (with the tag; with the [tool call](#the-output-command-as-a-tool-call) the output waits for the response, so every response is guarded). An output is delivered as the response streams, so by the end of the response part of it has been heard and cannot be taken back: the response is accepted as it is and no guard runs. An unknown or invalid Command call beside the output is dispatched and ends as a `failed` entry the model observes. The guards therefore cover the responses that only act or do nothing.
 
-Three guards are on by default:
+Four guards are on by default; the last acts only when the output Command is a tool:
 
 | Guard | Rejects a response that |
 |---|---|
 | `incomplete_response` | was cut at the output cap (`max_tokens` and the like) in the middle of a Command call; the model is asked again with a length to stay under. Without this guard a cut call is dropped, or dispatched with the arguments that survived |
 | `unknown_command` | calls a Command that is not registered |
 | `invalid_args` | calls a Command with arguments that do not fit its signature |
+| `output_command_required` | calls no tool at all, with the output Command bound as a tool: the model is told its free text is private and to call the output Command or `noop` |
 
 Each retry is a full model call the person waits for, and the Agent drops new inputs meanwhile, like during any step. To turn a guard off:
 
@@ -166,7 +188,7 @@ wica.remove_response_guard("invalid_args")
 
 `max_retries: 0` keeps the guards but never retries: a rejected response ends the reaction at once, its other Commands included.
 
-**Your own guards are experimental.** `wica.add_response_guard(guard, name=None)` adds one: a function that receives a `wica.guards.ModelResponse` (`text`, `commands`, `bound`, `malformed`, `truncated`, `output_tokens`) and returns `None` to accept or a `wica.guards.Retry(feedback, show_response=True)` to reject; `show_response=False` retries with a reminder instead of showing the model its response. The shape may change without notice while we learn how guards behave, so do not build on it yet. A sync guard runs on the event loop and holds everything while it runs; an async one (an LLM judging the answer) holds the reaction, so inputs are dropped for as long as it takes. [specs/agent.md](../../specs/agent.md), "Response guards".
+**Your own guards are experimental.** `wica.add_response_guard(guard, name=None)` adds one: a function that receives a `wica.guards.ModelResponse` (`text`, `commands`, `bound`, `malformed`, `truncated`, `output_tokens`, `output_command_name`: the output Command's name when it is a tool, else `None`) and returns `None` to accept or a `wica.guards.Retry(feedback, show_response=True)` to reject; `show_response=False` retries with a reminder instead of showing the model its response. The shape may change without notice while we learn how guards behave, so do not build on it yet. A sync guard runs on the event loop and holds everything while it runs; an async one (an LLM judging the answer) holds the reaction, so inputs are dropped for as long as it takes. [specs/agent.md](../../specs/agent.md), "Response guards".
 
 ## Events
 
@@ -210,17 +232,17 @@ A Command that raises does not fail the step: its entry turns `failed` with the 
 
 ## Migrating from the output sink
 
-The output sink and the forced tool call are removed, with no alias. One output path replaces them: the output Command, issued as a tag in the model's text.
+The output sink is removed, with no alias. The output Command replaces it, issued by default as a tag in the model's text; the forced tool call is now an option of `set_output_command` ([The output Command as a tool call](#the-output-command-as-a-tool-call)).
 
 | Before | Now |
 |---|---|
 | `wica.set_output_sink(fn)` | `wica.set_output_command(fn)`; the function's first parameter receives the text ([The output Command](#the-output-command)) |
 | An output Command `say(text: str)` called as a tool | The same function, issued as `<say>…</say>` in the text. It is no longer in `wica.agent.commands` |
-| `agent.force_tool_call` in the config | Removed: the loaders reject it as an unknown key. Nothing is forced; speaking does not use `tool_choice` |
-| The `noop` tool | `<noop/>` as the whole response; read `ReactionTrace.noop`. No `on_agent_command` fires for it |
+| `agent.force_tool_call` in the config | Removed: the loaders reject it as an unknown key. The tag uses no `tool_choice`; to keep a forced tool call, `wica.set_output_command(say, as_tool=True)` |
+| The `noop` tool | `<noop/>` as the whole response, or the `noop` tool with `as_tool=True`; read `ReactionTrace.noop`. No `on_agent_command` fires for it |
 | A step after every utterance (`triggers_on_completion` on the output Command) | The model's `<next>` note, capped by `agent.max_next_steps` |
 | `wica.on_agent_text` | `wica.on_agent_private_text`: the text outside the output tags |
-| The `output_command_required` guard | Removed: text with no tag is delivered whole |
+| The `output_command_required` guard | Active only with `as_tool=True`. With the tag, text with no tag is delivered whole |
 | `ReactionTrace.sink_duration` | Removed. `first_output_at` and `time_to_first_output` are new; `reaction_latency` ends when the first output opens |
 | `TestRun.expect_text`, the scenario expectation `{"text": …}` | `expect_private_text`, `{"private_text": …}`; `expect_output` matches the output's `text` |
 | A scripted model speaking with `{"tool_calls": [{"name": "say", …}]}`, silent with a `noop` call | `{"text": "<say>Hello</say>"}`, `{"text": "<noop/>"}` |

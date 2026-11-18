@@ -22,7 +22,7 @@ from wica.content import Content, TextPart
 from wica.testing import TestRun
 from wica.world import World
 
-from support import real_wica
+from support import output_as_tool, real_wica
 
 SAY_S_PER_WORD = 0.25
 SAY_MAX_S = 15.0
@@ -192,16 +192,37 @@ class Robot:
         ]
 
 
+# The persona's "How you speak" section, worded for the tag (as written) or for the tool call; the
+# mode comes from the config (`support.output_as_tool`). See specs/testing.md ("Output mode").
+_SPEAK_TAG = PERSONA[
+    PERSONA.index("## How you speak") : PERSONA.index("## How you act")
+]
+_SPEAK_TOOL = (
+    "## How you speak\n\n"
+    "Everything people hear from you goes through your `say` command — that is your voice. Any "
+    "other text you write is private thinking that nobody hears. Say each reply in a single "
+    "`say` call. Keep everyday replies to a sentence or two; when someone asks you to tell a "
+    "story or give a longer answer, say all of it in that one call.\n\n"
+)
+
+
+def persona(as_tool: bool = False) -> str:
+    """The robot's persona, its "How you speak" section worded for the output mode."""
+    return PERSONA.replace(_SPEAK_TAG, _SPEAK_TOOL) if as_tool else PERSONA
+
+
 def build_robot(config_path: Path, **agent_overrides: Any) -> Wica:
     """A started robot over a committed provider config, with someone already standing in front
-    of it (`walk_up`). Skips when the config's key is not set."""
+    of it (`walk_up`). Skips when the config's key is not set. Its output mode is the config's
+    (`support.output_as_tool`): the tag, or a tool call for a `-tool` config."""
+    as_tool = output_as_tool(config_path)
     wica = real_wica(
-        config_path, system_prompt=PERSONA, agent_overrides=agent_overrides
+        config_path, system_prompt=persona(as_tool), agent_overrides=agent_overrides
     )
     try:
         register_world(wica.world)
         robot = Robot(wica.world)
-        wica.set_output_command(robot.say)
+        wica.set_output_command(robot.say, as_tool=as_tool)
         for command in robot.commands:
             wica.register_command(command)
         wica.start()

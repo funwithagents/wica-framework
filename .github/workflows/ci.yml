@@ -80,27 +80,31 @@ jobs:
       - name: Sync (dev group, against the lock)
         run: uv sync --locked
       - name: Scripted-fake flows (no network, no key, never skip)
-        run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py tests-e2e/test_tester_flows.py tests-e2e/test_demo_bench_fake.py tests-e2e/test_preflight_fake.py -rs
+        run: uv run pytest tests-e2e/test_fake_flows.py tests-e2e/test_example_flow.py tests-e2e/test_tester_flows.py tests-e2e/test_demo_bench_fake.py tests-e2e/test_preflight_fake.py tests-e2e/test_e2e_configs_fake.py -rs
 
   live:
     name: e2e tier, live (${{ matrix.provider }})
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    # One job per provider: they run side by side, a red check names its provider, and one can
-    # be re-run alone. Each runs the gate's steps twice (focused, then as one conversation)
-    # with timed speech.
+    # One job per e2e config: they run side by side, a red check names its config (and so its
+    # output mode), and one can be re-run alone. Each runs the gate's steps twice (focused, then
+    # as one conversation) with timed speech.
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          # `select` is the `-k` filter on the config-filename stem (tests-e2e/support.py).
+          # `select` is the `-k` filter on the config-filename stem (tests-e2e/support.py). Each
+          # config names its output mode (specs/testing.md "E2e configs"): mistral and
+          # huggingface-hub-tool run the output Command as a tool call, the others as a tag.
           - provider: anthropic
             select: anthropic
           - provider: openai
             select: openai
           - provider: huggingface-hub
-            select: huggingface
+            select: huggingface-hub.config
+          - provider: huggingface-hub-tool
+            select: huggingface-hub-tool.config
           - provider: gemini
             select: gemini
           - provider: mistral
@@ -116,7 +120,7 @@ jobs:
       - name: Live set (this provider's config)
         # One repository secret per committed e2e config, under the config's own `api_key_env`
         # name (an env key cannot be an expression, so every job maps all five; `-k` runs only
-        # this provider). A secret the repository does not hold comes out empty;
+        # this config). A secret the repository does not hold comes out empty;
         # WICA_E2E_FAIL_ON_MISSING turns that skip into a failure, so the job cannot go green
         # untested. A rate limit (429) still skips; `-rs` lists the skips.
         env:
