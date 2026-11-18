@@ -1,13 +1,15 @@
-# Speaking: a tag or a tool call
+# The agent's text: thinking or talking
 
-An agent that talks to a person has two kinds of output: what it **says** and what it **does**. Every tool-calling model already has a channel for doing, the tool call. For saying there are two candidates, and WICA supports both:
+What a language model writes can serve two purposes. Part of it is the model's own reasoning: working out what is going on, planning, deciding. Part of it is what the model means to tell the person in front of it. In a chat application the two are often one and the same text; in an agent that talks to someone, through a voice, a chat bubble or a robot's mouth, they must not be: reasoning read aloud is noise, and what is meant to be said must reach the function that says it, at the right moment, with its parameters (an emotion, a voice).
 
-- **A tag in the model's text** (the default): `<say emotion="happy">Hello there!</say>`. Speech is the model's reply, as it was trained to write one.
-- **A tool call** (`as_tool=True`): `say(text="Hello there!", emotion="happy")`. Speech is one more action, and every response must be a call.
+In WICA that function is the **output Command**, a function of yours such as `say` ([commands.md](commands.md#make-your-agent-speak)). WICA supports two ways for the model to use it:
 
-It looks like a detail of syntax. It is not: across the models we measured, the choice moves the results of the same agent, on the same tests, by up to 31 tests out of 48, in **opposite directions for different models**. No one mode is better everywhere, so WICA keeps both, makes the tag the default, and lets the application choose per model, and measure it.
+- **A tag in the model's text** (the default): `<say emotion="happy">Hello there!</say>`. What is inside the tag is said; everything outside it is private. The model replies as it was trained to write a reply.
+- **A tool call** (`as_tool=True`): `say(text="Hello there!", emotion="happy")`. Saying is one more action beside the others, and all the model's text is private.
 
-This page explains the two modes, what was measured, and how to choose. The contract of each is in [../reference/api.md](../reference/api.md#the-output-command); wiring the output Command is in [commands.md](commands.md#make-your-agent-speak).
+The two behave differently, and not in the same direction for every model: on the same agent and the same tests, one model passed ten more tests with the tool call, another thirty-one more with the tag. No one way is better everywhere, so WICA keeps both, makes the tag the default, and lets the application choose per model, and measure it.
+
+This page explains the two, what was measured, and how to choose. The contract of each is in [../reference/api.md](../reference/api.md#the-output-command).
 
 ## What is the same in both
 
@@ -93,18 +95,6 @@ The summary then shows the two rows of each model side by side: pass rate, pass^
 ## How WICA tests both
 
 The live regression gate runs each committed model in one mode, the one an application should use it in, and one model in both. Each e2e config states its mode beside its Agent block (`"output": "tag"` or `"tool"`): Anthropic, OpenAI and Gemini run the tag, Mistral the tool call, and the Hugging Face Hub's gpt-oss-120b both, so a regression in either mode shows on the same model ([specs/testing.md](../../specs/testing.md), "E2e configs").
-
-## How others answer it
-
-Frameworks have answered the same question both ways, and some have changed their answer:
-
-- **Speech as a tool, then not.** MemGPT gave the model a function to send a message and a flag on any function call to ask for another inference step ("heartbeats", [the MemGPT paper](https://arxiv.org/abs/2310.08560), section 2.4). Letta, its successor, deprecated both in its v1 agent: the reply is the model's own message again, not a tool call, to stay close to the multi-step tool calling today's models are trained on ([Letta v1](https://www.letta.com/blog/letta-v1-agent)). WICA's tool mode is close to that earlier design; its `<next>` note is a heartbeat the model asks for in its text, capped.
-- **Speech as the model's text.** Voice pipelines send the model's text to the voice: Pipecat places its text processors after the LLM and before the TTS ([Pipecat](https://docs.pipecat.ai/server/utilities/text/pattern-pair-aggregator)), LiveKit Agents' TTS node converts the LLM output into speech ([LiveKit](https://docs.livekit.io/agents/build/nodes/)), and Hugging Face's speech-to-speech pipeline sends the LLM's streamed text to its TTS ([speech-to-speech](https://github.com/huggingface/speech-to-speech)).
-- **Tags in the text for how to say it.** Pipecat parses tag pairs such as `<voice>…</voice>` out of the streaming text to switch voices, and LiveKit injects the TTS provider's markup guide into the prompt so the model writes delivery tags. WICA's tag attributes (`emotion="happy"`) are the same idea, with the allowed values read from your function's signature.
-- **Channels in one stream.** OpenAI's harmony format for gpt-oss separates the model's chain of thought (`analysis`), function calls (`commentary`) and the message meant for the user (`final`) ([harmony](https://developers.openai.com/cookbook/articles/openai-harmony)): the same split WICA makes between private text, Commands and speech.
-- **Tool calls written as text.** Hugging Face's speech-to-speech parses tool calls out of a local model's text (`<code>name(...)</code>`, `<tool_call>{…}</tool_call>`), partly to keep them from being spoken aloud. The failure is real in WICA too: with the tag, Qwen2.5 7B sometimes writes `dance()` in its speech.
-
-None of the projects above publishes the two measured side by side on the same agent. WICA keeps both and makes the comparison one more benchmark row.
 
 ## Going further
 

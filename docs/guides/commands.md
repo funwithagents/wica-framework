@@ -150,7 +150,7 @@ The same output Command can be bound to the model as a tool instead: the model t
 wica.set_output_command(say, as_tool=True)
 ```
 
-Which one is better depends on the model, measurably, in both directions: [tag-or-tool-call.md](tag-or-tool-call.md) gives what differs, what was measured on seven models, how to choose and how to compare them on yours.
+Which one is better depends on the model, measurably, in both directions: [text-output.md](text-output.md) gives what differs, what was measured on seven models, how to choose and how to compare them on yours.
 
 ## Cancellation reaches the task, not always the work
 
