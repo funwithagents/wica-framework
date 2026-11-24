@@ -68,12 +68,58 @@ def test_config_schema_is_stable_and_offers_one_branch_per_known_provider() -> N
     assert (key["default"], key["x-secret-env"]) == ("HF_TOKEN", True)
     assert by_name["huggingface-hub"]["properties"]["hf_provider"]["default"] == "auto"
     compatible = by_name["openai-chat-completions-compatible"]
-    assert compatible["required"] == ["provider", "base_url"]
+    assert compatible["required"] == ["provider", "model", "base_url"]
     assert "default" not in compatible["properties"]["api_key_env"]
     assert "api_key_env" not in by_name["fake"]["properties"]
     assert agent["properties"]["model_timeout"]["default"] == 10.0
     assert agent["properties"]["model_kwargs"]["additionalProperties"] is True
     assert "api_key" not in json.dumps(description).replace("api_key_env", "")
+
+
+def test_model_belongs_to_each_provider_s_branch() -> None:
+    """A model id means nothing to another provider: `model` is declared in every branch
+    (required, no default), not among the fields common to every branch."""
+    agent = setup.config_schema()["schema"]["properties"]["agent"]
+
+    assert "model" not in agent["properties"] and "model" not in agent["required"]
+    for branch in agent["oneOf"]:
+        assert "model" in branch["required"]
+        assert "default" not in branch["properties"]["model"]
+
+
+def test_switching_provider_in_the_form_drops_the_model() -> None:
+    from module_setup.contract import parse_description
+    from module_setup.form import FormChoice, FormGroup, layout, select_branch
+
+    schema = parse_description(setup.config_schema()).schema
+    document = {
+        "agent": {
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5",
+            "api_key_env": "MY_KEY",
+            "system_prompt": "You are terse.",
+            "max_retries": 2,
+        }
+    }
+    agent = next(
+        item
+        for item in layout(schema, document).items
+        if isinstance(item, FormGroup) and item.path == ("agent",)
+    )
+    choice = next(item for item in agent.items if isinstance(item, FormChoice))
+
+    switched = select_branch(document, ("agent",), choice.choice, "openai")
+
+    # The common fields stay; the old provider's model and key variable go.
+    assert switched["agent"] == {
+        "provider": "openai",
+        "system_prompt": "You are terse.",
+        "max_retries": 2,
+    }
+    assert [p["path"] for p in setup.check_config(switched)] == ["/agent/model"]
+    assert setup.check_config(switched)[0]["message"] == (
+        "agent: missing required key 'model'"
+    )
 
 
 # --- required_extras ------------------------------------------------------------------------

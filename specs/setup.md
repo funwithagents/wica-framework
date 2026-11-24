@@ -54,20 +54,20 @@ The `agent` block's fields are declared as data, and the loader, `check_config` 
 
 `src/wica/config.py` declares:
 
-- **The common fields**, valid with every provider and drawn on the `agent` object: `model` (required), `system_prompt` (may be empty), `system_prompt_file`, `history_reactions`, `history_budget`, `context_window`, `model_timeout`, `max_next_steps`, `max_retries`, `stream_output`; every tuning field `advanced`. `model_kwargs` is a free-form object, which `Field` has no kind for: it is checked by hand (an object) and drawn as raw JSON (`additionalProperties: true`, advanced).
-- **The providers**, one `Provider` each: its `name`, `title`, `kind` (`hosted`, `local` or `fixture`), `extra`, the packages its extra provides, and its own fields — `api_key_env` (from `key_env_field`, defaulting to the provider's usual variable), `base_url` (the compatible server, required), `hf_provider` (the Hub, default `"auto"`).
+- **The common fields**, valid with every provider and drawn on the `agent` object: `system_prompt` (may be empty), `system_prompt_file`, `history_reactions`, `history_budget`, `context_window`, `model_timeout`, `max_next_steps`, `max_retries`, `stream_output`; every tuning field `advanced`. `model_kwargs` is a free-form object, which `Field` has no kind for: it is checked by hand (an object) and drawn as raw JSON (`additionalProperties: true`, advanced).
+- **The providers**, one `Provider` each: its `name`, `title`, `kind` (`hosted`, `local` or `fixture`), `extra`, the packages its extra provides, and its own fields — `model` (required, no default, in every provider's fields: a model id means nothing to another provider), `api_key_env` (from `key_env_field`, defaulting to the provider's usual variable), `base_url` (the compatible server, required), `hf_provider` (the Hub, default `"auto"`).
 
 | `provider` | Title | Kind | Extra | `api_key_env` default | Own fields |
 |---|---|---|---|---|---|
-| `anthropic` | Anthropic | hosted | `anthropic` | `ANTHROPIC_API_KEY` | `api_key_env` |
-| `openai` | OpenAI | hosted | `openai` | `OPENAI_API_KEY` | `api_key_env` |
-| `gemini` | Gemini | hosted | `gemini` | `GEMINI_API_KEY` | `api_key_env` |
-| `mistral` | Mistral | hosted | `mistral` | `MISTRAL_API_KEY` | `api_key_env` |
-| `huggingface-hub` | Hugging Face Hub | hosted | `huggingface-hub` | `HF_TOKEN` | `api_key_env`, `hf_provider` |
-| `openai-chat-completions-compatible` | OpenAI-compatible server | local | `openai-compatible` | none | `base_url`, `api_key_env` |
-| `fake` | Scripted fake | fixture | none | none (no key) | none |
+| `anthropic` | Anthropic | hosted | `anthropic` | `ANTHROPIC_API_KEY` | `model`, `api_key_env` |
+| `openai` | OpenAI | hosted | `openai` | `OPENAI_API_KEY` | `model`, `api_key_env` |
+| `gemini` | Gemini | hosted | `gemini` | `GEMINI_API_KEY` | `model`, `api_key_env` |
+| `mistral` | Mistral | hosted | `mistral` | `MISTRAL_API_KEY` | `model`, `api_key_env` |
+| `huggingface-hub` | Hugging Face Hub | hosted | `huggingface-hub` | `HF_TOKEN` | `model`, `api_key_env`, `hf_provider` |
+| `openai-chat-completions-compatible` | OpenAI-compatible server | local | `openai-compatible` | none | `model`, `base_url`, `api_key_env` |
+| `fake` | Scripted fake | fixture | none | none (no key) | `model` |
 
-**A provider WICA does not know** (any other LangChain id, whose package a library user installs) is still accepted, as today: it has no extra, no default key variable, and takes `api_key_env` without a default. It is not in the schema, so a form cannot offer it.
+**A provider WICA does not know** (any other LangChain id, whose package a library user installs) is still accepted, as today: it has no extra, no default key variable, takes `api_key_env` without a default, and requires `model` like the others. It is not in the schema, so a form cannot offer it.
 
 **Validation** of a block, used by the loader (first problem raised), by `AgentConfig.__post_init__` (direct construction, first problem raised) and by `check_config` (every problem):
 
@@ -75,7 +75,7 @@ The `agent` block's fields are declared as data, and the loader, `check_config` 
 2. `api_key` present: refused, whatever its value ([config.md](config.md), "API key");
 3. each unknown key;
 4. `provider` missing or not a non-empty string;
-5. `model` missing; then every field of the provider's fields (the common ones, its own, and `api_key_env`, `base_url` and `hf_provider` for a provider that does not declare them: still accepted and type-checked, as today, but not drawn);
+5. `model` missing; then every field of the provider's fields (its own, `model` first; `model`, `api_key_env`, `base_url` and `hf_provider` for a provider that does not declare them: still accepted and type-checked, as today, but not drawn; then the common ones);
 6. `model_kwargs` not an object;
 7. once the fields are valid, the rules across fields: exactly one of `system_prompt`/`system_prompt_file`; `base_url` present exactly with `openai-chat-completions-compatible`, and not in `model_kwargs` then.
 
@@ -86,7 +86,7 @@ Messages keep the `agent: ` prefix: `"agent: 'history_reactions' must be an inte
 `config_schema()["schema"]`:
 
 - **The root** — an object with one required property, `agent`.
-- **`agent`** — titled **"Provider"**, with a description saying what it chooses; the common fields as its `properties` (`required: ["model"]`), and one `oneOf` branch per known provider, in the table's order. Each branch has the title `"<Title> (<kind>)"` ("Anthropic (hosted)", "Scripted fake (fixture)"), `provider` as a `const`, and its own fields; its `required` is `provider` plus its own required fields (`base_url`). Switching provider in a form drops the old branch's fields, so `api_key_env` goes back to the new provider's default.
+- **`agent`** — titled **"Provider"**, with a description saying what it chooses; the common fields as its `properties` (none required), and one `oneOf` branch per known provider, in the table's order. Each branch has the title `"<Title> (<kind>)"` ("Anthropic (hosted)", "Scripted fake (fixture)"), `provider` as a `const`, and its own fields; its `required` is `provider` plus its own required fields (`model`, and `base_url` for the compatible server). Switching provider in a form drops the old branch's fields: `model` is emptied, to be filled again for the new provider (no provider suggests a default model), and `api_key_env` goes back to the new provider's default.
 - **`api_key_env`** carries `x-secret-env` and, where the provider has one, the default variable, so the Secrets tab lists it for a fresh config.
 - A renamed provider has no branch: the schema offers current names only, `check_config` still accepts the old one.
 
@@ -127,7 +127,7 @@ The **light call** rule: one authenticated, free request per provider, checking 
 `tests/test_setup.py`:
 
 - The conformance check (`module_setup.contract.check_contract`) passes over every example config under `examples/configs/`.
-- `config_schema()` is stable, has one branch per known provider in order, `api_key_env` with its default and `x-secret-env`, no `api_key` anywhere.
+- `config_schema()` is stable, has one branch per known provider in order, `api_key_env` with its default and `x-secret-env`, no `api_key` anywhere; `model` is in every branch, required with no default, and not among the common fields: switching provider through module-setup's form (`select_branch`) drops it, and `check_config` then asks for it.
 - Every example config is accepted, and names only keys the schema names.
 - `check_config` reports each problem at its path (non-object, `api_key`, unknown key, missing provider or model, a bad field, both or neither prompt, `base_url` with the wrong provider), several at once; and for each, the loader raises the first of them, word for word.
 - `config_schema`, `check_config` and `required_extras` import no provider package: run in a subprocess with every provider import blocked, where `check_setup` reports each provider's extra `missing` with the install hint.

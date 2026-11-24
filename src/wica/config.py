@@ -224,14 +224,18 @@ PROVIDER_FIELD = Field(
     required=True,
 )
 
+# `model` is declared in each provider's own fields, not among the common ones: a model id means
+# nothing to another provider, so a form switching provider drops it (specs/setup.md, "The
+# schema"). Required, with no default, for every provider.
+MODEL_FIELD = Field(
+    "model",
+    "string",
+    "The model, as the provider names it (for the Hugging Face Hub, its repo id; for a "
+    "compatible server, what it expects in a request's 'model').",
+    required=True,
+)
+
 COMMON_FIELDS: tuple[Field, ...] = (
-    Field(
-        "model",
-        "string",
-        "The model, as the provider names it (for the Hugging Face Hub, its repo id; for a "
-        "compatible server, what it expects in a request's 'model').",
-        required=True,
-    ),
     Field(
         "system_prompt",
         "string",
@@ -381,7 +385,12 @@ class Provider:
 
 def _hosted(name: str, title: str, extra: str, package: str, variable: str) -> Provider:
     return Provider(
-        name, title, "hosted", extra, (package,), (key_env_field(title, variable),)
+        name,
+        title,
+        "hosted",
+        extra,
+        (package,),
+        (MODEL_FIELD, key_env_field(title, variable)),
     )
 
 
@@ -410,7 +419,7 @@ PROVIDERS: dict[str, Provider] = {
             "hosted",
             "huggingface-hub",
             ("langchain_huggingface",),
-            (key_env_field("Hugging Face", "HF_TOKEN"), _HF_PROVIDER),
+            (MODEL_FIELD, key_env_field("Hugging Face", "HF_TOKEN"), _HF_PROVIDER),
         ),
         Provider(
             OPENAI_CHAT_COMPLETIONS_COMPATIBLE,
@@ -419,6 +428,7 @@ PROVIDERS: dict[str, Provider] = {
             "openai-compatible",
             ("langchain_openai",),
             (
+                MODEL_FIELD,
                 Field(
                     "base_url",
                     "string",
@@ -429,13 +439,14 @@ PROVIDERS: dict[str, Provider] = {
                 key_env_field("server's", None),
             ),
         ),
-        Provider(FAKE_PROVIDER, "Scripted fake", "fixture", None, (), ()),
+        Provider(FAKE_PROVIDER, "Scripted fake", "fixture", None, (), (MODEL_FIELD,)),
     )
 }
 
 # The fields a provider that does not declare them still accepts (and type-checks), as before
 # they were declared per provider: they are just not drawn in its branch of the form.
 _LOOSE_FIELDS: tuple[Field, ...] = (
+    MODEL_FIELD,
     key_env_field("provider's", None),
     _HF_PROVIDER,
     Field("base_url", "string", _BASE_URL_DESCRIPTION),
@@ -485,13 +496,14 @@ def import_provider(name: str) -> None:
 
 
 def agent_fields(provider: str) -> tuple[Field, ...]:
-    """The fields an `agent` block selecting *provider* is validated against: the common ones,
-    the provider's own, and the loose ones it does not declare."""
+    """The fields an `agent` block selecting *provider* is validated against: the provider's own
+    (`model` first), the loose ones it does not declare (`model` among them, for a provider WICA
+    does not know), then the common ones."""
     selected = provider_for(provider)
     own = selected.fields if selected is not None else ()
     declared = {f.name for f in own}
     return (
-        COMMON_FIELDS + own + tuple(f for f in _LOOSE_FIELDS if f.name not in declared)
+        own + tuple(f for f in _LOOSE_FIELDS if f.name not in declared) + COMMON_FIELDS
     )
 
 
