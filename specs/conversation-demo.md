@@ -248,10 +248,11 @@ uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--
   blockers), else on Setup.
 - **A session with a lock.** A session is one `Wica` built from the saved config and running
   (`examples/conversation_demo/session.py`, `Conversation`). **Start** checks the saved config
-  (`AppModel.blockers`: its problems, then what the machine is missing — the extra, the key, the
-  prompt file) and lists them on the page instead of starting; otherwise it builds the session
-  from `model.used_config(saved)["wica"]` with the folder as `base_dir`. A build that still fails
-  is said on the page and leaves nothing running. **Stop** stops and closes the Wica. The config is
+  (`AppModel.blockers`: its problems, then every required item the machine is missing — the
+  extra, the key, the prompt file; WICA has no other kind) and lists them on the page instead of
+  starting; otherwise it builds the session from `model.used_config(saved)["wica"]` with the
+  folder as `base_dir`. A build that still fails is said on the page and leaves nothing running.
+  **Stop** stops and closes the Wica. The config is
   locked from Start until the close has finished (`AppModel(..., locked=conversation.locked)`), so
   the Setup panel disables Save and Reset while a session runs. One session at a time: Start while
   one runs does nothing. Leaving the page's process stops it.
