@@ -18,7 +18,7 @@ Everything an application needs to set the agent up for a user, without knowing 
 
 Today this knowledge is spread over the loader, `build_chat_model` and the error raised when something is missing. A config can only be tried by building the Agent, which imports the provider's package and reads its key. This spec makes the same knowledge available as data, before anything is installed.
 
-These functions implement the **module contract** of the `module-setup` project (its `specs/module-contract.md`), version 1. That spec is the reference for the shapes exchanged; this one says what WICA puts in them. WICA does not depend on `module-setup` at runtime: the contract is plain data, and `module-setup` is a dev dependency only, for the conformance check its tests run.
+These functions implement the **module contract** of the `app-setup` project (its `specs/module-contract.md`), version 1. That spec is the reference for the shapes exchanged; this one says what WICA puts in them. WICA does not depend on `app-setup` at runtime: the contract is plain data, and `app-setup` is a dev dependency only, for the conformance check its tests run.
 
 ## The `setup` module
 
@@ -31,8 +31,9 @@ def check_config(config: dict) -> list[dict]: ...
 def check_setup(config: dict, *, base_dir: str | None = None) -> list[dict]: ...
 def prepare(
     config: dict,
-    on_progress: Callable[[dict], None] | None = None,
+    item: str,
     *,
+    on_progress: Callable[[dict], None] | None = None,
     base_dir: str | None = None,
 ) -> None: ...
 def options(name: str, config: dict, *, base_dir: str | None = None) -> list[dict]: ...
@@ -51,8 +52,8 @@ def probe(
 | `config_schema()` | `{"contract": 1, "distribution": "wica", "title": "Agent", "schema": …}` — the WICA block as a JSON Schema (below). The same value on every call |
 | `required_extras(config)` | The extra the selected provider needs, as a requirement string: `["wica[anthropic]"]`; `[]` for `fake`, for a provider WICA does not know, and for anything that selects no provider. Reads `agent.provider` only, never raises |
 | `check_config(config)` | Every problem that makes the loader refuse the config, each `{"path": "/agent/model", "message": …}` with a JSON Pointer into the block; `[]` when it is accepted |
-| `check_setup(config)` | What this machine is missing to run it: the provider's extra, the key variable, the prompt file; each `{"id", "title", "status", "detail", "preparable"}` |
-| `prepare(config, on_progress)` | Nothing: WICA downloads nothing (no item is preparable). Returns at once |
+| `check_setup(config)` | What this machine is missing to run it: the provider's extra, the key variable, the prompt file; each `{"id", "title", "status", "detail", "preparable", "required"}`: every item required, none preparable |
+| `prepare(config, item, *, on_progress=None)` | Prepares one item, and WICA has none to prepare (it downloads nothing): every id raises `ValueError` naming it, `on_progress` is never called |
 | `options(name, config)` | `[]` for every name: no list is offered (a model list per provider would cost requests) |
 | `probe(config, *, secrets=None)` | One authenticated, free call to the provider, `{"ok", "message", "duration_s"}`. Never raises |
 
@@ -102,7 +103,7 @@ Messages keep the `agent: ` prefix: `"agent: 'history_reactions' must be an inte
 
 ## `check_setup`
 
-Asked only about a config `check_config` accepts. Its items, in order:
+Asked only about a config `check_config` accepts. Every item is **required** (a session cannot start without it) and **not preparable** (only the user can provide it: install the extra, set the key, write the file); WICA has nothing a session would fetch by itself, the providers being hosted or a server of the user's own. Its items, in order:
 
 1. **The extra** — `extra:wica[<extra>]`, titled `"<Title> extra"`, never preparable: `ready` ("Installed.") when the provider's packages import (the imports are tried, not looked up: a broken install shows), else `missing` with the install hint `build_chat_model` raises (one home: `import_provider`). `fake` and an unknown provider have none.
 2. **The key** — `key:<VARIABLE>`, for the variable `api_key_env` names or, absent, the provider's default; `ready` when set and non-empty in the environment, else `missing` with a sentence naming the variable. None for `fake`, nor for a provider without a default when no variable is named.
@@ -136,13 +137,13 @@ The **light call** rule: one authenticated, free request per provider, checking 
 
 `tests/test_setup.py`:
 
-- The conformance check (`module_setup.contract.check_contract`) passes over every example config under `examples/configs/`.
-- `config_schema()` is stable, has one branch per known provider in order, `api_key_env` with its default and `x-secret-env`, no `api_key` anywhere; `model` is in every branch, required with no default, and not among the common fields: switching provider through module-setup's form (`select_branch`) drops it, and `check_config` then asks for it.
+- The conformance check (`app_setup.contract.check_contract`) passes over every example config under `examples/configs/`.
+- `config_schema()` is stable, has one branch per known provider in order, `api_key_env` with its default and `x-secret-env`, no `api_key` anywhere; `model` is in every branch, required with no default, and not among the common fields: switching provider through app-setup's form (`select_branch`) drops it, and `check_config` then asks for it.
 - Every example config is accepted, and names only keys the schema names.
 - `check_config` reports each problem at its path (non-object, `api_key`, unknown key, missing provider or model, a bad field, both or neither prompt, `base_url` with the wrong provider), several at once; and for each, the loader raises the first of them, word for word.
 - `config_schema`, `check_config` and `required_extras` import no provider package: run in a subprocess with every provider import blocked, where `check_setup` reports each provider's extra `missing` with the install hint.
 - `required_extras`: the extra per provider, `[]` for `fake`, an unknown provider, `{}`, a non-object; every extra named is declared in `pyproject.toml`.
-- `check_setup`: the installed extras `ready`; the key `missing` until set (empty counts as unset), under the default or the named variable; no key item for `fake` or a compatible server naming none; the prompt file `ready`/`missing`; a relative prompt file found against `base_dir` and not the working directory (the loader locating it the same way), the example configs' persona found against their own folder; `prepare`, `options` and `probe` take `base_dir`.
+- `check_setup`: every item carries the contract's six keys, `required` and not preparable, whatever the provider (a known one, a compatible server, an unknown one); `prepare` raises `ValueError` naming the id for every id, an item of the config or not, and reports no progress; the installed extras `ready`; the key `missing` until set (empty counts as unset), under the default or the named variable; no key item for `fake` or a compatible server naming none; the prompt file `ready`/`missing`; a relative prompt file found against `base_dir` and not the working directory (the loader locating it the same way), the example configs' persona found against their own folder; `prepare`, `options` and `probe` take `base_dir`.
 - `probe`: `fake` is ok; a missing key, a refused config and a missing extra are `ok: false` with their messages and raise nothing; the hosted probes over a stubbed SDK client: ok when the model is found, `ok: false` naming the model or the refused key otherwise, and nothing but the listing call is made.
 
 ## Open questions

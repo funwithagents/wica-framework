@@ -58,9 +58,9 @@ dev = [
     "opentelemetry-sdk>=1.20",
     # Runs the fast tier in parallel (`addopts` below).
     "pytest-xdist>=3.8.0",
-    # The setup contract's conformance check (`module_setup.contract.check_contract`) in
+    # The setup contract's conformance check (`app_setup.contract.check_contract`) in
     # tests/test_setup.py; never a runtime dependency (specs/setup.md).
-    "module-setup",
+    "app-setup",
 ]
 # The runnable example only (examples/conversation_demo/app.py); kept out of core deps.
 # Run with: uv run --group demo python -m examples.conversation_demo.app
@@ -76,7 +76,7 @@ demo = [
 ]
 
 [tool.uv.sources]
-module-setup = { git = "https://github.com/funwithagents/module-setup", rev = "main" }
+app-setup = { git = "https://github.com/funwithagents/app-setup", rev = "main" }
 
 [tool.ruff]
 target-version = "py312"

@@ -148,7 +148,7 @@ Which servers were tried, which model sizes work and how cancellation behaves: [
 
 ## Setting up from an application
 
-`wica.setup` describes this configuration as data for an application that sets the agent up for its users, following the module contract of the `module-setup` project: `config_schema()` (a JSON Schema of the WICA block, a form drawn from it), `required_extras(config)` (`["wica[anthropic]"]`), `check_config(config)` (every problem, each with its JSON Pointer, in the loader's words), `check_setup(config)` (on this machine: the provider's extra, its key variable, the prompt file), and `probe(config)` (one free, authenticated call to the provider: the key is accepted and the model exists; no chat request). Nothing in it is needed to run WICA. See [specs/setup.md](../../specs/setup.md).
+`wica.setup` describes this configuration as data for an application that sets the agent up for its users, following the module contract of the `app-setup` project: `config_schema()` (a JSON Schema of the WICA block, a form drawn from it), `required_extras(config)` (`["wica[anthropic]"]`), `check_config(config)` (every problem, each with its JSON Pointer, in the loader's words), `check_setup(config)` (on this machine: the provider's extra, its key variable, the prompt file), and `probe(config)` (one free, authenticated call to the provider: the key is accepted and the model exists; no chat request). Nothing in it is needed to run WICA. See [specs/setup.md](../../specs/setup.md).
 
 ## What is not configuration
 

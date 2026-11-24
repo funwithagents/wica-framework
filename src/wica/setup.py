@@ -3,10 +3,10 @@
 Seven functions over the WICA block (the document `WicaConfig.from_dict` takes,
 `{"agent": {...}}`): what its config looks like (`config_schema`), which extra a config needs
 (`required_extras`), what is wrong in the config itself (`check_config`), what this machine is
-missing to run it (`check_setup`: the provider's extra, its key, the prompt file), nothing to
-prepare (`prepare`), no option lists (`options`), and one authenticated, free call to the
+missing to run it (`check_setup`: the provider's extra, its key, the prompt file; every item
+required, none preparable), nothing to prepare (`prepare` refuses every item), no option lists (`options`), and one authenticated, free call to the
 provider to find out whether the key and the model are good (`probe`). They implement the
-module contract of the `module-setup` project and exchange JSON-compatible data only.
+module contract of the `app-setup` project and exchange JSON-compatible data only.
 
 All but `probe` run on the base install, with no network. Nothing here is imported by the
 framework itself.
@@ -147,6 +147,7 @@ def check_setup(
                 "status": status,
                 "detail": detail,
                 "preparable": False,
+                "required": True,
             }
         )
     variable = _key_variable(provider, agent)
@@ -161,6 +162,7 @@ def check_setup(
                 if present
                 else f"Set the environment variable {variable} (named by 'api_key_env').",
                 "preparable": False,
+                "required": True,
             }
         )
     prompt_file = agent.get("system_prompt_file")
@@ -179,6 +181,7 @@ def check_setup(
                 "status": "ready" if exists else "missing",
                 "detail": f"Found at {path}." if exists else f"No file at {path}.",
                 "preparable": False,
+                "required": True,
             }
         )
     return found
@@ -186,11 +189,17 @@ def check_setup(
 
 def prepare(
     config: dict[str, Any],
-    on_progress: Callable[[dict[str, Any]], None] | None = None,
+    item: str,
     *,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
     base_dir: str | None = None,
 ) -> None:
-    """Nothing to prepare: WICA downloads nothing."""
+    """Prepare one item: WICA has none to prepare (it downloads nothing; every item of
+    `check_setup` is an extra, a key or a file only the user can provide), so every id is
+    refused with `ValueError`."""
+    raise ValueError(
+        f"{item!r} is not a preparable item of this config: WICA prepares nothing"
+    )
 
 
 def options(

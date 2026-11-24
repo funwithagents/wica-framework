@@ -6,6 +6,7 @@ See specs/setup.md.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from module_setup.contract import check_contract
+from app_setup.contract import check_contract
 
 from wica import setup
 from wica.config import PROVIDERS, ConfigError, WicaConfig
@@ -88,8 +89,8 @@ def test_model_belongs_to_each_provider_s_branch() -> None:
 
 
 def test_switching_provider_in_the_form_drops_the_model() -> None:
-    from module_setup.contract import parse_description
-    from module_setup.form import FormChoice, FormGroup, layout, select_branch
+    from app_setup.contract import parse_description
+    from app_setup.form import FormChoice, FormGroup, layout, select_branch
 
     schema = parse_description(setup.config_schema()).schema
     document = {
@@ -321,10 +322,10 @@ def test_check_setup_reports_the_extra_the_key_and_the_prompt_file(
 
     items = setup.check_setup(config)
 
-    assert [(i["id"], i["status"], i["preparable"]) for i in items] == [
-        ("extra:wica[anthropic]", "ready", False),
-        ("key:ANTHROPIC_API_KEY", "missing", False),
-        ("file:system_prompt_file", "missing", False),
+    assert [(i["id"], i["status"], i["preparable"], i["required"]) for i in items] == [
+        ("extra:wica[anthropic]", "ready", False, True),
+        ("key:ANTHROPIC_API_KEY", "missing", False, True),
+        ("file:system_prompt_file", "missing", False, True),
     ]
     assert "ANTHROPIC_API_KEY" in items[1]["detail"]
     assert str(prompt) in items[2]["detail"]
@@ -372,7 +373,8 @@ def test_the_example_configs_find_their_persona_against_their_own_folder() -> No
 def test_the_machine_functions_take_base_dir() -> None:
     config = _examples()["fake.json"]
     folder = str(_ROOT / "examples" / "configs")
-    setup.prepare(config, None, base_dir=folder)
+    with pytest.raises(ValueError, match="file:system_prompt_file"):
+        setup.prepare(config, "file:system_prompt_file", base_dir=folder)
     assert setup.options("models", config, base_dir=folder) == []
     assert setup.probe(config, base_dir=folder)["ok"] is True
 
@@ -416,8 +418,53 @@ def test_check_setup_has_no_key_item_where_no_key_is_read(
     assert [item["id"] for item in setup.check_setup(config)] == ids
 
 
-def test_prepare_and_options_have_nothing_to_offer() -> None:
-    setup.prepare(_block(), on_progress=lambda progress: pytest.fail(str(progress)))
+_ITEM_KEYS = {"id", "title", "status", "detail", "preparable", "required"}
+
+
+@pytest.mark.parametrize(
+    "provider", ["anthropic", "openai-chat-completions-compatible", "ollama"]
+)
+def test_every_item_is_required_and_none_is_preparable(
+    provider: str, tmp_path: Path
+) -> None:
+    config = _block(
+        provider=provider,
+        api_key_env="SOME_KEY",
+        system_prompt=...,
+        system_prompt_file=str(tmp_path / "persona.md"),
+        **(
+            {"base_url": "http://x/v1"}
+            if provider == "openai-chat-completions-compatible"
+            else {}
+        ),
+    )
+
+    items = setup.check_setup(config)
+
+    assert items
+    for item in items:
+        assert set(item) == _ITEM_KEYS
+        assert (item["required"], item["preparable"]) == (True, False), item["id"]
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "extra:wica[anthropic]",
+        "key:ANTHROPIC_API_KEY",
+        "file:system_prompt_file",
+        "weights:nothing",
+    ],
+)
+def test_prepare_refuses_every_item_naming_it(item: str) -> None:
+    config = _block(system_prompt=..., system_prompt_file="persona.md")
+    with pytest.raises(ValueError, match=re.escape(repr(item))):
+        setup.prepare(
+            config, item, on_progress=lambda progress: pytest.fail(str(progress))
+        )
+
+
+def test_options_have_nothing_to_offer() -> None:
     assert setup.options("models", _block()) == []
 
 

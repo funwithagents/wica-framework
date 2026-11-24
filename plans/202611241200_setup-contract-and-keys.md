@@ -13,10 +13,10 @@ Builds [specs/setup.md](../specs/setup.md) and the key handling of [specs/config
 3. **Keys.** `api_key` removed from `AgentConfig` and refused at load; `api_key_env` defaults to the provider's variable; `resolve_api_key(config, secrets)`; `MissingSecretError` with `MissingEnvError` as a deprecated alias (module `__getattr__`, `.env_var`); `secrets` through `Wica.init` → `Agent` → `build_chat_model`; the key always passed explicitly; `import_provider` gives the install hint.
 4. **`src/wica/setup.py`**: the seven functions; `probe` as one free listing/retrieval call per provider.
 5. **Example configs** moved to `examples/configs/<provider>.json` (no key, the default variable), plus `fake.json` and `openai-chat-completions-compatible.json`; the demo reads `examples/configs/anthropic.json` until its rebuild.
-6. **`module-setup`** as a dev dependency (git, `main`) for the conformance check.
+6. **`app-setup`** as a dev dependency (git, `main`) for the conformance check.
 7. **Callers and docs**: the benchmark matrix (the default variable gates an entry), the e2e support (`MissingSecretError`), the configuration and API references, the guides, the README.
 
-8. **After review**: `model` declared in each provider's branch (a switch empties it); `check_setup`, `prepare`, `options` and `probe` take `base_dir` (module-setup's contract, its PR #7), a relative `system_prompt_file` located against it as `WicaConfig.from_dict` does; module-setup from its `base-dir` branch until that PR was merged, then from `main`.
+8. **After review**: `model` declared in each provider's branch (a switch empties it); `check_setup`, `prepare`, `options` and `probe` take `base_dir` (app-setup's contract, its PR #7), a relative `system_prompt_file` located against it as `WicaConfig.from_dict` does; app-setup from its `base-dir` branch until that PR was merged, then from `main`.
 
 ## Tests
 

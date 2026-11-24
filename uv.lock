@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -61,6 +61,14 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl", hash = "sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494", size = 125813, upload-time = "2026-07-12T20:29:05.763Z" },
+]
+
+[[package]]
+name = "app-setup"
+version = "0.1.0"
+source = { git = "https://github.com/funwithagents/app-setup?rev=main#63470d8889d4b1423c20d0214f11c0e6340abb38" }
+dependencies = [
+    { name = "packaging" },
 ]
 
 [[package]]
@@ -1064,14 +1072,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
-]
-
-[[package]]
-name = "module-setup"
-version = "0.1.0"
-source = { git = "https://github.com/funwithagents/module-setup?rev=main#d28ff373407cc765d552d131f2dbd9dbd4c976f0" }
-dependencies = [
-    { name = "packaging" },
 ]
 
 [[package]]
@@ -2201,13 +2201,13 @@ demo = [
     { name = "opentelemetry-sdk" },
 ]
 dev = [
+    { name = "app-setup" },
     { name = "gradio" },
     { name = "langchain-anthropic" },
     { name = "langchain-google-genai" },
     { name = "langchain-huggingface" },
     { name = "langchain-mistralai" },
     { name = "langchain-openai" },
-    { name = "module-setup" },
     { name = "opentelemetry-sdk" },
     { name = "pyright" },
     { name = "pytest" },
@@ -2241,13 +2241,13 @@ demo = [
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
 ]
 dev = [
+    { name = "app-setup", git = "https://github.com/funwithagents/app-setup?rev=main" },
     { name = "gradio", specifier = ">=5.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.0" },
     { name = "langchain-google-genai", specifier = ">=4.4" },
     { name = "langchain-huggingface", specifier = ">=1.2" },
     { name = "langchain-mistralai", specifier = ">=1.1" },
     { name = "langchain-openai", specifier = ">=1.0" },
-    { name = "module-setup", git = "https://github.com/funwithagents/module-setup?rev=main" },
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
     { name = "pyright", specifier = ">=1.1.411" },
     { name = "pytest", specifier = ">=8.0.0" },
