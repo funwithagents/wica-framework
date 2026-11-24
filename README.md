@@ -129,7 +129,7 @@ The repo ships a browser UI to talk to a simulated social robot and watch the fr
 uv run --group demo python -m examples.conversation_demo.app
 ```
 
-then open the address Gradio prints. It starts on the scripted fake, which needs no key; its **Setup** tab chooses a provider and a model, installs the provider's extra and tests the key, its **Secrets** tab saves the key to the demo's folder (`~/.config/wica-conversation-demo`), and **Start** in the Conversation tab runs the robot on it. `--no-start` opens the page without starting; `--folder` keeps another config. One example config per provider is in `examples/configs/`. Its three panels are reusable in your own app ([docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)); its design is [specs/conversation-demo.md](specs/conversation-demo.md).
+then open the address Gradio prints. It runs Anthropic's `claude-haiku-4-5` with its key from `ANTHROPIC_API_KEY`: without one, the Conversation tab says so instead of starting. Its **Secrets** tab saves the key to the demo's folder (`~/.config/wica-conversation-demo`), its **Setup** tab chooses another provider and model, installs the provider's extra and tests the key, and **Start** runs the robot. The robot's persona is `wica.md` in that folder, to edit there. `--no-start` opens the page without starting; `--folder` keeps another config. One example config per provider is in `examples/configs/`. Its three panels are reusable in your own app ([docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)); its design is [specs/conversation-demo.md](specs/conversation-demo.md).
 
 ## Documentation
 

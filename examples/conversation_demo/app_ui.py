@@ -1,7 +1,8 @@
 """The Gradio page of the WICA conversation demo.
 
-`build_page(model, conversation, notice)` is the page: the demo's **Conversation** tab first, then
-app-setup's **Setup** and **Secrets** panels; it opens on Setup. The Conversation tab has Start
+`build_page(model, conversation, open_on=...)` is the page: the demo's **Conversation** tab first, then
+app-setup's **Setup** and **Secrets** panels; it opens on Conversation when the session starts
+at launch, else on Setup. The Conversation tab has Start
 and Stop over the `Conversation` (session.py) and, while a session runs, its five surfaces
 (Conversation / Speaking / World state / Reaction history / Sensor inputs). Three of them are the
 package's reusable components (`wica.contrib.gradio`: `conversation_panel`, `world_state_panel`,
@@ -14,6 +15,7 @@ specs/conversation-demo.md, "The page").
 from __future__ import annotations
 
 import html
+from typing import Any
 
 import gradio as gr
 from app_setup.app import AppModel
@@ -87,22 +89,35 @@ _HOW_TO_READ = (
 )
 
 
-def status_text(conversation: Conversation, reasons: list[str] | None = None) -> str:
-    """The line above Start and Stop: running (which provider and model), or not, and why."""
+def status_text(conversation: Conversation) -> str:
+    """The line above Start and Stop: running (which provider and model), starting, stopping, or
+    stopped, with why the last Start did not start."""
+    status = conversation.status
     running = conversation.current
-    if running is not None:
+    if status == "running" and running is not None:
         agent = running.config.agent
         return (
             f"🟢 **Running** — `{agent.provider}` / `{agent.model}`. Stop it to "
             "change the config in the Setup tab."
         )
-    if reasons:
-        listed = "\n".join(f"- {reason}" for reason in reasons)
+    if status == "starting":
+        return "⏳ **Starting…**"
+    if status == "stopping":
+        return "⏳ **Stopping…**"
+    if conversation.reasons:
+        listed = "\n".join(f"- {reason}" for reason in conversation.reasons)
         return (
             "⚠️ **Not started.** Fix this in the Setup and Secrets tabs, then Start:\n\n"
             + listed
         )
     return "⚪ **Stopped.** Start runs the agent from the saved config (the Setup tab)."
+
+
+def button_states(conversation: Conversation) -> tuple[bool, bool]:
+    """Whether Start and Stop can be pressed: Start only while stopped, Stop only while
+    running (both greyed while starting or stopping)."""
+    status = conversation.status
+    return status == "stopped", status == "running"
 
 
 def _session_panels(running: Running) -> None:
@@ -168,30 +183,47 @@ def _session_panels(running: Running) -> None:
     speaking_timer.tick(lambda: _speaking_html(speaking.read()), outputs=speaking_view)
 
 
-def _conversation_tab(
-    model: AppModel, conversation: Conversation, notice: list[str]
-) -> None:
+def _conversation_tab(model: AppModel, conversation: Conversation) -> None:
     """Start, Stop, the status line, and the running session's surfaces."""
-    status = gr.Markdown(status_text(conversation, notice))
+    can_start, can_stop = button_states(conversation)
+    status = gr.Markdown(status_text(conversation))
     with gr.Row():
-        start = gr.Button("Start", variant="primary", scale=0)
-        stop = gr.Button("Stop", scale=0)
+        start = gr.Button("Start", variant="primary", scale=0, interactive=can_start)
+        stop = gr.Button("Stop", scale=0, interactive=can_stop)
     gr.Markdown(_HOW_TO_READ)
-    # The session's version, polled: a start or a stop from any browser tab (or at launch) redraws
-    # the surfaces below.
+    # The session's version: a start or a stop from any browser tab (or at launch) redraws the
+    # surfaces below.
     version = gr.State(conversation.version)
 
-    def on_start() -> tuple[str, int]:
-        reasons = conversation.start(model)
-        return status_text(conversation, reasons), conversation.version
+    def refresh() -> tuple[str, Any, Any, int]:
+        can_start, can_stop = button_states(conversation)
+        return (
+            status_text(conversation),
+            gr.update(interactive=can_start),
+            gr.update(interactive=can_stop),
+            conversation.version,
+        )
 
-    def on_stop() -> tuple[str, int]:
+    def on_start() -> tuple[str, Any, Any, int]:
+        conversation.start(model)
+        return refresh()
+
+    def on_stop() -> tuple[str, Any, Any, int]:
         conversation.stop()
-        return status_text(conversation), conversation.version
+        return refresh()
 
-    start.click(on_start, outputs=[status, version])
-    stop.click(on_stop, outputs=[status, version])
-    gr.Timer(1.0).tick(lambda: conversation.version, outputs=version)
+    outputs = [status, start, stop, version]
+    # Greyed at once on a click, before the (possibly slow) start or stop runs.
+    start.click(
+        lambda: (gr.update(interactive=False), gr.update(interactive=False)),
+        outputs=[start, stop],
+    ).then(on_start, outputs=outputs)
+    stop.click(
+        lambda: (gr.update(interactive=False), gr.update(interactive=False)),
+        outputs=[start, stop],
+    ).then(on_stop, outputs=outputs)
+    # Polled too, for a change made from another browser tab or at launch.
+    gr.Timer(1.0).tick(refresh, outputs=outputs, show_progress="hidden")
 
     @gr.render(inputs=version)
     def _surfaces(_version: int) -> None:
@@ -203,15 +235,15 @@ def _conversation_tab(
 
 
 def build_page(
-    model: AppModel, conversation: Conversation, notice: list[str] | None = None
+    model: AppModel, conversation: Conversation, *, open_on: str = "setup"
 ) -> gr.Blocks:
     """The demo's page: its Conversation tab, then app-setup's Setup and Secrets panels. It
-    opens on Setup. *notice* is why the session did not start at launch, shown until Start."""
+    opens on *open_on* (`"conversation"` when the session starts at launch, else `"setup"`)."""
     with gr.Blocks(title=model.title) as page:
         gr.Markdown(f"# {model.title}")
-        with gr.Tabs(selected="setup"):
+        with gr.Tabs(selected=open_on):
             with gr.Tab("Conversation", id="conversation"):
-                _conversation_tab(model, conversation, notice or [])
+                _conversation_tab(model, conversation)
             with gr.Tab("Setup", id="setup"):
                 setup = setup_panel(model)
             with gr.Tab("Secrets", id="secrets"):

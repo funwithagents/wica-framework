@@ -5,6 +5,7 @@ code:
   - examples/conversation_demo/app_ui.py
   - examples/conversation_demo/session.py
   - examples/conversation_demo/prompts/wica.md
+  - examples/conversation_demo/default_config.json
   - examples/configs/anthropic.json
   - pyproject.toml
 tests:
@@ -229,14 +230,22 @@ uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--
 - **The app's folder** holds its `config.json`, its `.env` (the keys the Secrets panel saves) and
   its `launch.json`: `~/.config/wica-conversation-demo` unless `--folder` names another. The page
   listens on `127.0.0.1` unless `--host` names another address; `--port` picks the port.
-- **The default config** uses the scripted fake (`provider: "fake"`), which needs no extra, no key
-  and no network: every reaction gets the same `<say>` reply, telling the user to choose a
-  provider in the Setup tab. Its `system_prompt_file` is the bundled persona
-  (`examples/conversation_demo/prompts/wica.md`) by its absolute path, since the setup checks look a
-  relative path up against the working directory while the session resolves it against the folder
-  ([setup.md](setup.md), Open questions).
+- **The default config** is a committed file, `examples/conversation_demo/default_config.json`,
+  loaded into `App(default_config=...)` (app-setup writes it into an empty folder at the first
+  launch): provider `anthropic`, model `claude-haiku-4-5`, `"system_prompt_file": "wica.md"`, and
+  no key nor `api_key_env` — the key is read from `ANTHROPIC_API_KEY`, the provider's default,
+  from the shell or the folder's `.env`. The scripted fake stays an example config
+  (`examples/configs/fake.json`), to paste in the Setup tab for a key-less try.
+- **The persona lives in the folder.** At launch, when the app's folder has no `wica.md`, the
+  bundled `examples/conversation_demo/prompts/wica.md` is copied there; it is never overwritten,
+  so the user edits the robot's persona in the folder. The default config's relative `wica.md`
+  resolves against the folder: the session's `base_dir`, and the working directory, which the
+  app sets to the folder at launch so the setup checks (which look a relative path up against
+  the working directory) find it too ([setup.md](setup.md), Open questions).
 - **The page**: the demo's **Conversation** tab first, then the **Setup** panel, then the
-  **Secrets** panel following the Setup panel's draft; it opens on Setup.
+  **Secrets** panel following the Setup panel's draft. It opens on the Conversation tab when the
+  session starts at launch (`starts_at_launch`, whether it actually started or showed its
+  blockers), else on Setup.
 - **A session with a lock.** A session is one `Wica` built from the saved config and running
   (`examples/conversation_demo/session.py`, `Conversation`). **Start** checks the saved config
   (`AppModel.blockers`: its problems, then what the machine is missing — the extra, the key, the
@@ -249,16 +258,27 @@ uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--
 - **Autostart.** The demo starts its session at launch (`App(autostart=True)`); the user's choice
   is app-setup's, kept in the folder's `launch.json` and drawn on the Setup panel as a checkbox.
   `--start` / `--no-start` override it for one launch. A launch whose saved config has blockers
-  shows them in the Conversation tab instead of starting. `config.json` holds only the `wica`
+  shows them in the Conversation tab instead of starting. **The first launch with no key does
+  exactly that, by design**: the default config needs `ANTHROPIC_API_KEY`, so the Conversation
+  tab lists the missing key; the user sets it in the Secrets tab (or the shell) and presses Start. `config.json` holds only the `wica`
   section.
 
 ## The Conversation tab
 
-A status line (running, with its provider and model; stopped; or not started, with why), **Start**
-and **Stop**, the reading guide, and — while a session runs — the five surfaces above over that
-session. Each session is a new `Wica`, so its surfaces are drawn anew (a `gr.render` keyed on the
-session's version, polled every second): a start or a stop from any browser tab, or at launch,
-redraws them. With no session, the tab says so; there is no explore-only mode.
+A status line, **Start** and **Stop**, the reading guide, and — while a session runs — the five
+surfaces above over that session.
+
+- **The status line** says what the session is doing: running (with its provider and model),
+  starting, stopping, or stopped — with the reasons the last Start did not start (its blockers,
+  or the build's error) until a Start succeeds.
+- **The buttons are greyed by that status**: Start can be pressed only while stopped, Stop only
+  while running; both are greyed while starting or stopping, and greyed at once on a click,
+  before the start or stop runs.
+- Both are refreshed on every change and polled every second, so a start or a stop from another
+  browser tab, or at launch, shows.
+- Each session is a new `Wica`, so its surfaces are drawn anew (a `gr.render` keyed on the
+  session's version): a start or a stop redraws them. With no session, the tab says so; there is
+  no explore-only mode.
 
 ## Composition of a session: build, then wire, then start
 
@@ -304,12 +324,14 @@ zone.
 
 ## Testing
 
-`tests/test_conversation_demo.py` (fast tier, no page built): the default config needs nothing
-and holds only the `wica` section; Start runs the saved config and locks it until Stop, which
-closes the Wica; Start with blockers says why and builds nothing; a failed build is said and leaves
-the config unlocked; a relative prompt file is read from the app's folder; the command line's
-`--start` / `--no-start`. `tests-e2e/test_example_flow.py`: a session's wiring over the scripted
-fake, end to end.
+`tests/test_conversation_demo.py` (fast tier, no page built): the committed default file is the
+app's default and is written into an empty folder; the persona is copied into the folder once
+and never overwritten; with no key, the default config's Start lists the missing key and starts
+nothing; Start runs the saved config and locks it until Stop, which closes the Wica; the buttons'
+state per status (stopped, starting, running, stopping) and the status line's; a failed build is
+said and leaves the config unlocked; a relative prompt file is read from the app's folder; the
+command line's `--start` / `--no-start`. `tests-e2e/test_example_flow.py`: a session's wiring
+over the scripted fake, end to end.
 
 ## Benchmark
 

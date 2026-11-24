@@ -219,15 +219,19 @@ def test_persona_describes_the_say_tag_and_no_removed_mechanism():
     assert "noop" not in persona
 
 
-# --- The session over app-setup's app model (session.py) ---------------------------
+# --- The app and its session over app-setup's app model (session.py) ---------------
+
+import json  # noqa: E402
 
 from app_setup.app import AppModel  # noqa: E402
 from app_setup.folder import ConfigFolder  # noqa: E402
 
-from examples.conversation_demo.app_ui import status_text  # noqa: E402
+from examples.conversation_demo.app_ui import button_states, status_text  # noqa: E402
 from examples.conversation_demo.session import Conversation, Running  # noqa: E402
 from wica import setup as wica_setup  # noqa: E402
 from wica.config import WicaConfig  # noqa: E402
+
+_ROOT = Path(app.__file__).resolve().parents[2]
 
 
 def _model(tmp_path: Path, conversation: Conversation) -> AppModel:
@@ -238,25 +242,77 @@ def _model(tmp_path: Path, conversation: Conversation) -> AppModel:
     )
 
 
-def test_the_default_config_needs_nothing_and_has_no_app_section(tmp_path: Path):
-    conversation = Conversation(app.open_session)
-    model = _model(tmp_path, conversation)
+def _fake(model: AppModel) -> None:
+    """Save the scripted fake (the example config) as the app's config."""
+    block = json.loads((_ROOT / "examples" / "configs" / "fake.json").read_text())
+    block["agent"]["system_prompt_file"] = str(app.PERSONA_FILE)
+    block["agent"]["model_kwargs"]["delay_s"] = 0
+    model.save({"wica": block})
 
-    assert set(model.saved_config()) == {"wica"}
-    assert wica_setup.check_config(app.DEFAULT_CONFIG["wica"]) == []
-    assert model.blockers(model.saved_config()) == []
+
+def test_the_committed_default_config_is_the_app_s_default(tmp_path: Path):
+    committed = json.loads(
+        (Path(app.__file__).parent / "default_config.json").read_text()
+    )
+    model = _model(tmp_path, Conversation(app.open_session))
+
+    assert app.APP.default_config == committed
+    assert model.saved_config() == committed  # written into the empty folder
+    assert committed == {
+        "wica": {
+            "agent": {
+                "provider": "anthropic",
+                "model": "claude-haiku-4-5",
+                "system_prompt_file": "wica.md",
+            }
+        }
+    }
+    assert wica_setup.check_config(committed["wica"]) == []
     assert app.APP.autostart is True
+
+
+def test_the_persona_is_copied_into_the_folder_once_and_never_overwritten(
+    tmp_path: Path,
+):
+    persona = app.ensure_persona(tmp_path)
+
+    assert persona == tmp_path / "wica.md"
+    assert persona.read_text() == app.PERSONA_FILE.read_text()
+    persona.write_text("You are a grumpy robot.")
+    app.ensure_persona(tmp_path)
+    assert persona.read_text() == "You are a grumpy robot."
+
+
+def test_with_no_key_the_default_config_says_so_instead_of_starting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    conversation = Conversation(lambda config: _never())
+    model = _model(tmp_path, conversation)
+    app.ensure_persona(model.path)
+    monkeypatch.chdir(model.path)  # as main() does
+
+    reasons = conversation.start(model)
+
+    assert reasons and all("ANTHROPIC_API_KEY" in reason for reason in reasons)
+    assert conversation.reasons == reasons and conversation.status == "stopped"
+    assert not conversation.locked()
+    assert "ANTHROPIC_API_KEY" in status_text(conversation)
+    assert button_states(conversation) == (True, False)
 
 
 def test_start_runs_the_saved_config_and_locks_it_until_stopped(tmp_path: Path):
     conversation = Conversation(app.open_session)
     model = _model(tmp_path, conversation)
+    _fake(model)
 
     assert conversation.start(model) == []
     running = conversation.current
     assert running is not None and running.wica.is_running
     assert running.config.agent.provider == "fake"
+    assert conversation.status == "running"
     assert conversation.locked() and model.locked()
+    assert button_states(conversation) == (False, True)
     with pytest.raises(RuntimeError):
         model.save(model.saved_config())
     version = conversation.version
@@ -267,36 +323,45 @@ def test_start_runs_the_saved_config_and_locks_it_until_stopped(tmp_path: Path):
     conversation.stop()
 
     assert conversation.current is None and not conversation.locked()
+    assert conversation.status == "stopped"
+    assert button_states(conversation) == (True, False)
     assert not running.wica.is_running
     assert conversation.version == version + 1
     model.save(model.saved_config())  # unlocked again
 
 
-def test_start_says_why_the_saved_config_cannot_run_and_builds_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    built: list[WicaConfig] = []
-    conversation = Conversation(lambda config: built.append(config) or _never())
+def test_both_buttons_are_greyed_while_starting_and_stopping(tmp_path: Path):
+    seen: list[tuple[str, tuple[bool, bool], str]] = []
+    conversation: Conversation
+
+    def observed(config: WicaConfig) -> Running:
+        seen.append(
+            (
+                conversation.status,
+                button_states(conversation),
+                status_text(conversation),
+            )
+        )
+        return app.open_session(config)
+
+    conversation = Conversation(observed)
     model = _model(tmp_path, conversation)
-    model.save(
-        {
-            "wica": {
-                "agent": {
-                    "provider": "anthropic",
-                    "model": "claude-haiku-4-5",
-                    "system_prompt": "You are terse.",
-                }
-            }
-        }
-    )
+    _fake(model)
+    assert conversation.start(model) == []
+    assert seen == [("starting", (False, False), "⏳ **Starting…**")]
 
-    reasons = conversation.start(model)
+    running = conversation.current
+    assert running is not None
+    closing: list[tuple[str, tuple[bool, bool]]] = []
+    real_close = running.wica.close
 
-    assert any("ANTHROPIC_API_KEY" in reason for reason in reasons)
-    assert built == [] and conversation.current is None
-    assert not conversation.locked()
-    assert "ANTHROPIC_API_KEY" in status_text(conversation, reasons)
+    def close() -> None:
+        closing.append((conversation.status, button_states(conversation)))
+        real_close()
+
+    running.wica.close = close  # type: ignore[method-assign]
+    conversation.stop()
+    assert closing == [("stopping", (False, False))]
 
 
 def _never() -> Running:
@@ -309,11 +374,13 @@ def test_a_failed_build_is_said_and_leaves_the_config_unlocked(tmp_path: Path):
 
     conversation = Conversation(failing)
     model = _model(tmp_path, conversation)
+    _fake(model)
 
     assert conversation.start(model) == [
         "The agent could not start: the robot is unplugged"
     ]
     assert conversation.current is None and not conversation.locked()
+    assert "unplugged" in status_text(conversation)
 
 
 def test_a_relative_prompt_file_is_read_from_the_app_s_folder(
@@ -327,21 +394,20 @@ def test_a_relative_prompt_file_is_read_from_the_app_s_folder(
 
     conversation = Conversation(recording)
     model = _model(tmp_path, conversation)
-    (model.path / "persona.md").write_text("You are terse.", encoding="utf-8")
+    _fake(model)
+    app.ensure_persona(model.path)
     agent = dict(model.saved_config()["wica"]["agent"])
-    agent["system_prompt_file"] = "persona.md"
+    agent["system_prompt_file"] = "wica.md"
     model.save({"wica": {"agent": agent}})
     # The setup checks look a relative path up against the working directory (specs/setup.md,
-    # Open questions): run from elsewhere, they block it; the session reads the folder's.
+    # Open questions), which main() makes the folder: from elsewhere, they block it.
     monkeypatch.chdir(tmp_path)
-    assert any("persona.md" in reason for reason in conversation.start(model))
+    assert any("wica.md" in reason for reason in conversation.start(model))
     monkeypatch.chdir(model.path)
 
     assert conversation.start(model) == []
     conversation.stop()
-    assert seen[0].agent.system_prompt_file == str(
-        (model.path / "persona.md").resolve()
-    )
+    assert seen[0].agent.system_prompt_file == str((model.path / "wica.md").resolve())
 
 
 @pytest.mark.parametrize(

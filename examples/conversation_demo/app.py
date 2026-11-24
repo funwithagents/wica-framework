@@ -9,9 +9,11 @@ The page has three tabs: the demo's own **Conversation** (Start, Stop and the ro
 then app-setup's **Setup** (choose a provider, configure it, install its extra, test its key)
 and **Secrets** (the key variables, saved to the folder's `.env`). The app's folder (its
 `config.json`, its `.env`, its `launch.json`) is `~/.config/wica-conversation-demo` unless
-`--folder` names another. The default config uses the scripted fake, which needs nothing
-installed and no key, and the session starts at launch unless the Setup panel's checkbox or
-`--no-start` says otherwise (see specs/conversation-demo.md).
+`--folder` names another. The default config (`default_config.json`) runs Anthropic's
+claude-haiku-4-5 with the persona copied into the folder (`wica.md`, edit it there), its key read
+from ANTHROPIC_API_KEY (the shell, or the Secrets tab). The session starts at launch unless the
+Setup panel's checkbox or `--no-start` says otherwise; without a key, the Conversation tab says so
+instead (see specs/conversation-demo.md).
 
 Logging is the application's concern, not the framework's: this demo configures the wica.* loggers
 in `main()` (raise the level to DEBUG to see the full World+Agent lifecycle trace — registrations,
@@ -42,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from collections.abc import Callable, Sequence
@@ -77,28 +80,17 @@ from examples.conversation_demo.speaking import SpeakingSlot
 
 # --- Configuration -------------------------------------------------------------------
 
-# The persona every example config and the default config read.
+# The persona the example configs read, and the one copied into the app's folder.
 PERSONA_FILE = Path(__file__).parent / "prompts" / "wica.md"
 
-# The scripted fake: no extra, no key, no network, so the page works and the session starts before
-# any choice. Every reaction gets the same answer, which says what to do next. The persona's path is
-# absolute: the setup checks look a relative one up against the working directory, the session
-# against the app's folder (specs/setup.md, Open questions).
-DEFAULT_CONFIG: dict[str, Any] = {
-    "wica": {
-        "agent": {
-            "provider": "fake",
-            "model": "scripted",
-            "system_prompt_file": str(PERSONA_FILE),
-            "model_kwargs": {
-                "default": {
-                    "text": "<say>Hello! I am the scripted fake, so this is all I can say. "
-                    "Choose a provider in the Setup tab to talk with a real model.</say>"
-                }
-            },
-        }
-    }
-}
+# The demo's default config, committed next to this file: Anthropic with the persona the app's
+# folder holds (`wica.md`, relative, so it resolves against the folder), and no key: the key is read
+# from ANTHROPIC_API_KEY, the provider's default variable. app-setup writes it into an empty
+# folder at the first launch.
+DEFAULT_CONFIG_FILE = Path(__file__).parent / "default_config.json"
+DEFAULT_CONFIG: dict[str, Any] = json.loads(
+    DEFAULT_CONFIG_FILE.read_text(encoding="utf-8")
+)
 
 APP = App(
     name="wica-conversation-demo",
@@ -108,6 +100,17 @@ APP = App(
     default_config=DEFAULT_CONFIG,
     autostart=True,
 )
+
+
+def ensure_persona(folder: Path) -> Path:
+    """The persona in the app's folder, copied there from the bundled one when the folder has
+    none: the default config names it (`wica.md`), and the user edits it there. Never
+    overwritten."""
+    persona = folder / PERSONA_FILE.name
+    if not persona.exists():
+        persona.write_text(PERSONA_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    return persona
+
 
 _demo_logger = logging.getLogger(__name__)
 
@@ -371,15 +374,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         locked=conversation.locked,
     )
     _demo_logger.info("folder: %s", model.path)
-    notice: list[str] = []
-    if starts_at_launch(model, options.start):
-        notice = conversation.start(model)
-        for reason in notice:
+    ensure_persona(model.path)
+    # A relative path in the config (the default's `wica.md`) is the folder's: the session resolves
+    # it against the folder (its `base_dir`), and the setup checks against the working directory,
+    # which is therefore the folder too (specs/setup.md, Open questions).
+    os.chdir(model.path)
+    starts = starts_at_launch(model, options.start)
+    if starts:
+        # With blockers (no key yet, at the first launch), they show on the Conversation tab.
+        for reason in conversation.start(model):
             _demo_logger.warning("not started at launch: %s", reason)
     try:
-        build_page(model, conversation, notice).launch(
-            server_name=options.host, server_port=options.port
-        )
+        build_page(
+            model, conversation, open_on="conversation" if starts else "setup"
+        ).launch(server_name=options.host, server_port=options.port)
     finally:
         conversation.stop()
 
