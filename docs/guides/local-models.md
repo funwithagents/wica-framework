@@ -46,7 +46,7 @@ Then point the config at the server:
 ```
 
 - **`base_url`** is the server's address with `/v1`. **`model`** is the name the server expects; each section below gives it.
-- **No key.** Leave `api_key` and `api_key_env` out; WICA sends a placeholder and never your `OPENAI_API_KEY`. A server behind an authenticating gateway takes `api_key_env` as any provider does. The config carries no secret, so it can be committed.
+- **No key.** Leave `api_key_env` out; WICA sends a placeholder and never your `OPENAI_API_KEY`. A server behind an authenticating gateway takes `api_key_env` as any provider does. The config carries no secret, so it can be committed.
 - **`context_window`** is the server's own context size. A local model has no profile WICA can read it from, and `history_budget` needs it to cut history in time.
 - **`model_timeout` bounds the whole reply, not only the wait.** The deadline covers the model call from the request to its last token, and the reply is streamed to the output Command as it is written: a reply longer than the deadline stops mid-sentence (what was already streamed is heard). At about 50 tokens a second, the default 10 s is about 500 tokens. Raise it to cover your longest reply.
 - **The first request can be slow.** A server that loads the model on its first request takes seconds, longer with a download; send it one request before `start()`, or raise `model_timeout`.

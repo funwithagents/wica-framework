@@ -12,7 +12,7 @@ from langchain_core.language_models import BaseChatModel
 
 from wica import Wica
 from wica.agent import build_chat_model
-from wica.config import AgentConfig, ConfigError, MissingEnvError, WicaConfig
+from wica.config import AgentConfig, ConfigError, MissingSecretError, WicaConfig
 from wica.content import Content, TextPart
 from wica.testing import CheckSpec, ExpectStep, InputStep, Scenario, WaitStep
 
@@ -21,7 +21,7 @@ E2E_DIR = Path(__file__).parent
 # One e2e config per provider, named symmetrically (no privileged default), plus the Hub's model a
 # second time in tool mode — the parametrized e2e tests run against each. Each uses api_key_env,
 # so a provider whose key env var is unset skips (never fails): the key resolves at build, so
-# MissingEnvError -> pytest.skip lives in real_chat_model / real_wica (not the inert load). See
+# MissingSecretError -> pytest.skip lives in real_chat_model / real_wica (not the inert load). See
 # specs/testing.md ("Live tier", "E2e configs") and specs/config.md ("API key").
 PROVIDER_CONFIGS = [
     E2E_DIR / "e2e.anthropic.config.json",
@@ -97,11 +97,11 @@ def output_as_tool(config_path: Path) -> bool:
 FAIL_ON_MISSING = "WICA_E2E_FAIL_ON_MISSING"
 
 
-def missing_key(exc: MissingEnvError) -> NoReturn:
+def missing_key(exc: MissingSecretError) -> NoReturn:
     """Skip the calling test for a key that is not set — or fail it under `FAIL_ON_MISSING`."""
-    reason = f"{exc.env_var} not set — skipping e2e test"
+    reason = f"{exc.variable} not set — skipping e2e test"
     if os.environ.get(FAIL_ON_MISSING) == "1":
-        pytest.fail(f"{exc.env_var} not set ({FAIL_ON_MISSING}=1)", pytrace=False)
+        pytest.fail(f"{exc.variable} not set ({FAIL_ON_MISSING}=1)", pytrace=False)
     pytest.skip(reason)
 
 
@@ -138,7 +138,7 @@ def skip_if_rate_limited(config_path: Path) -> None:
     does not: a provider's client retries a 429 with backoff for longer than `model_timeout`, so
     the reaction ends `model_timeout` and the test fails on a missed expectation with no 429
     anywhere. A direct call has no deadline: the client gives up and raises it. A missing key is
-    not this function's case and propagates (`MissingEnvError`). See specs/testing.md ("Live
+    not this function's case and propagates (`MissingSecretError`). See specs/testing.md ("Live
     tier")."""
     if config_path not in _PREFLIGHT:
         config = load_agent_config(config_path)
@@ -171,7 +171,7 @@ def real_chat_model(config_path: Path) -> BaseChatModel:
     try:
         skip_if_rate_limited(config_path)
         return build_chat_model(load_agent_config(config_path))
-    except MissingEnvError as exc:
+    except MissingSecretError as exc:
         missing_key(exc)
 
 
@@ -192,7 +192,7 @@ def real_wica(
     field is cleared so the exactly-one invariant holds); `agent_overrides` replaces other
     `AgentConfig` fields (e.g. `history_reactions`). Skips when the config's api_key_env is unset
     (fails under `FAIL_ON_MISSING`) — the key resolves at build inside `Wica.init`, so
-    `MissingEnvError -> pytest.skip` lives here — and when the provider rate-limits the key
+    `MissingSecretError -> pytest.skip` lives here — and when the provider rate-limits the key
     (`skip_if_rate_limited`)."""
     config = load_e2e_config(config_path).wica
     overrides = dict(agent_overrides or {})
@@ -203,7 +203,7 @@ def real_wica(
     try:
         skip_if_rate_limited(config_path)
         return Wica.init(config, **kwargs)
-    except MissingEnvError as exc:
+    except MissingSecretError as exc:
         missing_key(exc)
 
 

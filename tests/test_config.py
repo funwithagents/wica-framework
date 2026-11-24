@@ -11,7 +11,7 @@ from wica import agent as agent_module
 from wica.config import (
     AgentConfig,
     ConfigError,
-    MissingEnvError,
+    MissingSecretError,
     WicaConfig,
     resolve_api_key,
     resolve_system_prompt,
@@ -42,7 +42,6 @@ def test_wica_config_from_dict_happy_path():
     assert cfg.agent.system_prompt == "You are a test assistant."
     # Unresolved indirection fields default to None on a plain inline+keyless config.
     assert cfg.agent.system_prompt_file is None
-    assert cfg.agent.api_key is None
     assert cfg.agent.api_key_env is None
     assert cfg.agent.model_kwargs == {"temperature": 0.5}
 
@@ -125,7 +124,6 @@ def test_from_dict_base_dir_ignored_for_absolute_system_prompt_file(tmp_path: Pa
 def test_agent_config_from_dict_stores_api_key_env_verbatim():
     cfg = AgentConfig.from_dict(_agent_dict(api_key_env="WICA_SOME_KEY"))
     # The env var *name* is kept; nothing is read at load (the var need not even exist).
-    assert cfg.api_key is None
     assert cfg.api_key_env == "WICA_SOME_KEY"
 
 
@@ -258,48 +256,109 @@ def test_resolve_system_prompt_missing_file_raises(tmp_path: Path):
         resolve_system_prompt(cfg)
 
 
-# --- api key: verbatim at load, resolved at build -------------------------------------
+# --- api key: a variable named at load, resolved at build ----------------------------
 
 
-def test_api_key_literal_stored():
-    cfg = AgentConfig.from_dict(_agent_dict(api_key="sk-literal"))
-    assert cfg.api_key == "sk-literal"
+@pytest.mark.parametrize("value", ["sk-literal", "", None])
+def test_a_key_written_in_the_config_is_refused(value: Any):
+    with pytest.raises(ConfigError, match="does not take 'api_key'.*'api_key_env'"):
+        AgentConfig.from_dict(_agent_dict(api_key=value))
+    with pytest.raises(ConfigError, match="does not take 'api_key'"):
+        WicaConfig.from_dict(_wica_dict(api_key="sk-x", api_key_env="SOME_VAR"))
 
 
-def test_resolve_api_key_returns_literal():
-    cfg = AgentConfig.from_dict(_agent_dict(api_key="sk-literal"))
-    assert resolve_api_key(cfg) == "sk-literal"
-
-
-def test_resolve_api_key_reads_env_when_set(monkeypatch: pytest.MonkeyPatch):
+def test_resolve_api_key_reads_the_named_variable(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("WICA_TEST_KEY", "sk-from-env")
     cfg = AgentConfig.from_dict(_agent_dict(api_key_env="WICA_TEST_KEY"))
-    # Not resolved at load...
-    assert cfg.api_key is None
-    # ...resolved at build.
     assert resolve_api_key(cfg) == "sk-from-env"
 
 
-def test_resolve_api_key_unset_env_raises_missing_env_error(
+@pytest.mark.parametrize(
+    ("provider", "variable"),
+    [
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
+        ("mistral", "MISTRAL_API_KEY"),
+        ("huggingface-hub", "HF_TOKEN"),
+        ("mistralai", "MISTRAL_API_KEY"),
+    ],
+)
+def test_resolve_api_key_defaults_to_the_provider_s_usual_variable(
+    monkeypatch: pytest.MonkeyPatch, provider: str, variable: str
+):
+    monkeypatch.setenv(variable, "sk-usual")
+    cfg = AgentConfig.from_dict(_agent_dict(provider=provider))
+    assert cfg.api_key_env is None  # the config mirrors the JSON
+    assert resolve_api_key(cfg) == "sk-usual"
+    monkeypatch.delenv(variable)
+    with pytest.raises(MissingSecretError) as exc_info:
+        resolve_api_key(cfg)
+    assert exc_info.value.variable == variable
+
+
+def test_secrets_given_in_code_come_before_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    cfg = AgentConfig.from_dict(_agent_dict())
+    assert resolve_api_key(cfg, {"ANTHROPIC_API_KEY": "sk-code"}) == "sk-code"
+    # A secret under another name does not count; the environment answers.
+    assert resolve_api_key(cfg, {"OTHER": "sk-other"}) == "sk-env"
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    named = AgentConfig.from_dict(_agent_dict(api_key_env="MY_KEY"))
+    assert resolve_api_key(named, {"MY_KEY": "sk-mine"}) == "sk-mine"
+
+
+def test_resolve_api_key_unset_or_empty_raises_missing_secret_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.delenv("WICA_TEST_KEY_UNSET", raising=False)
     # Loads fine (verbatim) — the error is deferred to resolution.
     cfg = AgentConfig.from_dict(_agent_dict(api_key_env="WICA_TEST_KEY_UNSET"))
-    with pytest.raises(MissingEnvError) as exc_info:
+    with pytest.raises(MissingSecretError) as exc_info:
         resolve_api_key(cfg)
-    assert exc_info.value.env_var == "WICA_TEST_KEY_UNSET"
-    assert isinstance(exc_info.value, ConfigError)
+    error = exc_info.value
+    assert (error.variable, error.label) == ("WICA_TEST_KEY_UNSET", "Agent")
+    assert isinstance(error, ConfigError)
+    assert str(error) == (
+        "Agent: no key under 'WICA_TEST_KEY_UNSET': set the environment variable, "
+        "or pass it in `secrets`"
+    )
+    monkeypatch.setenv("WICA_TEST_KEY_UNSET", "")
+    with pytest.raises(MissingSecretError):
+        resolve_api_key(cfg, {"WICA_TEST_KEY_UNSET": ""})
 
 
-def test_api_key_both_literal_and_env_rejected_at_load():
-    with pytest.raises(ConfigError, match="api_key"):
-        AgentConfig.from_dict(_agent_dict(api_key="sk-x", api_key_env="SOME_VAR"))
+def test_missing_env_error_is_a_deprecated_alias_of_missing_secret_error():
+    import wica
+    import wica.config
+
+    with pytest.warns(DeprecationWarning, match="MissingSecretError"):
+        alias = wica.config.MissingEnvError
+    with pytest.warns(DeprecationWarning, match="MissingSecretError"):
+        assert wica.MissingEnvError is alias
+    assert alias is MissingSecretError
+    # Caught by its old name, read through its old attribute.
+    try:
+        raise MissingSecretError("SOME_VAR")
+    except alias as exc:
+        assert exc.env_var == "SOME_VAR"
 
 
-def test_resolve_api_key_none_when_neither_given():
-    cfg = AgentConfig.from_dict(_agent_dict())
-    assert cfg.api_key is None
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"provider": "fake"},
+        {"provider": "fake", "api_key_env": "NEVER_READ"},
+        {"provider": "openai-chat-completions-compatible", "base_url": "http://x/v1"},
+        {"provider": "ollama"},
+    ],
+)
+def test_resolve_api_key_none_when_no_variable_applies(overrides: dict[str, Any]):
+    """The fake reads no key; a compatible server and a provider WICA does not know have no
+    default variable."""
+    cfg = AgentConfig.from_dict(_agent_dict(**overrides))
     assert resolve_api_key(cfg) is None
 
 
@@ -353,17 +412,16 @@ def test_build_chat_model_forwards_api_key_when_set(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
     config = AgentConfig(
-        provider="anthropic",
-        model="claude-sonnet-5",
-        system_prompt="hi",
-        api_key="sk-abc",
+        provider="anthropic", model="claude-sonnet-5", system_prompt="hi"
     )
-    agent_module.build_chat_model(config)
+    agent_module.build_chat_model(config, secrets={"ANTHROPIC_API_KEY": "sk-abc"})
 
     assert captured["kwargs"]["api_key"] == "sk-abc"
 
 
-def test_build_chat_model_omits_api_key_when_unset(monkeypatch: pytest.MonkeyPatch):
+def test_build_chat_model_omits_api_key_only_for_an_unknown_provider_naming_none(
+    monkeypatch: pytest.MonkeyPatch,
+):
     captured: dict[str, Any] = {}
 
     def fake_init_chat_model(
@@ -374,12 +432,29 @@ def test_build_chat_model_omits_api_key_when_unset(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
-    config = AgentConfig(
-        provider="anthropic", model="claude-sonnet-5", system_prompt="hi"
-    )
+    config = AgentConfig(provider="ollama", model="llama3", system_prompt="hi")
     agent_module.build_chat_model(config)
 
     assert "api_key" not in captured["kwargs"]
+
+
+def test_build_chat_model_names_the_extra_of_a_provider_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.startswith("langchain_mistralai"):
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    monkeypatch.delitem(__import__("sys").modules, "langchain_mistralai", raising=False)
+    config = AgentConfig(provider="mistral", model="m", system_prompt="hi")
+    with pytest.raises(ImportError, match=r"wica\[mistral\]"):
+        agent_module.build_chat_model(config, secrets={"MISTRAL_API_KEY": "k"})
 
 
 def test_resolve_system_prompt_reads_file_at_build(tmp_path: Path):
@@ -400,7 +475,7 @@ def test_build_chat_model_raises_missing_env_at_build(monkeypatch: pytest.Monkey
     config = AgentConfig.from_dict(
         _agent_dict(api_key_env="WICA_TEST_KEY_UNSET")
     )  # loads fine
-    with pytest.raises(MissingEnvError):
+    with pytest.raises(MissingSecretError):
         agent_module.build_chat_model(config)
 
 
@@ -425,14 +500,15 @@ def test_from_json_then_wica_init_composes(
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
     config_path = tmp_path / "agent.config.json"
-    config_path.write_text(json.dumps(_wica_dict(api_key="sk-abc")))
+    config_path.write_text(json.dumps(_wica_dict(api_key_env="MY_KEY")))
 
     wica_config = WicaConfig.from_json_file(config_path)
     loop = (
         asyncio.new_event_loop()
     )  # injected + owned here, never started (no model call needed)
     try:
-        Wica.init(wica_config, loop=loop)  # builds the model (monkeypatched)
+        # builds the model (monkeypatched), the key held in code
+        Wica.init(wica_config, loop=loop, secrets={"MY_KEY": "sk-abc"})
         assert captured["model"] == "claude-sonnet-5"
     finally:
         loop.close()
@@ -630,10 +706,8 @@ def test_build_chat_model_openai_routes_through_init_chat_model(
 
     monkeypatch.setattr(agent_module, "init_chat_model", fake_init_chat_model)
 
-    config = AgentConfig(
-        provider="openai", model="gpt-4o", system_prompt="hi", api_key="sk-x"
-    )
-    agent_module.build_chat_model(config)
+    config = AgentConfig(provider="openai", model="gpt-4o", system_prompt="hi")
+    agent_module.build_chat_model(config, secrets={"OPENAI_API_KEY": "sk-x"})
 
     assert captured["model"] == "gpt-4o"
     assert captured["provider"] == "openai"
@@ -674,10 +748,11 @@ def test_build_chat_model_gemini_is_a_pass_through():
         provider="gemini",
         model="gemini-3.8-flash",
         system_prompt="hi",
-        api_key="test-key",
         model_kwargs={"thinking_level": "low"},
     )
-    model = agent_module.build_chat_model(config)
+    model = agent_module.build_chat_model(
+        config, secrets={"GEMINI_API_KEY": "test-key"}
+    )
 
     assert isinstance(model, ChatGoogleGenerativeAI)
     assert model.model.endswith("gemini-3.8-flash")
@@ -697,10 +772,11 @@ def test_build_chat_model_mistral_is_a_pass_through():
         provider="mistral",
         model="mistral-small-latest",
         system_prompt="hi",
-        api_key="test-key",
         model_kwargs={"temperature": 0.2},
     )
-    model = agent_module.build_chat_model(config)
+    model = agent_module.build_chat_model(
+        config, secrets={"MISTRAL_API_KEY": "test-key"}
+    )
 
     assert isinstance(model, ChatMistralAI)
     assert model.model == "mistral-small-latest"
@@ -742,11 +818,10 @@ def test_build_chat_model_huggingface_hub_branch(monkeypatch: pytest.MonkeyPatch
         provider="huggingface-hub",
         model="meta-llama/Llama-3.3-70B-Instruct",
         system_prompt="hi",
-        api_key="hf-token",
         hf_provider="fireworks-ai",
         model_kwargs={"temperature": 0.3},
     )
-    model = agent_module.build_chat_model(config)
+    model = agent_module.build_chat_model(config, secrets={"HF_TOKEN": "hf-token"})
 
     endpoint_kwargs = captured["endpoint"]
     assert endpoint_kwargs["repo_id"] == "meta-llama/Llama-3.3-70B-Instruct"
@@ -760,9 +835,11 @@ def test_build_chat_model_huggingface_hub_branch(monkeypatch: pytest.MonkeyPatch
     assert isinstance(captured["llm"], FakeEndpoint)
 
 
-def test_build_chat_model_huggingface_hub_omits_token_when_no_api_key(
+def test_build_chat_model_huggingface_hub_passes_the_token_from_its_default_variable(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """The Hub's key is always passed explicitly, read from HF_TOKEN by default: the package is
+    never left to find a token of its own. See specs/config.md ("API key")."""
     import langchain_huggingface
 
     captured: dict[str, Any] = {}
@@ -777,16 +854,18 @@ def test_build_chat_model_huggingface_hub_omits_token_when_no_api_key(
 
     monkeypatch.setattr(langchain_huggingface, "HuggingFaceEndpoint", FakeEndpoint)
     monkeypatch.setattr(langchain_huggingface, "ChatHuggingFace", FakeChat)
+    monkeypatch.setenv("HF_TOKEN", "hf-from-env")
 
     config = AgentConfig(
         provider="huggingface-hub", model="meta-llama/x", system_prompt="hi"
     )
     agent_module.build_chat_model(config)
 
-    # No key given: don't pass the token kwarg at all, so HuggingFaceEndpoint reads the standard
-    # env var (mirrors how the init_chat_model providers behave when api_key is unset).
-    assert "huggingfacehub_api_token" not in captured["endpoint"]
+    assert captured["endpoint"]["huggingfacehub_api_token"] == "hf-from-env"
     assert captured["endpoint"]["provider"] == "auto"
+    monkeypatch.delenv("HF_TOKEN")
+    with pytest.raises(MissingSecretError, match="HF_TOKEN"):
+        agent_module.build_chat_model(config)
 
 
 def _hub_request_params(model_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -798,10 +877,10 @@ def _hub_request_params(model_kwargs: dict[str, Any]) -> dict[str, Any]:
             provider="huggingface-hub",
             model="openai/gpt-oss-120b",
             hf_provider="cerebras",
-            api_key="hf_test",
             system_prompt="hi",
             model_kwargs=model_kwargs,
-        )
+        ),
+        secrets={"HF_TOKEN": "hf_test"},
     )
     assert isinstance(model, ChatHuggingFace)
     return model._default_params  # pyright: ignore[reportPrivateUsage]
@@ -832,15 +911,26 @@ def test_direct_construction_with_no_prompt_raises():
         AgentConfig(provider="fake", model="m")
 
 
-def test_direct_construction_with_both_key_fields_raises():
-    with pytest.raises(ConfigError):
-        AgentConfig(
-            provider="fake",
-            model="m",
-            system_prompt="a",
-            api_key="k",
-            api_key_env="E",
-        )
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"model": ""},
+        {"history_reactions": 0},
+        {"model_timeout": -1.0},
+        {"max_retries": True},
+        {"hf_provider": ""},
+        {"api_key_env": ""},
+    ],
+)
+def test_direct_construction_validates_like_the_loader(overrides: dict[str, Any]):
+    """One validation over the declared fields: what the loader refuses, the constructor
+    refuses, in the same words. See specs/setup.md ("Fields are declared once")."""
+    data = _agent_dict(**overrides)
+    with pytest.raises(ConfigError) as loaded:
+        AgentConfig.from_dict(data)
+    with pytest.raises(ConfigError) as direct:
+        AgentConfig(**data)
+    assert str(direct.value) == str(loaded.value)
 
 
 def test_configs_are_frozen():

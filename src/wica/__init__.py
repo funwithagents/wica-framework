@@ -1,11 +1,12 @@
 import logging
+import warnings
 
 from wica.agent import Agent, CommandExecution, CommandIssued
 from wica.command import Command
 from wica.config import (
     AgentConfig,
     ConfigError,
-    MissingEnvError,
+    MissingSecretError,
     WicaConfig,
 )
 from wica.content import Content, ContentPart, ImagePart, TextPart
@@ -33,7 +34,7 @@ __all__ = [
     "ContentPart",
     "Event",
     "ImagePart",
-    "MissingEnvError",
+    "MissingSecretError",
     "OutputStream",
     "ReactionTrace",
     "TextPart",
@@ -46,3 +47,16 @@ __all__ = [
     "WorldEntryConfig",
     "WorldEntryVersion",
 ]
+
+
+def __getattr__(name: str) -> type[MissingSecretError]:
+    # `MissingEnvError` is the deprecated name of `MissingSecretError`, kept one release (the same
+    # class). See specs/config.md ("API key").
+    if name == "MissingEnvError":
+        warnings.warn(
+            "wica.MissingEnvError is deprecated: use MissingSecretError",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return MissingSecretError
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -26,7 +26,7 @@ Putting a scripted fake **behind a provider value** fixes this at the framework 
 ### Selection & construction
 
 - [build_chat_model](../src/wica/agent.py) recognizes `provider: "fake"` and constructs the fake **directly** — the same pattern as the existing `huggingface-hub` branch — *before* the `init_chat_model` fallthrough. No integration package/extra, no network import.
-- **No API key required.** `api_key`/`api_key_env` may be omitted; config loading already resolves to `api_key: None` when neither is present (see [config.md](config.md), "API key"), so config parsing needs no change. Any key that *is* resolved is simply ignored.
+- **No API key required.** The fake reads no key: `resolve_api_key` is not called, and an `api_key_env` is accepted and ignored (see [config.md](config.md), "API key").
 - `model` is a free-text label (e.g. `"scripted"`), never used to reach a backend.
 - The fake class lives in a small **public** module, `src/wica/fake_model.py` (imported as `from wica.fake_model import FakeChatModel`), so a flow test can also construct it directly (bypassing config) when convenient — the same construction seam `Agent(model=…)` already supports.
 

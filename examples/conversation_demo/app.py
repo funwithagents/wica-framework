@@ -4,14 +4,12 @@ Run with:
 
     uv run --group demo python -m examples.conversation_demo.app
 
-Configuration comes from agent.config.json (next to this file), which reads its API key from the
-WICA-namespaced WICA_ANTHROPIC_API_KEY env var (see agent.config.json's "api_key_env") — set it
-before running:
+Configuration comes from examples/configs/anthropic.json, which reads its API key from the
+provider's usual variable, ANTHROPIC_API_KEY — set it before running:
 
-    export WICA_ANTHROPIC_API_KEY=sk-...
+    export ANTHROPIC_API_KEY=sk-...
 
-To use a different provider/model, or a literal key, edit agent.config.json directly (see
-specs/config.md) — e.g. copy it to a `*.local.json` file (git-ignored) with a literal "api_key".
+The other files of examples/configs/ are the same demo on other providers (see specs/config.md).
 
 Logging is the application's concern, not the framework's: this demo configures the wica.* loggers
 below (raise the level to DEBUG to see the full World+Agent lifecycle trace — registrations, every
@@ -61,7 +59,7 @@ from wica import (
     World,
     WorldEntry,
 )
-from wica.config import MissingEnvError, WicaConfig
+from wica.config import MissingSecretError, WicaConfig
 from wica.contrib.gradio import EntryDisplay
 
 from examples.conversation_demo.speaking import SpeakingSlot
@@ -74,7 +72,7 @@ from examples.conversation_demo.speaking import SpeakingSlot
 
 # --- Configuration -------------------------------------------------------------------
 
-CONFIG_PATH = Path(__file__).parent / "agent.config.json"
+CONFIG_PATH = Path(__file__).parent.parent / "configs" / "anthropic.json"
 
 _demo_logger = logging.getLogger(__name__)
 
@@ -261,14 +259,14 @@ class Robot:
 def build_system(config: WicaConfig) -> tuple[Wica | None, World, str | None]:
     """Step 1: build the Wica through the single entry point (Wica.init) and register the demo's
     World entries. Returns `(wica, world, config_error)`. Falls back to explore-only if the config's
-    api_key_env isn't set — `wica` is None, `world` is a World-only system on its own loop, and
+    key variable holds no key — `wica` is None, `world` is a World-only system on its own loop, and
     `config_error` says what to set — so the app still opens and is explorable without credentials.
 
     The api key resolves at Agent build inside Wica.init, so that's what we guard: an unset
-    api_key_env raises MissingEnvError there (see specs/config.md, specs/wica.md)."""
+    key raises MissingSecretError there (see specs/config.md, specs/wica.md)."""
     try:
         wica = Wica.init(config)
-    except MissingEnvError as exc:
+    except MissingSecretError as exc:
         # Explore-only: a World-only system (no Agent) on its own loop, so the panel and sensor
         # inputs still work while nothing reasons over them.
         explore_loop = asyncio.new_event_loop()
@@ -276,7 +274,7 @@ def build_system(config: WicaConfig) -> tuple[Wica | None, World, str | None]:
         world = World(explore_loop)
         world.start()
         register_world(world)
-        return None, world, f"environment variable {exc.env_var!r} is not set"
+        return None, world, f"environment variable {exc.variable!r} is not set"
     register_world(wica.world)
     return wica, wica.world, None
 

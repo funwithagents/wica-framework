@@ -1,0 +1,7 @@
+{
+  "agent": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "system_prompt_file": "../conversation_demo/prompts/wica.md"
+  }
+}

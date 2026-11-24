@@ -1,0 +1,11 @@
+{
+  "agent": {
+    "provider": "gemini",
+    "model": "gemini-3.8-flash",
+    "context_window": 1048576,
+    "system_prompt_file": "../conversation_demo/prompts/wica.md",
+    "model_kwargs": {
+      "thinking_level": "low"
+    }
+  }
+}

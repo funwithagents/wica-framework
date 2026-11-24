@@ -28,7 +28,6 @@ config = WicaConfig(
     agent=AgentConfig(
         provider="anthropic",
         model="claude-haiku-4-5",
-        api_key_env="WICA_ANTHROPIC_API_KEY",
         system_prompt="You are a friendly social robot.",
     )
 )

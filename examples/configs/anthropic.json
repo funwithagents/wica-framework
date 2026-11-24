@@ -1,0 +1,7 @@
+{
+  "agent": {
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5",
+    "system_prompt_file": "../conversation_demo/prompts/wica.md"
+  }
+}

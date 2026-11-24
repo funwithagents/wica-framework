@@ -23,6 +23,6 @@ analysis/
 # Claude Code personal settings (not shared)
 .claude/settings.local.json
 
-# WICA config files with a literal api_key (see specs/config.md "API key: literal or env
-# reference") — a local override you create yourself; committed configs use api_key_env instead.
+# Local config overrides you create yourself (a config never holds a key: specs/config.md,
+# "API key: never in the config").
 **/*.local.json

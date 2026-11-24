@@ -787,10 +787,12 @@ def test_a_compatible_server_is_reached_at_its_base_url_with_a_placeholder_key(
     assert authorization.startswith("Bearer ") and authorization != "Bearer "
 
 
-def test_a_compatible_server_gets_the_configured_key(wica_factory):
+def test_a_compatible_server_gets_the_key_its_config_names(wica_factory):
     server = ChatCompletionsServer("Hi.")
     wica = wica_factory(
-        compatible_config(server, api_key="local-secret"), coalesce_window=0
+        compatible_config(server, api_key_env="LOCAL_SERVER_KEY"),
+        coalesce_window=0,
+        secrets={"LOCAL_SERVER_KEY": "local-secret"},
     )
 
     run_one_reaction(wica)

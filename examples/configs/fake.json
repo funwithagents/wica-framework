@@ -1,0 +1,12 @@
+{
+  "agent": {
+    "provider": "fake",
+    "model": "scripted",
+    "system_prompt_file": "../conversation_demo/prompts/wica.md",
+    "model_kwargs": {
+      "default": {
+        "text": "<say>Hello! I am the scripted fake: every answer of mine is this one.</say>"
+      }
+    }
+  }
+}

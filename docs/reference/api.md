@@ -19,7 +19,7 @@ From `wica`:
 | `Event` | The pub/sub primitive the Events are: `subscribe(handler)`, `unsubscribe(handler)` |
 | `WicaConfig`, `AgentConfig` | The configuration ([configuration.md](configuration.md)) |
 | `ReactionTrace`, `TriggerTrace`, `CommandTrace`, `TokenUsage` | The instrumentation records ([../guides/latency-and-traces.md](../guides/latency-and-traces.md)) |
-| `ConfigError`, `MissingEnvError` | The errors a caller catches ([Errors](#errors)) |
+| `ConfigError`, `MissingSecretError` | The errors a caller catches ([Errors](#errors)) |
 | `Agent` | The reasoning loop, owned by `Wica` and reached as `wica.agent`; constructible directly for a programmatic model double ([../guides/testing.md](../guides/testing.md)) |
 
 Three subpackages are imported explicitly, never re-exported from `wica`: **`wica.contrib.gradio`** (the browser panels, behind the `gradio` extra: [../guides/gradio-panels.md](../guides/gradio-panels.md)), **`wica.testing`** (the Probe, the `TestRun` harness, the report, the scripted tester, scenario files and checks: [../guides/testing.md](../guides/testing.md)) and **`wica.benchmark`** (the matrix, `Target`, the runner, the summary, the CLI: [../guides/benchmarking.md](../guides/benchmarking.md)). `wica.fake_model.FakeChatModel` is the scripted model behind `provider: "fake"`, for the direct seam. `wica.instrumentation` holds the measures over the records (`reaction_latency`, `reactions_per_input`). `wica.guards` holds the response-guard types ([Response guards](#response-guards)); writing your own guard is experimental. `wica.text_output` holds the parser of the model's text; an application needs only `OutputStream` from it, which `wica` re-exports.
@@ -27,10 +27,10 @@ Three subpackages are imported explicitly, never re-exported from `wica`: **`wic
 ## Construction
 
 ```
-Wica.init(config: WicaConfig, *, coalesce_window: float = 0.2, loop: asyncio.AbstractEventLoop | None = None) -> Wica
+Wica.init(config: WicaConfig, *, coalesce_window: float = 0.2, loop: asyncio.AbstractEventLoop | None = None, secrets: Mapping[str, str] | None = None) -> Wica
 ```
 
-The one constructor. It builds a `World` and an `Agent` from the config and wires them. With no `loop`, the Wica creates one and runs it in a daemon thread from `start()`; with one, it adopts it and leaves running it to you. `coalesce_window` is the batch window for trigger bursts, in seconds ([../guides/world-and-inputs.md](../guides/world-and-inputs.md#bursts-are-coalesced)); `0` disables it. Resolution happens here: the key variable is read, the prompt file is read, the provider's package is imported, so `MissingEnvError`, `ConfigError` and `ImportError` surface at `init`, not at config creation. `init` takes no application callables: the output Command is wired after it.
+The one constructor. It builds a `World` and an `Agent` from the config and wires them. With no `loop`, the Wica creates one and runs it in a daemon thread from `start()`; with one, it adopts it and leaves running it to you. `coalesce_window` is the batch window for trigger bursts, in seconds ([../guides/world-and-inputs.md](../guides/world-and-inputs.md#bursts-are-coalesced)); `0` disables it. `secrets` maps variable names to keys your code holds: the variable the config names is looked up there first, then in the environment ([configuration.md](configuration.md#api-key)). Resolution happens here: the key variable is read, the prompt file is read, the provider's package is imported, so `MissingSecretError`, `ConfigError` and `ImportError` surface at `init`, not at config creation. `init` takes no application callables: the output Command is wired after it.
 
 ## The `Wica` surface
 
@@ -218,8 +218,8 @@ Each is an `Event[T]` you `.subscribe(handler)` on, multi-consumer, emitted on t
 | Error | Raised by | When |
 |---|---|---|
 | `ConfigError` | the loaders, `AgentConfig`, `Wica.init` | A missing, unknown or mistyped key, an invalid field combination; an unreadable prompt file; a `history_budget` with no known context window |
-| `MissingEnvError` | `Wica.init` | `api_key_env` names a variable that is unset (a `ConfigError` subclass) |
-| `ImportError` | `Wica.init` | The selected provider's extra is not installed |
+| `MissingSecretError` | `Wica.init` | No key under the variable the config reads (`api_key_env`, or the provider's default), in `secrets` or the environment (a `ConfigError` subclass; `.variable` names it). `MissingEnvError` is its deprecated former name |
+| `ImportError` | `Wica.init` | The selected provider's extra is not installed; the message names it |
 | `ValueError` | `register_command`, `set_output_command`, `remove_response_guard`, `add_response_guard`, `world.register`, `Command` | A duplicate or reserved Command name; an output Command whose name or signature does not fit [the contract](#the-output-command); an unknown or duplicate guard name; an invalid World key or an already registered one; a name or description override on a `BaseTool` |
 | `TypeError` | `world.update` | A value that is not of the entry's declared type (`None` is always allowed) |
 | `RuntimeError` | `world.update`, `start`, `stop`, `close` | `update()` while not running; `start()` after `close()`, or on an injected loop that is not running; `stop()`/`close()` called from the Wica's own loop thread |
