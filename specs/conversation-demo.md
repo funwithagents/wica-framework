@@ -239,9 +239,9 @@ uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--
 - **The persona lives in the folder.** At launch, when the app's folder has no `wica.md`, the
   bundled `examples/conversation_demo/prompts/wica.md` is copied there; it is never overwritten,
   so the user edits the robot's persona in the folder. The default config's relative `wica.md`
-  resolves against the folder: the session's `base_dir`, and the working directory, which the
-  app sets to the folder at launch so the setup checks (which look a relative path up against
-  the working directory) find it too ([setup.md](setup.md), Open questions).
+  resolves against the folder: the session builds with it as `base_dir`, and app-setup passes
+  the same folder to the setup checks (`base_dir`, [setup.md](setup.md)), so Check and Start look
+  at the same file. The app never changes its working directory.
 - **The page**: the demo's **Conversation** tab first, then the **Setup** panel, then the
   **Secrets** panel following the Setup panel's draft. It opens on the Conversation tab when the
   session starts at launch (`starts_at_launch`, whether it actually started or showed its

@@ -375,10 +375,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     _demo_logger.info("folder: %s", model.path)
     ensure_persona(model.path)
-    # A relative path in the config (the default's `wica.md`) is the folder's: the session resolves
-    # it against the folder (its `base_dir`), and the setup checks against the working directory,
-    # which is therefore the folder too (specs/setup.md, Open questions).
-    os.chdir(model.path)
+    # A relative path in the config (the default's `wica.md`) is the folder's: the session builds
+    # with the folder as `base_dir`, and app-setup passes the setup checks the same folder.
     starts = starts_at_launch(model, options.start)
     if starts:
         # With blockers (no key yet, at the first launch), they show on the Conversation tab.

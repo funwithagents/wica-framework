@@ -13,6 +13,7 @@ See specs/conversation-demo.md ("Reused from the Gradio contrib").
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -290,7 +291,7 @@ def test_with_no_key_the_default_config_says_so_instead_of_starting(
     conversation = Conversation(lambda config: _never())
     model = _model(tmp_path, conversation)
     app.ensure_persona(model.path)
-    monkeypatch.chdir(model.path)  # as main() does
+    monkeypatch.chdir(tmp_path)  # anywhere: the folder is the setup checks' base_dir
 
     reasons = conversation.start(model)
 
@@ -299,6 +300,7 @@ def test_with_no_key_the_default_config_says_so_instead_of_starting(
     assert not conversation.locked()
     assert "ANTHROPIC_API_KEY" in status_text(conversation)
     assert button_states(conversation) == (True, False)
+    assert not any("wica.md" in reason for reason in reasons)  # the persona is found
 
 
 def test_start_runs_the_saved_config_and_locks_it_until_stopped(tmp_path: Path):
@@ -399,15 +401,33 @@ def test_a_relative_prompt_file_is_read_from_the_app_s_folder(
     agent = dict(model.saved_config()["wica"]["agent"])
     agent["system_prompt_file"] = "wica.md"
     model.save({"wica": {"agent": agent}})
-    # The setup checks look a relative path up against the working directory (specs/setup.md,
-    # Open questions), which main() makes the folder: from elsewhere, they block it.
+    # Run from elsewhere: the setup checks and the session both read the folder's.
     monkeypatch.chdir(tmp_path)
-    assert any("wica.md" in reason for reason in conversation.start(model))
-    monkeypatch.chdir(model.path)
 
     assert conversation.start(model) == []
     conversation.stop()
     assert seen[0].agent.system_prompt_file == str((model.path / "wica.md").resolve())
+
+
+def test_launching_leaves_the_working_directory_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    launched: list[str] = []
+
+    class Page:
+        def launch(self, **kwargs: object) -> None:
+            launched.append(os.getcwd())
+
+    monkeypatch.setattr(app, "build_page", lambda *a, **k: Page())
+    monkeypatch.setattr(app.logging, "basicConfig", lambda **k: None)
+
+    app.main(["--folder", str(tmp_path / "demo"), "--no-start"])
+
+    assert len(launched) == 1 and os.path.samefile(launched[0], elsewhere)
+    assert (tmp_path / "demo" / "wica.md").is_file()
 
 
 @pytest.mark.parametrize(

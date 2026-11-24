@@ -15,7 +15,7 @@ Builds [specs/conversation-demo.md](../specs/conversation-demo.md) "The app: a f
 5. **Dependencies.** `app-setup[ui]` in the `demo` and `dev` groups; the source on app-setup's `autostart` branch until its autostart API was merged, then back on `main`.
 6. **Callers**: `tests-e2e/test_example_flow.py` and `benchmarks/bench.py` take the new `build_system` (a missing key or extra is a benchmark `Skip`).
 
-7. **After testing by the user**: the default config is the committed `default_config.json` (Anthropic, `claude-haiku-4-5`, the persona as `wica.md` in the folder, no key), the persona copied into the folder once (`ensure_persona`), the working directory set to the folder at launch; the page opens on Conversation when the session starts at launch; Start and Stop greyed by the session's status (`Conversation.status`: stopped, starting, running, stopping), with the last Start's reasons kept for the status line.
+7. **After testing by the user**: the default config is the committed `default_config.json` (Anthropic, `claude-haiku-4-5`, the persona as `wica.md` in the folder, no key), the persona copied into the folder once (`ensure_persona`), resolved against the folder by the session and the setup checks alike (`base_dir`: no change of working directory); the page opens on Conversation when the session starts at launch; Start and Stop greyed by the session's status (`Conversation.status`: stopped, starting, running, stopping), with the last Start's reasons kept for the status line.
 
 ## Tests
 
