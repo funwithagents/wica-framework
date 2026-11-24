@@ -128,7 +128,9 @@ def _key_variable(provider: Provider | None, agent: dict[str, Any]) -> str | Non
     return provider.key_env if provider is not None else None
 
 
-def check_setup(config: dict[str, Any]) -> list[dict[str, Any]]:
+def check_setup(
+    config: dict[str, Any], *, base_dir: str | None = None
+) -> list[dict[str, Any]]:
     provider, agent = _selected(config)
     found: list[dict[str, Any]] = []
     if provider is not None and provider.extra is not None:
@@ -163,9 +165,12 @@ def check_setup(config: dict[str, Any]) -> list[dict[str, Any]]:
         )
     prompt_file = agent.get("system_prompt_file")
     if isinstance(prompt_file, str) and prompt_file:
-        # The contract passes no directory: a relative path is looked up against the working
-        # directory, as `from_dict` without `base_dir` does (specs/setup.md, Open questions).
-        path = Path(prompt_file).expanduser().resolve()
+        # A relative path is the config's folder's (`base_dir`), located exactly as
+        # `WicaConfig.from_dict(..., base_dir=...)` does; None: the working directory.
+        path = Path(prompt_file)
+        if base_dir is not None and not path.is_absolute():
+            path = Path(base_dir) / path
+        path = path.resolve()
         exists = path.is_file()
         found.append(
             {
@@ -182,11 +187,15 @@ def check_setup(config: dict[str, Any]) -> list[dict[str, Any]]:
 def prepare(
     config: dict[str, Any],
     on_progress: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    base_dir: str | None = None,
 ) -> None:
     """Nothing to prepare: WICA downloads nothing."""
 
 
-def options(name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+def options(
+    name: str, config: dict[str, Any], *, base_dir: str | None = None
+) -> list[dict[str, Any]]:
     """No option list is offered."""
     return []
 
@@ -352,11 +361,13 @@ _PROBES: dict[str, Callable[[AgentConfig, str | None, float], str]] = {
 }
 
 
-def _run_probe(config: dict[str, Any], secrets: Mapping[str, str] | None) -> str:
+def _run_probe(
+    config: dict[str, Any], secrets: Mapping[str, str] | None, base_dir: str | None
+) -> str:
     problems = wica_problems(config)
     if problems:
         raise _ProbeFailure(problems[0][1])
-    agent = AgentConfig.from_dict(config["agent"])
+    agent = AgentConfig.from_dict(config["agent"], base_dir=base_dir)
     if agent.provider == FAKE_PROVIDER:
         return "The scripted fake needs nothing to run."
     probe_provider = _PROBES.get(agent.provider)
@@ -369,14 +380,18 @@ def _run_probe(config: dict[str, Any], secrets: Mapping[str, str] | None) -> str
 
 
 def probe(
-    config: dict[str, Any], *, secrets: Mapping[str, str] | None = None
+    config: dict[str, Any],
+    *,
+    base_dir: str | None = None,
+    secrets: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """One authenticated, free call to the provider: is the key accepted, is the model there?
-    Never a chat request. Never raises. `secrets` are keys held in code, by variable name, looked
-    up before the environment (as `Wica.init` does)."""
+    Never a chat request. Never raises. `base_dir` is the folder a relative path of the config
+    is relative to, as for `check_setup`. `secrets` are keys held in code, by variable name,
+    looked up before the environment (as `Wica.init` does)."""
     started = time.monotonic()
     try:
-        message, ok = _run_probe(config, secrets), True
+        message, ok = _run_probe(config, secrets, base_dir), True
     except Exception as exc:  # noqa: BLE001 - a probe reports, it never raises
         message, ok = str(exc) or type(exc).__name__, False
     return {

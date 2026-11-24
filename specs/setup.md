@@ -28,13 +28,23 @@ These functions implement the **module contract** of the `module-setup` project 
 def config_schema() -> dict: ...
 def required_extras(config: dict) -> list[str]: ...
 def check_config(config: dict) -> list[dict]: ...
-def check_setup(config: dict) -> list[dict]: ...
-def prepare(config: dict, on_progress: Callable[[dict], None] | None = None) -> None: ...
-def options(name: str, config: dict) -> list[dict]: ...
-def probe(config: dict, *, secrets: Mapping[str, str] | None = None) -> dict: ...
+def check_setup(config: dict, *, base_dir: str | None = None) -> list[dict]: ...
+def prepare(
+    config: dict,
+    on_progress: Callable[[dict], None] | None = None,
+    *,
+    base_dir: str | None = None,
+) -> None: ...
+def options(name: str, config: dict, *, base_dir: str | None = None) -> list[dict]: ...
+def probe(
+    config: dict,
+    *,
+    base_dir: str | None = None,
+    secrets: Mapping[str, str] | None = None,
+) -> dict: ...
 ```
 
-They take and return JSON-compatible data only, are synchronous, and import nothing outside WICA at module level. `config_schema`, `required_extras` and `check_config` read nothing but the config; `check_setup` also tries the provider's imports, reads the environment and looks for the prompt file. Only `probe` uses the network. `wica.setup` is reached as a submodule and not re-exported from `wica`.
+**`base_dir`** is the folder the config's relative paths are relative to (an app passes its own folder, where its config lives, and builds the Agent with the same folder as `WicaConfig.from_dict(..., base_dir=...)`'s); `None` means the working directory, as for the loader. The four functions that may look at the machine take it, as the contract requires; only `check_setup` and `probe` have a path to resolve (`system_prompt_file`), `prepare` and `options` accept it and ignore it. They take and return JSON-compatible data only, are synchronous, and import nothing outside WICA at module level. `config_schema`, `required_extras` and `check_config` read nothing but the config; `check_setup` also tries the provider's imports, reads the environment and looks for the prompt file. Only `probe` uses the network. `wica.setup` is reached as a submodule and not re-exported from `wica`.
 
 | Function | Returns |
 |---|---|
@@ -96,7 +106,7 @@ Asked only about a config `check_config` accepts. Its items, in order:
 
 1. **The extra** — `extra:wica[<extra>]`, titled `"<Title> extra"`, never preparable: `ready` ("Installed.") when the provider's packages import (the imports are tried, not looked up: a broken install shows), else `missing` with the install hint `build_chat_model` raises (one home: `import_provider`). `fake` and an unknown provider have none.
 2. **The key** — `key:<VARIABLE>`, for the variable `api_key_env` names or, absent, the provider's default; `ready` when set and non-empty in the environment, else `missing` with a sentence naming the variable. None for `fake`, nor for a provider without a default when no variable is named.
-3. **The prompt file** — `file:system_prompt_file`, when the config names one: `ready` when the file exists, else `missing`, never preparable; the detail gives the path looked at. A relative path is looked up against the process's working directory, as `from_dict` without `base_dir` does: the contract passes no directory (see Open questions). It is reported whether or not the extra imports: finding it needs no provider package.
+3. **The prompt file** — `file:system_prompt_file`, when the config names one: `ready` when the file exists, else `missing`, never preparable; the detail gives the path looked at. A relative path is located against `base_dir` exactly as `WicaConfig.from_dict(..., base_dir=...)` locates it (`None`: the working directory), so Check and the Agent's build look at the same file. It is reported whether or not the extra imports: finding it needs no provider package.
 
 Local and fast: no network, nothing built.
 
@@ -132,11 +142,10 @@ The **light call** rule: one authenticated, free request per provider, checking 
 - `check_config` reports each problem at its path (non-object, `api_key`, unknown key, missing provider or model, a bad field, both or neither prompt, `base_url` with the wrong provider), several at once; and for each, the loader raises the first of them, word for word.
 - `config_schema`, `check_config` and `required_extras` import no provider package: run in a subprocess with every provider import blocked, where `check_setup` reports each provider's extra `missing` with the install hint.
 - `required_extras`: the extra per provider, `[]` for `fake`, an unknown provider, `{}`, a non-object; every extra named is declared in `pyproject.toml`.
-- `check_setup`: the installed extras `ready`; the key `missing` until set (empty counts as unset), under the default or the named variable; no key item for `fake` or a compatible server naming none; the prompt file `ready`/`missing`.
+- `check_setup`: the installed extras `ready`; the key `missing` until set (empty counts as unset), under the default or the named variable; no key item for `fake` or a compatible server naming none; the prompt file `ready`/`missing`; a relative prompt file found against `base_dir` and not the working directory (the loader locating it the same way), the example configs' persona found against their own folder; `prepare`, `options` and `probe` take `base_dir`.
 - `probe`: `fake` is ok; a missing key, a refused config and a missing extra are `ok: false` with their messages and raise nothing; the hosted probes over a stubbed SDK client: ok when the model is found, `ok: false` naming the model or the refused key otherwise, and nothing but the listing call is made.
 
 ## Open questions
 
-1. **Relative paths in `check_setup`.** The contract passes no directory, so a relative `system_prompt_file` is looked up against the working directory, while an app builds the Agent with its folder as `base_dir`. An app avoids the mismatch with an absolute path (the conversation demo's default does); the contract may later carry the app's folder.
-2. **A model list (`options("models")`)** is deferred: it would cost one request per refresh and the lists are long.
-3. **`fields.py` is a copy** of the helper the family's libraries share, until a core library holds it.
+1. **A model list (`options("models")`)** is deferred: it would cost one request per refresh and the lists are long.
+2. **`fields.py` is a copy** of the helper the family's libraries share, until a core library holds it.

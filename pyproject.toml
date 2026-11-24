@@ -76,7 +76,9 @@ demo = [
 ]
 
 [tool.uv.sources]
-module-setup = { git = "https://github.com/funwithagents/module-setup", rev = "main" }
+# On module-setup's `base-dir` branch until its PR #7 (the contract's `base_dir`) is merged: go back
+# to `rev = "main"` then.
+module-setup = { git = "https://github.com/funwithagents/module-setup", rev = "base-dir" }
 
 [tool.ruff]
 target-version = "py312"

@@ -336,6 +336,47 @@ def test_check_setup_reports_the_extra_the_key_and_the_prompt_file(
     assert [i["status"] for i in setup.check_setup(config)] == ["ready"] * 3
 
 
+def test_a_relative_prompt_file_is_found_against_base_dir_not_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "app"
+    folder.mkdir()
+    (folder / "persona.md").write_text("You are terse.", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    config = _block(provider="fake", system_prompt=..., system_prompt_file="persona.md")
+
+    found = setup.check_setup(config, base_dir=str(folder))
+    assert [(i["id"], i["status"]) for i in found] == [
+        ("file:system_prompt_file", "ready")
+    ]
+    assert str(folder / "persona.md") in found[0]["detail"]
+    # The loader locates it the same way.
+    loaded = WicaConfig.from_dict(config, base_dir=folder)
+    assert loaded.agent.system_prompt_file == str((folder / "persona.md").resolve())
+    # Without a folder, the working directory: not there.
+    assert setup.check_setup(config)[0]["status"] == "missing"
+    monkeypatch.chdir(folder)
+    assert setup.check_setup(config)[0]["status"] == "ready"
+
+
+def test_the_example_configs_find_their_persona_against_their_own_folder() -> None:
+    folder = str(_ROOT / "examples" / "configs")
+    for name, config in _examples().items():
+        items = setup.check_setup(config, base_dir=folder)
+        prompt = [i for i in items if i["id"] == "file:system_prompt_file"]
+        assert [i["status"] for i in prompt] == ["ready"], name
+
+
+def test_the_machine_functions_take_base_dir() -> None:
+    config = _examples()["fake.json"]
+    folder = str(_ROOT / "examples" / "configs")
+    setup.prepare(config, None, base_dir=folder)
+    assert setup.options("models", config, base_dir=folder) == []
+    assert setup.probe(config, base_dir=folder)["ok"] is True
+
+
 def test_check_setup_reads_the_variable_the_config_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
