@@ -12,7 +12,7 @@ Builds [specs/conversation-demo.md](../specs/conversation-demo.md) "The app: a f
 2. **The session** (`session.py`, Gradio-free): `Conversation` with `start(model)` (blockers first; then `open_session` from `used_config(saved)["wica"]`, the folder as `base_dir`; a failed build said) and `stop()` (closes the Wica); `locked()` from Start until the close finished.
 3. **The composition** of one session, `open_session`: `build_system` (no explore-only fallback any more), the presenters, `wire`, `start`, and the Wica closed again on a later failure.
 4. **The page** (`app_ui.py`): the Conversation tab (status line, Start, Stop, the reading guide, the surfaces in a `gr.render` keyed on the session's version), then `setup_panel` and `secrets_panel`; it opens on Setup.
-5. **Dependencies.** `app-setup[ui]` in the `demo` and `dev` groups; the source on app-setup's `autostart` branch until its autostart API is merged.
+5. **Dependencies.** `app-setup[ui]` in the `demo` and `dev` groups; the source on app-setup's `autostart` branch until its autostart API was merged, then back on `main`.
 6. **Callers**: `tests-e2e/test_example_flow.py` and `benchmarks/bench.py` take the new `build_system` (a missing key or extra is a benchmark `Skip`).
 
 ## Tests
