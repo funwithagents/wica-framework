@@ -249,8 +249,8 @@ uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--
 - **A session with a lock.** A session is one `Wica` built from the saved config and running
   (`examples/conversation_demo/session.py`, `Conversation`). **Start** checks the saved config
   (`AppModel.blockers`: its problems, then every required item the machine is missing — the
-  extra, the key, the prompt file; WICA has no other kind) and lists them on the page instead of
-  starting; otherwise it builds the session from `model.used_config(saved)["wica"]` with the
+  extra, the key, the prompt file; WICA has no other kind) and does not start while there are
+  any (the status line shows them); otherwise it builds the session from `model.used_config(saved)["wica"]` with the
   folder as `base_dir`. A build that still fails is said on the page and leaves nothing running.
   **Stop** stops and closes the Wica. The config is
   locked from Start until the close has finished (`AppModel(..., locked=conversation.locked)`), so
@@ -266,12 +266,22 @@ uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--
 
 ## The Conversation tab
 
-A status line, **Start** and **Stop**, the reading guide, and — while a session runs — the five
-surfaces above over that session.
+A status line, **Start** and **Stop** with the unsaved-changes notice next to them, the reading
+guide, and — while a session runs — the five surfaces above over that session.
 
 - **The status line** says what the session is doing: running (with its provider and model),
-  starting, stopping, or stopped — with the reasons the last Start did not start (its blockers,
-  or the build's error) until a Start succeeds.
+  starting, stopping, or stopped. While stopped it lists what stands in the way **now**: the
+  last Start's build error, if it failed (not a blocker: kept until the next Start), then the
+  saved config's **current** blockers (`AppModel.blockers`), or says it is ready to start when
+  there are none. The blockers are not the last Start's: a key or a config fixed since shows at
+  once, with no Start. They are checked again when the page loads, when the Conversation tab is
+  selected, when the Setup panel saves or resets (`setup.saved.change`), when a key changes (the
+  secret store's `revision` differs from the one this browser tab last saw, compared on the 1 s
+  tick, as the Setup panel does), and when the session starts or stops; a tick with no such
+  change checks nothing.
+- **The unsaved-changes notice** (`unsaved_notice(model, setup.draft)`, app-setup's) says, while
+  the Setup tab's draft differs from the saved config, that Start uses the saved config; it
+  follows `setup.draft.change` and `setup.saved.change`.
 - **The buttons are greyed by that status**: Start can be pressed only while stopped, Stop only
   while running; both are greyed while starting or stopping, and greyed at once on a click,
   before the start or stop runs.
@@ -330,7 +340,9 @@ app's default and is written into an empty folder; the persona is copied into th
 and never overwritten; with no key, the default config's Start lists the missing key and starts
 nothing; Start runs the saved config and locks it until Stop, which closes the Wica; the buttons'
 state per status (stopped, starting, running, stopping) and the status line's; a failed build is
-said and leaves the config unlocked; a relative prompt file is read from the app's folder; the
+said, leaves the config unlocked, and stays said while the blockers change, until the next Start;
+a key saved in the store clears the key's blocker with no Start; a saved config naming a set
+variable clears it when forced (the save); a tick with no change checks nothing; a relative prompt file is read from the app's folder; the
 command line's `--start` / `--no-start`. `tests-e2e/test_example_flow.py`: a session's wiring
 over the scripted fake, end to end.
 

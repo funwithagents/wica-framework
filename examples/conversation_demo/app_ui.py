@@ -3,7 +3,9 @@
 `build_page(model, conversation, open_on=...)` is the page: the demo's **Conversation** tab first, then
 app-setup's **Setup** and **Secrets** panels; it opens on Conversation when the session starts
 at launch, else on Setup. The Conversation tab has Start
-and Stop over the `Conversation` (session.py) and, while a session runs, its five surfaces
+and Stop over the `Conversation` (session.py), a status line with the saved config's current
+blockers (checked again when the tab is selected, the config saved or a key changed), a notice
+while the Setup tab has unsaved changes, and, while a session runs, its five surfaces
 (Conversation / Speaking / World state / Reaction history / Sensor inputs). Three of them are the
 package's reusable components (`wica.contrib.gradio`: `conversation_panel`, `world_state_panel`,
 `reaction_panel` — see specs/gradio-contrib.md) over the session's presenters; the Speaking panel
@@ -15,11 +17,13 @@ specs/conversation-demo.md, "The page").
 from __future__ import annotations
 
 import html
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import gradio as gr
 from app_setup.app import AppModel
-from app_setup.ui import secrets_panel, setup_panel
+from app_setup.ui import secrets_panel, setup_panel, unsaved_notice
 
 from examples.conversation_demo.session import Conversation, Running
 from examples.conversation_demo.speaking import Speaking
@@ -89,9 +93,10 @@ _HOW_TO_READ = (
 )
 
 
-def status_text(conversation: Conversation) -> str:
+def status_text(conversation: Conversation, blockers: Sequence[str] = ()) -> str:
     """The line above Start and Stop: running (which provider and model), starting, stopping, or
-    stopped, with why the last Start did not start."""
+    stopped, with the last Start's build error and the saved config's current *blockers*, or
+    ready to start when there are none."""
     status = conversation.status
     running = conversation.current
     if status == "running" and running is not None:
@@ -104,13 +109,47 @@ def status_text(conversation: Conversation) -> str:
         return "⏳ **Starting…**"
     if status == "stopping":
         return "⏳ **Stopping…**"
-    if conversation.reasons:
-        listed = "\n".join(f"- {reason}" for reason in conversation.reasons)
+    reasons = [*([conversation.error] if conversation.error else []), *blockers]
+    if reasons:
+        listed = "\n".join(f"- {reason}" for reason in reasons)
         return (
             "⚠️ **Not started.** Fix this in the Setup and Secrets tabs, then Start:\n\n"
             + listed
         )
-    return "⚪ **Stopped.** Start runs the agent from the saved config (the Setup tab)."
+    return (
+        "⚪ **Stopped — ready to start.** Start runs the agent from the saved config (the "
+        "Setup tab)."
+    )
+
+
+# What the status line's blockers were computed against: the store's key revision, the
+# session's version and status. A change of any recomputes them; nothing else does.
+Watched = tuple[int, int, str]
+
+
+def current_blockers(model: AppModel, conversation: Conversation) -> list[str]:
+    """Why the saved config cannot start now (`AppModel.blockers`); none unless stopped."""
+    if conversation.status != "stopped":
+        return []
+    return model.blockers(model.saved_config())
+
+
+def follow_blockers(
+    model: AppModel,
+    conversation: Conversation,
+    blockers: list[str],
+    seen: Watched | None,
+    *,
+    force: bool = False,
+) -> tuple[list[str], Watched]:
+    """The status line's blockers, and what they were computed against. Recomputed when
+    *force*d (the tab selected, the config saved or reset), or when a key changed in the store
+    (`SecretStore.revision`) or the session started or stopped since *seen*; otherwise
+    *blockers* are kept, so the 1 s tick costs no check."""
+    now: Watched = (model.secrets.revision, conversation.version, conversation.status)
+    if force or now != seen:
+        return current_blockers(model, conversation), now
+    return blockers, now
 
 
 def button_states(conversation: Conversation) -> tuple[bool, bool]:
@@ -183,36 +222,59 @@ def _session_panels(running: Running) -> None:
     speaking_timer.tick(lambda: _speaking_html(speaking.read()), outputs=speaking_view)
 
 
-def _conversation_tab(model: AppModel, conversation: Conversation) -> None:
-    """Start, Stop, the status line, and the running session's surfaces."""
+@dataclass(frozen=True)
+class _SessionView:
+    """The Conversation tab's components the page wires to the Setup panel."""
+
+    notice: gr.Markdown
+    outputs: list[Any]
+    recheck: Callable[[], tuple[Any, ...]]
+
+
+def _conversation_tab(model: AppModel, conversation: Conversation) -> _SessionView:
+    """Start, Stop, the status line, the unsaved-changes notice, and the running session's
+    surfaces."""
     can_start, can_stop = button_states(conversation)
     status = gr.Markdown(status_text(conversation))
     with gr.Row():
         start = gr.Button("Start", variant="primary", scale=0, interactive=can_start)
         stop = gr.Button("Stop", scale=0, interactive=can_stop)
+        # "The Setup tab has unsaved changes: Start uses the saved config.", or nothing.
+        notice = gr.Markdown()
     gr.Markdown(_HOW_TO_READ)
     # The session's version: a start or a stop from any browser tab (or at launch) redraws the
     # surfaces below.
     version = gr.State(conversation.version)
+    # This browser tab's blockers and what they were computed against (None: not yet).
+    blockers = gr.State([])
+    seen = gr.State(None)
 
-    def refresh() -> tuple[str, Any, Any, int]:
+    def view(found: list[str], watched: Watched) -> tuple[Any, ...]:
         can_start, can_stop = button_states(conversation)
         return (
-            status_text(conversation),
+            status_text(conversation, found),
             gr.update(interactive=can_start),
             gr.update(interactive=can_stop),
             conversation.version,
+            found,
+            watched,
         )
 
-    def on_start() -> tuple[str, Any, Any, int]:
+    def refresh(found: list[str], watched: Watched | None) -> tuple[Any, ...]:
+        return view(*follow_blockers(model, conversation, found, watched))
+
+    def recheck() -> tuple[Any, ...]:
+        return view(*follow_blockers(model, conversation, [], None, force=True))
+
+    def on_start() -> tuple[Any, ...]:
         conversation.start(model)
-        return refresh()
+        return recheck()
 
-    def on_stop() -> tuple[str, Any, Any, int]:
+    def on_stop() -> tuple[Any, ...]:
         conversation.stop()
-        return refresh()
+        return recheck()
 
-    outputs = [status, start, stop, version]
+    outputs = [status, start, stop, version, blockers, seen]
     # Greyed at once on a click, before the (possibly slow) start or stop runs.
     start.click(
         lambda: (gr.update(interactive=False), gr.update(interactive=False)),
@@ -222,8 +284,12 @@ def _conversation_tab(model: AppModel, conversation: Conversation) -> None:
         lambda: (gr.update(interactive=False), gr.update(interactive=False)),
         outputs=[start, stop],
     ).then(on_stop, outputs=outputs)
-    # Polled too, for a change made from another browser tab or at launch.
-    gr.Timer(1.0).tick(refresh, outputs=outputs, show_progress="hidden")
+    # On the page's load, then polled: a key saved, or a start or stop from another browser
+    # tab or at launch, recomputes the blockers; a tick with no change only redraws.
+    gr.on(None, recheck, outputs=outputs, show_progress="hidden")
+    gr.Timer(1.0).tick(
+        refresh, inputs=[blockers, seen], outputs=outputs, show_progress="hidden"
+    )
 
     @gr.render(inputs=version)
     def _surfaces(_version: int) -> None:
@@ -232,6 +298,8 @@ def _conversation_tab(model: AppModel, conversation: Conversation) -> None:
             gr.Markdown("*No session is running.*")
             return
         _session_panels(running)
+
+    return _SessionView(notice=notice, outputs=outputs, recheck=recheck)
 
 
 def build_page(
@@ -242,10 +310,26 @@ def build_page(
     with gr.Blocks(title=model.title) as page:
         gr.Markdown(f"# {model.title}")
         with gr.Tabs(selected=open_on):
-            with gr.Tab("Conversation", id="conversation"):
-                _conversation_tab(model, conversation)
+            with gr.Tab("Conversation", id="conversation") as session_tab:
+                session = _conversation_tab(model, conversation)
             with gr.Tab("Setup", id="setup"):
                 setup = setup_panel(model)
             with gr.Tab("Secrets", id="secrets"):
                 secrets_panel(model, setup.draft)
+        # The status line's blockers are the saved config's now: checked again when the tab is
+        # selected and when the Setup panel saves or resets (a key change is caught by the tick).
+        session_tab.select(
+            session.recheck, outputs=session.outputs, show_progress="hidden"
+        )
+        setup.saved.change(
+            session.recheck, outputs=session.outputs, show_progress="hidden"
+        )
+        # Start uses the saved config: said next to it while the Setup tab has unsaved edits.
+        for changed in (setup.draft.change, setup.saved.change):
+            changed(
+                lambda draft: unsaved_notice(model, draft),
+                inputs=[setup.draft],
+                outputs=[session.notice],
+                show_progress="hidden",
+            )
     return page

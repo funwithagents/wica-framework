@@ -2,8 +2,10 @@
 
 A `Conversation` holds at most one running session: the `Wica` built from the app's saved
 config, the presenters the page reads (transcript, reaction history, Speaking slot) and the
-robot wired to it. Start checks the saved config first (`AppModel.blockers`: its problems, what
-the machine is missing) and says why instead of starting; Stop closes the Wica. The config is
+robot wired to it. Start checks the saved config first (`AppModel.blockers`: its problems, the
+required items the machine is missing) and returns them instead of starting; Stop closes the
+Wica. A failed build's error is kept until the next Start; the blockers are not kept: the page
+recomputes them from the saved config, so a fixed key or config shows at once. The config is
 locked (`locked()`) from Start until the close has finished, so the Setup panel cannot save a
 config out from under a running session.
 
@@ -54,9 +56,9 @@ class Conversation:
         self._lock = threading.Lock()
         self._running: Running | None = None
         self._status: Status = "stopped"
-        # Why the last Start did not start (its blockers, or the build's error); cleared by a
-        # Start that runs, so every browser tab shows it until then.
-        self._reasons: list[str] = []
+        # The error the last Start's build raised; cleared by the next Start, so every browser
+        # tab shows it until then. (Blockers are not kept: they are the saved config's, now.)
+        self._error: str | None = None
         # Bumped at every start and stop, so the page redraws its panels for the new session.
         self._version = 0
 
@@ -69,9 +71,9 @@ class Conversation:
         return self._status
 
     @property
-    def reasons(self) -> list[str]:
-        """Why the last Start did not start; empty once one ran."""
-        return list(self._reasons)
+    def error(self) -> str | None:
+        """Why the last Start's build failed, in words; None once another Start was made."""
+        return self._error
 
     @property
     def version(self) -> int:
@@ -89,13 +91,13 @@ class Conversation:
             if self._status != "stopped":
                 return []
             saved = model.saved_config()
+            self._error = None
             blockers = model.blockers(saved)
             if blockers:
-                self._reasons = blockers
                 return blockers
             self._status = "starting"
         running: Running | None = None
-        reasons: list[str] = []
+        error: str | None = None
         try:
             config = WicaConfig.from_dict(
                 model.used_config(saved)["wica"], base_dir=model.path
@@ -103,17 +105,17 @@ class Conversation:
             running = self._open_session(config)
         except Exception as exc:  # noqa: BLE001 - said on the page
             _log.warning("the session could not start: %s", exc)
-            reasons = [f"The agent could not start: {exc}"]
+            error = f"The agent could not start: {exc}"
         finally:
             with self._lock:
-                self._reasons = reasons
+                self._error = error
                 if running is not None:
                     self._running = running
                     self._status = "running"
                     self._version += 1
                 else:
                     self._status = "stopped"
-        return reasons
+        return [error] if error is not None else []
 
     def stop(self) -> None:
         """Stop the running session and close its Wica; nothing when none runs."""

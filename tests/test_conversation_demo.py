@@ -227,7 +227,11 @@ import json  # noqa: E402
 from app_setup.app import AppModel  # noqa: E402
 from app_setup.folder import ConfigFolder  # noqa: E402
 
-from examples.conversation_demo.app_ui import button_states, status_text  # noqa: E402
+from examples.conversation_demo.app_ui import (  # noqa: E402
+    button_states,
+    follow_blockers,
+    status_text,
+)
 from examples.conversation_demo.session import Conversation, Running  # noqa: E402
 from wica import setup as wica_setup  # noqa: E402
 from wica.config import WicaConfig  # noqa: E402
@@ -296,9 +300,9 @@ def test_with_no_key_the_default_config_says_so_instead_of_starting(
     reasons = conversation.start(model)
 
     assert reasons and all("ANTHROPIC_API_KEY" in reason for reason in reasons)
-    assert conversation.reasons == reasons and conversation.status == "stopped"
+    assert conversation.error is None and conversation.status == "stopped"
     assert not conversation.locked()
-    assert "ANTHROPIC_API_KEY" in status_text(conversation)
+    assert "ANTHROPIC_API_KEY" in status_text(conversation, reasons)
     assert button_states(conversation) == (True, False)
     assert not any("wica.md" in reason for reason in reasons)  # the persona is found
 
@@ -383,6 +387,73 @@ def test_a_failed_build_is_said_and_leaves_the_config_unlocked(tmp_path: Path):
     ]
     assert conversation.current is None and not conversation.locked()
     assert "unplugged" in status_text(conversation)
+    # Kept while the blockers come and go (it is not one); the next Start clears it.
+    blockers, _ = follow_blockers(model, conversation, [], None)
+    assert blockers == [] and "unplugged" in status_text(conversation, blockers)
+    model.save({"wica": {"agent": {"provider": "fake", "model": "m"}}})
+    blockers, _ = follow_blockers(model, conversation, [], None, force=True)
+    assert blockers and "unplugged" in status_text(conversation, blockers)
+    assert conversation.start(model) == blockers
+    assert conversation.error is None
+    assert "unplugged" not in status_text(conversation, blockers)
+
+
+def test_a_key_saved_in_the_store_clears_the_blockers_without_a_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "restored after the test")
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    conversation = Conversation(lambda config: _never())
+    model = _model(tmp_path, conversation)
+    app.ensure_persona(model.path)
+    assert conversation.start(model)  # the key is missing: not started
+
+    blockers, seen = follow_blockers(model, conversation, [], None)
+    assert any("ANTHROPIC_API_KEY" in b for b in blockers)
+    assert "Not started" in status_text(conversation, blockers)
+
+    model.secrets.set(
+        "ANTHROPIC_API_KEY", "sk-test"
+    )  # the Secrets panel, or a line's Save
+    blockers, seen = follow_blockers(model, conversation, blockers, seen)
+
+    assert blockers == []
+    assert "ready to start" in status_text(conversation, blockers)
+
+
+def test_the_blockers_are_not_checked_again_on_a_tick_with_no_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    conversation = Conversation(lambda config: _never())
+    model = _model(tmp_path, conversation)
+    blockers, seen = follow_blockers(model, conversation, [], None)
+    calls: list[object] = []
+    monkeypatch.setattr(model, "blockers", lambda *a, **k: calls.append(a) or ["x"])
+
+    assert follow_blockers(model, conversation, blockers, seen) == (blockers, seen)
+    assert calls == []
+    # Selecting the tab, or a save or reset in the Setup panel, forces it.
+    assert follow_blockers(model, conversation, blockers, seen, force=True)[0] == ["x"]
+
+
+def test_a_saved_config_naming_a_set_variable_clears_the_blockers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("MY_ANTHROPIC_KEY", "sk-test")
+    conversation = Conversation(lambda config: _never())
+    model = _model(tmp_path, conversation)
+    app.ensure_persona(model.path)
+    blockers, seen = follow_blockers(model, conversation, [], None)
+    assert blockers
+
+    saved = model.saved_config()
+    saved["wica"]["agent"]["api_key_env"] = "MY_ANTHROPIC_KEY"
+    model.save(saved)  # the Setup panel's Save: `saved.change` forces a check
+    blockers, _ = follow_blockers(model, conversation, blockers, seen, force=True)
+
+    assert blockers == []
+    assert "ready to start" in status_text(conversation, blockers)
 
 
 def test_a_relative_prompt_file_is_read_from_the_app_s_folder(

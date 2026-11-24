@@ -79,7 +79,9 @@ demo = [
 ]
 
 [tool.uv.sources]
-app-setup = { git = "https://github.com/funwithagents/app-setup", rev = "main" }
+# On app-setup's `draft-and-saved` branch (its PR #10: the Setup panel's items table, Save at the
+# bottom, `unsaved_notice`) until it is merged: go back to `rev = "main"` then.
+app-setup = { git = "https://github.com/funwithagents/app-setup", rev = "draft-and-saved" }
 
 [tool.ruff]
 target-version = "py312"

@@ -66,7 +66,7 @@ wheels = [
 [[package]]
 name = "app-setup"
 version = "0.1.0"
-source = { git = "https://github.com/funwithagents/app-setup?rev=main#63470d8889d4b1423c20d0214f11c0e6340abb38" }
+source = { git = "https://github.com/funwithagents/app-setup?rev=draft-and-saved#35a7cffdd63bd753e44ac5d0a52e77ef638483ba" }
 dependencies = [
     { name = "packaging" },
 ]
@@ -2238,7 +2238,7 @@ provides-extras = ["anthropic", "openai", "huggingface-hub", "gemini", "mistral"
 
 [package.metadata.requires-dev]
 demo = [
-    { name = "app-setup", extras = ["ui"], git = "https://github.com/funwithagents/app-setup?rev=main" },
+    { name = "app-setup", extras = ["ui"], git = "https://github.com/funwithagents/app-setup?rev=draft-and-saved" },
     { name = "gradio", specifier = ">=5.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.0" },
     { name = "langchain-google-genai", specifier = ">=4.4" },
@@ -2248,7 +2248,7 @@ demo = [
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
 ]
 dev = [
-    { name = "app-setup", extras = ["ui"], git = "https://github.com/funwithagents/app-setup?rev=main" },
+    { name = "app-setup", extras = ["ui"], git = "https://github.com/funwithagents/app-setup?rev=draft-and-saved" },
     { name = "gradio", specifier = ">=5.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.0" },
     { name = "langchain-google-genai", specifier = ">=4.4" },
