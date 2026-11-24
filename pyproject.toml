@@ -59,8 +59,9 @@ dev = [
     # Runs the fast tier in parallel (`addopts` below).
     "pytest-xdist>=3.8.0",
     # The setup contract's conformance check (`app_setup.contract.check_contract`) in
-    # tests/test_setup.py; never a runtime dependency (specs/setup.md).
-    "app-setup",
+    # tests/test_setup.py, and the demo's Setup and Secrets panels (its `ui` extra), which the
+    # fast tier imports; never a runtime dependency (specs/setup.md).
+    "app-setup[ui]",
 ]
 # The runnable example only (examples/conversation_demo/app.py); kept out of core deps.
 # Run with: uv run --group demo python -m examples.conversation_demo.app
@@ -73,6 +74,8 @@ demo = [
     "langchain-mistralai>=1.1",
     # For the opt-in WICA_DEMO_TRACES=console exporter.
     "opentelemetry-sdk>=1.20",
+    # The page's Setup and Secrets panels, its folder and its autostart (specs/conversation-demo.md).
+    "app-setup[ui]",
 ]
 
 [tool.uv.sources]

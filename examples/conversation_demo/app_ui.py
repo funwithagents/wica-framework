@@ -1,35 +1,27 @@
-"""The Gradio UI for the WICA conversation demo.
+"""The Gradio page of the WICA conversation demo.
 
-`build_ui(wica, world, display_entry, config_error)` assembles the five surfaces (Conversation /
-Speaking / World state / Reaction history / Sensor inputs). Three of them are the package's
-reusable components (`wica.contrib.gradio`: `conversation_panel`, `world_state_panel`,
-`reaction_panel` — see specs/gradio-contrib.md); the UI **owns their presenters**: it creates the
-`TranscriptLog` and `ReactionLog` (each subscribed to the Wica's Events in its constructor, both
-given the demo's `display_entry` hook) and the Speaking panel's `SpeakingSlot`, and returns the
-slot on the `DemoUi` handle so the app can wire it into the robot's `say` (the transcript needs
-no wiring: it only listens). The Speaking panel and the sensor
-inputs are the demo's own. The app file (`app.py`) builds the Wica first, calls this, then wires
-and starts (see specs/conversation-demo.md, "Composition").
+`build_page(model, conversation, notice)` is the page: the demo's **Conversation** tab first, then
+app-setup's **Setup** and **Secrets** panels; it opens on Setup. The Conversation tab has Start
+and Stop over the `Conversation` (session.py) and, while a session runs, its five surfaces
+(Conversation / Speaking / World state / Reaction history / Sensor inputs). Three of them are the
+package's reusable components (`wica.contrib.gradio`: `conversation_panel`, `world_state_panel`,
+`reaction_panel` — see specs/gradio-contrib.md) over the session's presenters; the Speaking panel
+and the sensor inputs are the demo's own. Each session is a new Wica with new presenters, so the
+surfaces are drawn in a `gr.render` that runs again whenever a session starts or stops (see
+specs/conversation-demo.md, "The page").
 """
 
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass
 
 import gradio as gr
+from app_setup.app import AppModel
+from app_setup.ui import secrets_panel, setup_panel
 
-from wica import Wica, World
-from wica.contrib.gradio import (
-    DisplayEntry,
-    ReactionLog,
-    TranscriptLog,
-    conversation_panel,
-    reaction_panel,
-    world_state_panel,
-)
-
-from examples.conversation_demo.speaking import Speaking, SpeakingSlot
+from examples.conversation_demo.session import Conversation, Running
+from examples.conversation_demo.speaking import Speaking
+from wica.contrib.gradio import conversation_panel, reaction_panel, world_state_panel
 
 # --- Speaking panel ------------------------------------------------------------------
 #
@@ -78,30 +70,48 @@ def _speaking_html(speaking: Speaking | None) -> str:
 
 # --- Layout --------------------------------------------------------------------------
 
+_HOW_TO_READ = (
+    "The robot handles **one reasoning call at a time** (v1): while the model is thinking, "
+    "a new input is *dropped*, not queued. Long actions are different: a 10s dance keeps "
+    "running in the background, so a later input can start a new step that sees or cancels "
+    "it. Inputs appear on the **right**; on the **left**, each **reasoning step is one "
+    "collapsible group** (`💬 reaction N`), and inside it every item is labelled by the "
+    "framework channel it came from: **🗣️ say** (the robot's spoken reply — what the model wrote "
+    "inside a `<say>` tag, delivered to its `say` output Command: what the person hears), "
+    "**💭 private text** (what the model wrote outside the tag, which nobody hears), **🦾** "
+    "command calls, and **🚫 noop** (the robot explicitly choosing not to react, typically "
+    "to a change it was not asked about). "
+    "Every Command item shows its **execution state live**: a spinner while it runs, then "
+    "✅ complete / ❌ failed / ⏹ cancelled with its result and duration. The **Speaking** "
+    "panel under the conversation shows the current `say` word by word."
+)
 
-@dataclass(frozen=True)
-class DemoUi:
-    """What build_ui() returns: the page, plus the Speaking slot the app wires into the robot
-    (`speaking` → `say`)."""
 
-    blocks: gr.Blocks
-    speaking: SpeakingSlot
+def status_text(conversation: Conversation, reasons: list[str] | None = None) -> str:
+    """The line above Start and Stop: running (which provider and model), or not, and why."""
+    running = conversation.current
+    if running is not None:
+        agent = running.config.agent
+        return (
+            f"🟢 **Running** — `{agent.provider}` / `{agent.model}`. Stop it to "
+            "change the config in the Setup tab."
+        )
+    if reasons:
+        listed = "\n".join(f"- {reason}" for reason in reasons)
+        return (
+            "⚠️ **Not started.** Fix this in the Setup and Secrets tabs, then Start:\n\n"
+            + listed
+        )
+    return "⚪ **Stopped.** Start runs the agent from the saved config (the Setup tab)."
 
 
-def build_ui(
-    wica: Wica | None,
-    world: World,
-    display_entry: DisplayEntry | None,
-    config_error: str | None,
-) -> DemoUi:
-    """Assemble the demo UI over an already-built (not yet started) Wica. Input handlers only touch
-    the World; the transcript is fed by the agent's Events (a trigger shows up on the right once it
-    actually starts a step — a trigger dropped by the busy single-in-flight loop simply won't
-    appear, and no reply follows it), and the Speaking panel by `say` via the slot. `wica` is None
-    in explore-only mode (no key): the panels still render, nothing reasons."""
-    transcript = TranscriptLog(wica, display_entry)
-    reactions = ReactionLog(wica, display_entry)
-    speaking = SpeakingSlot()
+def _session_panels(running: Running) -> None:
+    """The five surfaces of one running session. Input handlers only touch its World; the
+    transcript is fed by the agent's Events (a trigger shows up on the right once it actually
+    starts a step — a trigger dropped by the busy single-in-flight loop simply won't appear, and
+    no reply follows it), and the Speaking panel by `say` via the slot."""
+    world = running.wica.world
+    speaking = running.speaking
 
     def on_send(user_text: str) -> str:
         text = user_text.strip()
@@ -118,69 +128,92 @@ def build_ui(
     def on_user_gone() -> None:
         world.update("closest_user", None)
 
-    with gr.Blocks(title="WICA — social robot demo") as demo:
-        gr.Markdown("# WICA — talk to a social robot")
-        if config_error is not None:
-            gr.Markdown(
-                f"> ⚠️ **Agent not started: {config_error}.** Set it and restart to enable the "
-                "robot's reasoning. You can still explore the World panel: sensor inputs below "
-                "update the World, but nothing will reason over it yet."
-            )
-        gr.Markdown(
-            "The robot handles **one reasoning call at a time** (v1): while the model is thinking, "
-            "a new input is *dropped*, not queued. Long actions are different: a 10s dance keeps "
-            "running in the background, so a later input can start a new step that sees or cancels "
-            "it. Inputs appear on the **right**; on the **left**, each **reasoning step is one "
-            "collapsible group** (`💬 reaction N`), and inside it every item is labelled by the "
-            "framework channel it came from: **🗣️ say** (the robot's spoken reply — what the model wrote "
-            "inside a `<say>` tag, delivered to its `say` output Command: what the person hears), "
-            "**💭 private text** (what the model wrote outside the tag, which nobody hears), **🦾** "
-            "command calls, and **🚫 noop** (the robot explicitly choosing not to react, typically "
-            "to a change it was not asked about). "
-            "Every Command item shows its **execution state live**: a spinner while it runs, then "
-            "✅ complete / ❌ failed / ⏹ cancelled with its result and duration. The **Speaking** "
-            "panel under the conversation shows the current `say` word by word."
-        )
+    with gr.Row():
+        with gr.Column(scale=3):
+            conversation_panel(running.transcript)
+            speaking_view = gr.HTML(value=_speaking_html(None))
+            with gr.Row():
+                msg = gr.Textbox(
+                    placeholder="Say something to the robot…",
+                    show_label=False,
+                    scale=5,
+                )
+                send = gr.Button("Send", variant="primary", scale=1)
 
-        with gr.Row():
-            with gr.Column(scale=3):
-                conversation_panel(transcript)
-                speaking_view = gr.HTML(value=_speaking_html(None))
-                with gr.Row():
-                    msg = gr.Textbox(
-                        placeholder="Say something to the robot…",
-                        show_label=False,
-                        scale=5,
-                    )
-                    send = gr.Button("Send", variant="primary", scale=1)
+            gr.Markdown("### Sensor inputs")
+            with gr.Row():
+                user_id = gr.Textbox(
+                    placeholder="user id, e.g. alice",
+                    show_label=False,
+                    scale=3,
+                )
+                detect = gr.Button("Closest user detected", scale=2)
+                gone = gr.Button("Closest user gone", scale=2)
 
-                gr.Markdown("### Sensor inputs")
-                with gr.Row():
-                    user_id = gr.Textbox(
-                        placeholder="user id, e.g. alice",
-                        show_label=False,
-                        scale=3,
-                    )
-                    detect = gr.Button("Closest user detected", scale=2)
-                    gone = gr.Button("Closest user gone", scale=2)
+        with gr.Column(scale=2):
+            gr.Markdown("### World state (live)")
+            world_state_panel(world)
+            gr.Markdown("### Reaction history")
+            reaction_panel(running.reactions)
 
-            with gr.Column(scale=2):
-                gr.Markdown("### World state (live)")
-                world_state_panel(world)
-                gr.Markdown("### Reaction history")
-                reaction_panel(reactions)
+    send.click(on_send, inputs=msg, outputs=msg)
+    msg.submit(on_send, inputs=msg, outputs=msg)
+    detect.click(on_detect, inputs=user_id, outputs=user_id)
+    gone.click(on_user_gone)
 
-        send.click(on_send, inputs=msg, outputs=msg)
-        msg.submit(on_send, inputs=msg, outputs=msg)
-        detect.click(on_detect, inputs=user_id, outputs=user_id)
-        gone.click(on_user_gone)
+    # The Speaking panel is cheap to re-render whole each tick (like the World table), and its
+    # words advance faster than a diff would be worth; its timer refreshes faster than the
+    # per-word speaking pace (_SAY_WORD_DELAY_S) so it advances roughly one word at a time.
+    speaking_timer = gr.Timer(0.2)
+    speaking_timer.tick(lambda: _speaking_html(speaking.read()), outputs=speaking_view)
 
-        # The Speaking panel is cheap to re-render whole each tick (like the World table), and its
-        # words advance faster than a diff would be worth; its timer refreshes faster than the
-        # per-word speaking pace (_SAY_WORD_DELAY_S) so it advances roughly one word at a time.
-        speaking_timer = gr.Timer(0.2)
-        speaking_timer.tick(
-            lambda: _speaking_html(speaking.read()), outputs=speaking_view
-        )
 
-    return DemoUi(blocks=demo, speaking=speaking)
+def _conversation_tab(
+    model: AppModel, conversation: Conversation, notice: list[str]
+) -> None:
+    """Start, Stop, the status line, and the running session's surfaces."""
+    status = gr.Markdown(status_text(conversation, notice))
+    with gr.Row():
+        start = gr.Button("Start", variant="primary", scale=0)
+        stop = gr.Button("Stop", scale=0)
+    gr.Markdown(_HOW_TO_READ)
+    # The session's version, polled: a start or a stop from any browser tab (or at launch) redraws
+    # the surfaces below.
+    version = gr.State(conversation.version)
+
+    def on_start() -> tuple[str, int]:
+        reasons = conversation.start(model)
+        return status_text(conversation, reasons), conversation.version
+
+    def on_stop() -> tuple[str, int]:
+        conversation.stop()
+        return status_text(conversation), conversation.version
+
+    start.click(on_start, outputs=[status, version])
+    stop.click(on_stop, outputs=[status, version])
+    gr.Timer(1.0).tick(lambda: conversation.version, outputs=version)
+
+    @gr.render(inputs=version)
+    def _surfaces(_version: int) -> None:
+        running = conversation.current
+        if running is None:
+            gr.Markdown("*No session is running.*")
+            return
+        _session_panels(running)
+
+
+def build_page(
+    model: AppModel, conversation: Conversation, notice: list[str] | None = None
+) -> gr.Blocks:
+    """The demo's page: its Conversation tab, then app-setup's Setup and Secrets panels. It
+    opens on Setup. *notice* is why the session did not start at launch, shown until Start."""
+    with gr.Blocks(title=model.title) as page:
+        gr.Markdown(f"# {model.title}")
+        with gr.Tabs(selected="setup"):
+            with gr.Tab("Conversation", id="conversation"):
+                _conversation_tab(model, conversation, notice or [])
+            with gr.Tab("Setup", id="setup"):
+                setup = setup_panel(model)
+            with gr.Tab("Secrets", id="secrets"):
+                secrets_panel(model, setup.draft)
+    return page

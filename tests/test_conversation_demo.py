@@ -217,3 +217,142 @@ def test_persona_describes_the_say_tag_and_no_removed_mechanism():
     assert "<say>" in persona and "</say>" in persona
     assert "say(" not in persona
     assert "noop" not in persona
+
+
+# --- The session over app-setup's app model (session.py) ---------------------------
+
+from app_setup.app import AppModel  # noqa: E402
+from app_setup.folder import ConfigFolder  # noqa: E402
+
+from examples.conversation_demo.app_ui import status_text  # noqa: E402
+from examples.conversation_demo.session import Conversation, Running  # noqa: E402
+from wica import setup as wica_setup  # noqa: E402
+from wica.config import WicaConfig  # noqa: E402
+
+
+def _model(tmp_path: Path, conversation: Conversation) -> AppModel:
+    return AppModel(
+        app.APP,
+        ConfigFolder(tmp_path / "demo", app.APP.default_config),
+        locked=conversation.locked,
+    )
+
+
+def test_the_default_config_needs_nothing_and_has_no_app_section(tmp_path: Path):
+    conversation = Conversation(app.open_session)
+    model = _model(tmp_path, conversation)
+
+    assert set(model.saved_config()) == {"wica"}
+    assert wica_setup.check_config(app.DEFAULT_CONFIG["wica"]) == []
+    assert model.blockers(model.saved_config()) == []
+    assert app.APP.autostart is True
+
+
+def test_start_runs_the_saved_config_and_locks_it_until_stopped(tmp_path: Path):
+    conversation = Conversation(app.open_session)
+    model = _model(tmp_path, conversation)
+
+    assert conversation.start(model) == []
+    running = conversation.current
+    assert running is not None and running.wica.is_running
+    assert running.config.agent.provider == "fake"
+    assert conversation.locked() and model.locked()
+    with pytest.raises(RuntimeError):
+        model.save(model.saved_config())
+    version = conversation.version
+    assert conversation.start(model) == []  # already running: nothing more
+    assert conversation.current is running and conversation.version == version
+    assert "Running" in status_text(conversation)
+
+    conversation.stop()
+
+    assert conversation.current is None and not conversation.locked()
+    assert not running.wica.is_running
+    assert conversation.version == version + 1
+    model.save(model.saved_config())  # unlocked again
+
+
+def test_start_says_why_the_saved_config_cannot_run_and_builds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    built: list[WicaConfig] = []
+    conversation = Conversation(lambda config: built.append(config) or _never())
+    model = _model(tmp_path, conversation)
+    model.save(
+        {
+            "wica": {
+                "agent": {
+                    "provider": "anthropic",
+                    "model": "claude-haiku-4-5",
+                    "system_prompt": "You are terse.",
+                }
+            }
+        }
+    )
+
+    reasons = conversation.start(model)
+
+    assert any("ANTHROPIC_API_KEY" in reason for reason in reasons)
+    assert built == [] and conversation.current is None
+    assert not conversation.locked()
+    assert "ANTHROPIC_API_KEY" in status_text(conversation, reasons)
+
+
+def _never() -> Running:
+    raise AssertionError("nothing should be built")
+
+
+def test_a_failed_build_is_said_and_leaves_the_config_unlocked(tmp_path: Path):
+    def failing(config: WicaConfig) -> Running:
+        raise RuntimeError("the robot is unplugged")
+
+    conversation = Conversation(failing)
+    model = _model(tmp_path, conversation)
+
+    assert conversation.start(model) == [
+        "The agent could not start: the robot is unplugged"
+    ]
+    assert conversation.current is None and not conversation.locked()
+
+
+def test_a_relative_prompt_file_is_read_from_the_app_s_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    seen: list[WicaConfig] = []
+
+    def recording(config: WicaConfig) -> Running:
+        seen.append(config)
+        return app.open_session(config)
+
+    conversation = Conversation(recording)
+    model = _model(tmp_path, conversation)
+    (model.path / "persona.md").write_text("You are terse.", encoding="utf-8")
+    agent = dict(model.saved_config()["wica"]["agent"])
+    agent["system_prompt_file"] = "persona.md"
+    model.save({"wica": {"agent": agent}})
+    # The setup checks look a relative path up against the working directory (specs/setup.md,
+    # Open questions): run from elsewhere, they block it; the session reads the folder's.
+    monkeypatch.chdir(tmp_path)
+    assert any("persona.md" in reason for reason in conversation.start(model))
+    monkeypatch.chdir(model.path)
+
+    assert conversation.start(model) == []
+    conversation.stop()
+    assert seen[0].agent.system_prompt_file == str(
+        (model.path / "persona.md").resolve()
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "start"), [([], None), (["--start"], True), (["--no-start"], False)]
+)
+def test_the_command_line_overrides_the_saved_launch_choice(
+    argv: list[str], start: bool | None, tmp_path: Path
+):
+    options = app._arguments([*argv, "--folder", str(tmp_path)])  # pyright: ignore[reportPrivateUsage]
+    assert (options.start, options.folder, options.host) == (
+        start,
+        tmp_path,
+        "127.0.0.1",
+    )

@@ -71,6 +71,11 @@ dependencies = [
     { name = "packaging" },
 ]
 
+[package.optional-dependencies]
+ui = [
+    { name = "gradio" },
+]
+
 [[package]]
 name = "audioop-lts"
 version = "0.2.2"
@@ -2192,6 +2197,7 @@ openai-compatible = [
 
 [package.dev-dependencies]
 demo = [
+    { name = "app-setup", extra = ["ui"] },
     { name = "gradio" },
     { name = "langchain-anthropic" },
     { name = "langchain-google-genai" },
@@ -2201,7 +2207,7 @@ demo = [
     { name = "opentelemetry-sdk" },
 ]
 dev = [
-    { name = "app-setup" },
+    { name = "app-setup", extra = ["ui"] },
     { name = "gradio" },
     { name = "langchain-anthropic" },
     { name = "langchain-google-genai" },
@@ -2232,6 +2238,7 @@ provides-extras = ["anthropic", "openai", "huggingface-hub", "gemini", "mistral"
 
 [package.metadata.requires-dev]
 demo = [
+    { name = "app-setup", extras = ["ui"], git = "https://github.com/funwithagents/app-setup?rev=main" },
     { name = "gradio", specifier = ">=5.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.0" },
     { name = "langchain-google-genai", specifier = ">=4.4" },
@@ -2241,7 +2248,7 @@ demo = [
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
 ]
 dev = [
-    { name = "app-setup", git = "https://github.com/funwithagents/app-setup?rev=main" },
+    { name = "app-setup", extras = ["ui"], git = "https://github.com/funwithagents/app-setup?rev=main" },
     { name = "gradio", specifier = ">=5.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.0" },
     { name = "langchain-google-genai", specifier = ">=4.4" },

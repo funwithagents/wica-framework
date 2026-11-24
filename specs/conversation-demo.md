@@ -3,8 +3,10 @@ code:
   - examples/conversation_demo/app.py
   - examples/conversation_demo/speaking.py
   - examples/conversation_demo/app_ui.py
+  - examples/conversation_demo/session.py
   - examples/conversation_demo/prompts/wica.md
   - examples/configs/anthropic.json
+  - pyproject.toml
 tests:
   - tests/test_conversation_demo.py
   - tests-e2e/test_example_flow.py
@@ -209,57 +211,112 @@ of the seam:
   configured output Command (labelled 🗣️ by default, read live from the Agent, so it is correct
   whichever is wired first) — needs nothing from the demo.
 
-## Composition: build, then wire, then start
+## The app: a folder, a Setup tab, a session
 
-The demo is composed in one place — the app's `main()` — in a fixed order that the framework's
-output wiring exists to allow (see [wica.md](wica.md), "Output wiring is delegated"):
+The demo is an app built on the `app-setup` project's Setup and Secrets panels, which own the
+app's folder, the config form, the checks and the keys; this spec says what the demo puts around
+them. `app-setup[ui]` is in the `demo` dependency group (and the `dev` group, whose fast tier
+imports the demo), never a dependency of the published package.
 
-1. **Build the Wica** from the config (or, without a key, the World-only fallback — see
-   "Configuration"), and register the demo's World entries on its World.
-2. **Build the UI on top of it.** The UI owns its presenters: it constructs the contrib's
-   `TranscriptLog` and `ReactionLog` (each subscribed to the Wica's `Event`s in its constructor,
-   both given the demo's `display_entry` hook) and the Speaking slot, places the three contrib
-   panels plus its own Speaking panel and sensor inputs, and exposes the slot for wiring.
-3. **Wire the robot to the UI.** The robot's Commands are built over the Wica's World and the UI's
-   Speaking slot (`say` drives it). The app sets `say` as the output Command on the Wica and
-   registers the other Commands: `wire(wica, speaking)`. The transcript needs no wiring — it
-   subscribed to the Wica's `Event`s when it was built. This step is Gradio-free and takes the slot
-   as its argument, so the tests run the same wiring against a slot they build themselves.
-4. **Start** the Wica, then launch the UI.
+```
+uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--host ADDRESS]
+    [--port N] [--start | --no-start]
+```
 
-Consequences: no demo state exists before the Wica does, so nothing is bound late — no module
-globals, no two-phase attach, no state object the app builds early and hands to the UI — and
-everything is wired before `start()`, the setters' intended zone.
+- **One section, `wica`**, whose document is the WICA block, described by `wica.setup`
+  ([setup.md](setup.md)), titled "Agent". The host is `wica` itself, so the Setup panel installs
+  this project's own extras.
+- **The app's folder** holds its `config.json`, its `.env` (the keys the Secrets panel saves) and
+  its `launch.json`: `~/.config/wica-conversation-demo` unless `--folder` names another. The page
+  listens on `127.0.0.1` unless `--host` names another address; `--port` picks the port.
+- **The default config** uses the scripted fake (`provider: "fake"`), which needs no extra, no key
+  and no network: every reaction gets the same `<say>` reply, telling the user to choose a
+  provider in the Setup tab. Its `system_prompt_file` is the bundled persona
+  (`examples/conversation_demo/prompts/wica.md`) by its absolute path, since the setup checks look a
+  relative path up against the working directory while the session resolves it against the folder
+  ([setup.md](setup.md), Open questions).
+- **The page**: the demo's **Conversation** tab first, then the **Setup** panel, then the
+  **Secrets** panel following the Setup panel's draft; it opens on Setup.
+- **A session with a lock.** A session is one `Wica` built from the saved config and running
+  (`examples/conversation_demo/session.py`, `Conversation`). **Start** checks the saved config
+  (`AppModel.blockers`: its problems, then what the machine is missing — the extra, the key, the
+  prompt file) and lists them on the page instead of starting; otherwise it builds the session
+  from `model.used_config(saved)["wica"]` with the folder as `base_dir`. A build that still fails
+  is said on the page and leaves nothing running. **Stop** stops and closes the Wica. The config is
+  locked from Start until the close has finished (`AppModel(..., locked=conversation.locked)`), so
+  the Setup panel disables Save and Reset while a session runs. One session at a time: Start while
+  one runs does nothing. Leaving the page's process stops it.
+- **Autostart.** The demo starts its session at launch (`App(autostart=True)`); the user's choice
+  is app-setup's, kept in the folder's `launch.json` and drawn on the Setup panel as a checkbox.
+  `--start` / `--no-start` override it for one launch. A launch whose saved config has blockers
+  shows them in the Conversation tab instead of starting. `config.json` holds only the `wica`
+  section.
+
+## The Conversation tab
+
+A status line (running, with its provider and model; stopped; or not started, with why), **Start**
+and **Stop**, the reading guide, and — while a session runs — the five surfaces above over that
+session. Each session is a new `Wica`, so its surfaces are drawn anew (a `gr.render` keyed on the
+session's version, polled every second): a start or a stop from any browser tab, or at launch,
+redraws them. With no session, the tab says so; there is no explore-only mode.
+
+## Composition of a session: build, then wire, then start
+
+A session is composed in one place — `open_session(config)` in the app — in a fixed order that the
+framework's output wiring exists to allow (see [wica.md](wica.md), "Output wiring is delegated"):
+
+1. **Build the Wica** from the config (`build_system`), and register the demo's World entries on
+   its World. A missing key, a missing extra or an unreadable prompt raises here.
+2. **Build the presenters on top of it**: the contrib's `TranscriptLog` and `ReactionLog` (each
+   subscribed to the Wica's `Event`s in its constructor, both given the demo's `display_entry`
+   hook) and the Speaking slot. The page places the three contrib panels plus its own Speaking
+   panel and sensor inputs over them.
+3. **Wire the robot.** The robot's Commands are built over the Wica's World and the Speaking slot
+   (`say` drives it). The app sets `say` as the output Command on the Wica and registers the other
+   Commands: `wire(wica, speaking)`. The transcript needs no wiring — it subscribed to the Wica's
+   `Event`s when it was built. This step is Gradio-free and takes the slot as its argument, so the
+   tests and the benchmark run the same wiring against a slot of their own.
+4. **Start** the Wica. A failure after step 1 closes it again.
+
+Consequences: no session state exists before its Wica does, so nothing is bound late — no module
+globals, no two-phase attach — and everything is wired before `start()`, the setters' intended
+zone.
 
 ## Configuration
 
-- **The demo loads from a committed JSON config**, `examples/configs/anthropic.json`,
-  via `WicaConfig.from_json_file` followed by `Wica.init` (see [config.md](config.md)) — provider,
-  model, and persona (`system_prompt_file`, pointing at
-  `examples/conversation_demo/prompts/wica.md`) all live
-  there. Switching providers/models, or editing the persona, is a file edit, not a code change.
-  The example configs next to it — one per provider in `examples/configs/` — show the same demo
-  against each supported provider (see [config.md](config.md), "Providers").
-- **The API key is referenced, not stored.** The config names no key: it is read from the
-  provider's usual variable, `ANTHROPIC_API_KEY`, at Agent build (`api_key_env` names another).
-  No secret lives in a config (see config.md, "API key: never in the config").
-- **No key, still usable.** With `ANTHROPIC_API_KEY` unset, `Wica.init` raises
-  `MissingSecretError` when it builds the Agent (the env read is deferred to build, not load — see
-  config.md, "API key"); the demo catches it, still opens, and clearly says what to set — it just
-  can't run the robot's reasoning until the variable is present. Nothing contacts a model without
-  credentials.
+- **The config is the app's**, edited in the Setup tab (or by hand in the folder's `config.json`)
+  and read at each Start: provider, model and persona all live there. The example configs in
+  `examples/configs/` — one per provider, the persona by a path relative to them — show the same
+  demo against each supported provider (see [config.md](config.md), "Providers"); their `agent`
+  block can be pasted into the Setup tab's raw view.
+- **The API key is referenced, not stored.** A config names no key: it is read from the
+  provider's usual variable (`ANTHROPIC_API_KEY`, …) or the one `api_key_env` names, from the
+  shell or from the folder's `.env`, which the Secrets tab writes (the shell wins). No secret lives
+  in a config (see config.md, "API key: never in the config").
+- **No key, no start.** A missing key is one of Start's blockers, said on the page; the Setup
+  tab's Test makes one free call to the provider to check the key and the model
+  ([setup.md](setup.md), "probe"). Nothing contacts a model without credentials.
 - **`WICA_DEMO_TRACES=console`** installs an OpenTelemetry SDK `TracerProvider` with a
-  `ConsoleSpanExporter` before `Wica.init`, printing every span (`wica.world.update`,
+  `ConsoleSpanExporter` before the first session, printing every span (`wica.world.update`,
   `wica.agent.reaction`/`model`/`guards`/`command`) to stdout — an example of the exporter wiring
   [instrumentation.md](instrumentation.md) ("Consumers") leaves to the application. Unset or any
   other value: no SDK import, no change.
 
+## Testing
+
+`tests/test_conversation_demo.py` (fast tier, no page built): the default config needs nothing
+and holds only the `wica` section; Start runs the saved config and locks it until Stop, which
+closes the Wica; Start with blockers says why and builds nothing; a failed build is said and leaves
+the config unlocked; a relative prompt file is read from the app's folder; the command line's
+`--start` / `--no-start`. `tests-e2e/test_example_flow.py`: a session's wiring over the scripted
+fake, end to end.
+
 ## Benchmark
 
-The demo is also the framework's **reference benchmark** ([benchmark.md](benchmark.md)): `benchmarks/bench.py` stands it up exactly as `main()` does minus the page (`build_system` → `wire` over a `SpeakingSlot` of its own → `start`), once per run, for each entry of `benchmarks/matrix.json` (the per-provider variants above as its `default` rows, persona included) against the session workload in `benchmarks/scenarios/` — `conversation`, written to the `speech_input` + `say` shape so it runs unchanged against any application of that shape, and `commands`, the demo's own actions. Nothing in the demo changes for it.
+The demo is also the framework's **reference benchmark** ([benchmark.md](benchmark.md)): `benchmarks/bench.py` stands it up as a session does minus the presenters (`build_system` → `wire` over a `SpeakingSlot` of its own → `start`), once per run, for each entry of `benchmarks/matrix.json` (the per-provider models of `examples/configs/` as its `default` rows, persona included) against the session workload in `benchmarks/scenarios/` — `conversation`, written to the `speech_input` + `say` shape so it runs unchanged against any application of that shape, and `commands`, the demo's own actions. Nothing in the demo changes for it.
 
 ## Out of scope (for this demo)
 
 - Real audio/vision — inputs are simulated via UI, not a mic/camera.
 - Concurrent or interruptible reasoning — a post-v1 Agent feature. (Cutting off the robot's speech or its dance is in: that cancels a Command, not a reasoning call.)
-- Persistence across restarts — the World starts empty each run.
+- Persistence across sessions — the World starts empty at each Start.

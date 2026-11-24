@@ -126,11 +126,10 @@ wica.close()
 The repo ships a browser UI to talk to a simulated social robot and watch the framework work: the conversation with the robot's actions as they run, the live World state, and the exact prompt and timing of every reasoning step, with sensor-input buttons for the perceptions a robot would have. It runs from a checkout with the `demo` dependency group:
 
 ```
-export ANTHROPIC_API_KEY=sk-...
 uv run --group demo python -m examples.conversation_demo.app
 ```
 
-then open the address Gradio prints. Without a key it still opens and is explorable; it just cannot run the robot's reasoning. The provider is a config edit: `examples/configs/anthropic.json`, with one example config per provider next to it. Its three panels are reusable in your own app ([docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)); its design is [specs/conversation-demo.md](specs/conversation-demo.md).
+then open the address Gradio prints. It starts on the scripted fake, which needs no key; its **Setup** tab chooses a provider and a model, installs the provider's extra and tests the key, its **Secrets** tab saves the key to the demo's folder (`~/.config/wica-conversation-demo`), and **Start** in the Conversation tab runs the robot on it. `--no-start` opens the page without starting; `--folder` keeps another config. One example config per provider is in `examples/configs/`. Its three panels are reusable in your own app ([docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)); its design is [specs/conversation-demo.md](specs/conversation-demo.md).
 
 ## Documentation
 
