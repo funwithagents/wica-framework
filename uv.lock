@@ -1069,7 +1069,7 @@ wheels = [
 [[package]]
 name = "module-setup"
 version = "0.1.0"
-source = { git = "https://github.com/funwithagents/module-setup?rev=base-dir#940c5f37e4f52d314437c75e0ea0bc513e63b92d" }
+source = { git = "https://github.com/funwithagents/module-setup?rev=main#d28ff373407cc765d552d131f2dbd9dbd4c976f0" }
 dependencies = [
     { name = "packaging" },
 ]
@@ -2247,7 +2247,7 @@ dev = [
     { name = "langchain-huggingface", specifier = ">=1.2" },
     { name = "langchain-mistralai", specifier = ">=1.1" },
     { name = "langchain-openai", specifier = ">=1.0" },
-    { name = "module-setup", git = "https://github.com/funwithagents/module-setup?rev=base-dir" },
+    { name = "module-setup", git = "https://github.com/funwithagents/module-setup?rev=main" },
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
     { name = "pyright", specifier = ">=1.1.411" },
     { name = "pytest", specifier = ">=8.0.0" },

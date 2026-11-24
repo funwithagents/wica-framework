@@ -16,7 +16,7 @@ Builds [specs/setup.md](../specs/setup.md) and the key handling of [specs/config
 6. **`module-setup`** as a dev dependency (git, `main`) for the conformance check.
 7. **Callers and docs**: the benchmark matrix (the default variable gates an entry), the e2e support (`MissingSecretError`), the configuration and API references, the guides, the README.
 
-8. **After review**: `model` declared in each provider's branch (a switch empties it); `check_setup`, `prepare`, `options` and `probe` take `base_dir` (module-setup's contract, its PR #7), a relative `system_prompt_file` located against it as `WicaConfig.from_dict` does; module-setup at `rev = "base-dir"` until that PR is merged.
+8. **After review**: `model` declared in each provider's branch (a switch empties it); `check_setup`, `prepare`, `options` and `probe` take `base_dir` (module-setup's contract, its PR #7), a relative `system_prompt_file` located against it as `WicaConfig.from_dict` does; module-setup from its `base-dir` branch until that PR was merged, then from `main`.
 
 ## Tests
 
