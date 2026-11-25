@@ -6,7 +6,9 @@ code:
   - examples/conversation_demo/session.py
   - examples/conversation_demo/prompts/wica.md
   - examples/conversation_demo/default_config.json
+  - examples/config_app/__main__.py
   - examples/configs/anthropic.json
+  - examples/configs/fake.json
   - pyproject.toml
 tests:
   - tests/test_conversation_demo.py
@@ -15,7 +17,7 @@ tests:
 
 # Conversation demo
 
-**Status:** Implemented
+**Status:** Updated
 
 ## Purpose
 
@@ -212,7 +214,7 @@ of the seam:
   configured output Command (labelled 🗣️ by default, read live from the Agent, so it is correct
   whichever is wired first) — needs nothing from the demo.
 
-## The app: a folder, a Setup tab, a session
+## The app: a folder or a file, a Setup tab, a session
 
 The demo is an app built on the `app-setup` project's Setup and Secrets panels, which own the
 app's folder, the config form, the checks and the keys; this spec says what the demo puts around
@@ -220,28 +222,66 @@ them. `app-setup[ui]` is in the `demo` dependency group (and the `dev` group, wh
 imports the demo), never a dependency of the published package.
 
 ```
-uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--host ADDRESS]
-    [--port N] [--start | --no-start]
+uv run --group demo python -m examples.conversation_demo.app [--folder DIR | --config FILE]
+    [--env PATH] [--host ADDRESS] [--port N] [--start | --no-start]
 ```
 
 - **One section, `wica`**, whose document is the WICA block, described by `wica.setup`
   ([setup.md](setup.md)), titled "Agent". The host is `wica` itself, so the Setup panel installs
   this project's own extras.
-- **The app's folder** holds its `config.json`, its `.env` (the keys the Secrets panel saves) and
-  its `launch.json`: `~/.config/wica-conversation-demo` unless `--folder` names another. The page
-  listens on `127.0.0.1` unless `--host` names another address; `--port` picks the port.
+- **The config is a WICA document.** The app is declared bare (`App(..., bare=True)`): its one
+  section's document is the whole config, with no `"wica"` key around it, in the folder's
+  `config.json`, in a `--config` file, in the config app's file and in the default config. One
+  format: the document `WicaConfig.from_json_file` reads and `examples/configs/` holds, so a config
+  saved by the demo runs with the library alone, and an example config runs in the demo as it is.
+  app-setup wraps it as `{"wica": …}` for its panels only. A folder made by an earlier version of
+  the demo holds the wrapped shape, which the Setup tab and Start report as a problem: the user
+  deletes the folder (or its `config.json`) once, and the next launch writes the default.
+- **The page** listens on `127.0.0.1` unless `--host` names another address; `--port` picks the
+  port.
 - **The default config** is a committed file, `examples/conversation_demo/default_config.json`,
   loaded into `App(default_config=...)` (app-setup writes it into an empty folder at the first
   launch): provider `anthropic`, model `claude-haiku-4-5`, `"system_prompt_file": "wica.md"`, and
   no key nor `api_key_env` — the key is read from `ANTHROPIC_API_KEY`, the provider's default,
   from the shell or the folder's `.env`. The scripted fake stays an example config
-  (`examples/configs/fake.json`), to paste in the Setup tab for a key-less try.
-- **The persona lives in the folder.** At launch, when the app's folder has no `wica.md`, the
-  bundled `examples/conversation_demo/prompts/wica.md` is copied there; it is never overwritten,
-  so the user edits the robot's persona in the folder. The default config's relative `wica.md`
-  resolves against the folder: the session builds with it as `base_dir`, and app-setup passes
-  the same folder to the setup checks (`base_dir`, [setup.md](setup.md)), so Check and Start look
-  at the same file. The app never changes its working directory.
+  (`examples/configs/fake.json`), to paste in the Setup tab or run with `--config` for a key-less
+  try.
+
+### Three launches
+
+| Launch | The config | The Setup tab | The session |
+|---|---|---|---|
+| **From the folder** (`--folder DIR`, by default `~/.config/wica-conversation-demo`) | `DIR/config.json`, edited and saved | Editable | At launch per the folder's `launch.json`, else on (autostart, below) |
+| **From a file** (`--config FILE`) | `FILE`, run as it is, never written | Read-only: the values that run, the checks, Install and Test still there, no Save | At launch, unless `--no-start` |
+| **The config app** (`python -m examples.config_app FILE`) | `FILE`, edited and saved back to it | Editable; Revert, no Reset (a file has no default) | None: Setup and Secrets tabs only |
+
+`--folder` and `--config` are one or the other (app-setup's `add_config_arguments` and
+`open_source`). **A missing or unreadable file stops the launch** with its error on the command
+line (`parser.error`), before any page is served; nothing is created. A file is read again at each
+Start, so from a file a hand edit runs at the next Stop and Start.
+
+- **The keys** come from the `.env` next to the config: the folder's `.env`, or the `.env` in the
+  file's directory — one `.env` serving every example config of `examples/configs/` — unless
+  `--env PATH` names another. The Secrets tab writes there; the shell wins. The repository
+  ignores `.env`, so a key saved next to an example config is never committed.
+- **The persona.** From the folder: when the folder has no `wica.md`, the bundled
+  `examples/conversation_demo/prompts/wica.md` is copied there at launch; it is never
+  overwritten, so the user edits the robot's persona in the folder. From a file (either way),
+  nothing is copied: the file names its own persona, relative to its directory (each example
+  config names the bundled one, `../conversation_demo/prompts/wica.md`). A relative path resolves
+  against the source's directory (`AppModel.path`: the folder, or the file's directory): the
+  session builds with it as `base_dir`, and app-setup passes the same directory to the setup
+  checks (`base_dir`, [setup.md](setup.md)), so Check and Start look at the same file. The app
+  never changes its working directory.
+- **The config app** (`examples/config_app/`) is a few lines over the demo's own `App`
+  (app-setup's `add_config_app_arguments`, `open_config_app` and `config_page`): `FILE` (which
+  must exist), `--env PATH`, `--host`, `--port`. It edits a WICA config without running a robot,
+  in this project's environment, so its checks and installs are those of the environment the
+  config will run in. It is an example, not a console script: the published package does not
+  depend on app-setup.
+
+### The page and the session
+
 - **The page**: the demo's **Conversation** tab first, then the **Setup** panel, then the
   **Secrets** panel following the Setup panel's draft. It opens on the Conversation tab when the
   session starts at launch (`starts_at_launch`, whether it actually started or showed its
@@ -251,18 +291,19 @@ uv run --group demo python -m examples.conversation_demo.app [--folder PATH] [--
   (`AppModel.blockers`: its problems, then every required item the machine is missing — the
   extra, the key, the prompt file; WICA has no other kind) and does not start while there are
   any (the status line shows them); otherwise it builds the session from `model.used_config(saved)["wica"]` with the
-  folder as `base_dir`. A build that still fails is said on the page and leaves nothing running.
+  source's directory as `base_dir`. A build that still fails is said on the page and leaves nothing running.
   **Stop** stops and closes the Wica. The config is
   locked from Start until the close has finished (`AppModel(..., locked=conversation.locked)`), so
   the Setup panel disables Save and Reset while a session runs. One session at a time: Start while
   one runs does nothing. Leaving the page's process stops it.
 - **Autostart.** The demo starts its session at launch (`App(autostart=True)`); the user's choice
   is app-setup's, kept in the folder's `launch.json` and drawn on the Setup panel as a checkbox.
-  `--start` / `--no-start` override it for one launch. A launch whose saved config has blockers
+  `--start` / `--no-start` override it for one launch. From a file, the session starts at launch
+  unless `--no-start` (`starts_at_launch`): running a given file is asking for it to run. A launch whose saved config has blockers
   shows them in the Conversation tab instead of starting. **The first launch with no key does
   exactly that, by design**: the default config needs `ANTHROPIC_API_KEY`, so the Conversation
-  tab lists the missing key; the user sets it in the Secrets tab (or the shell) and presses Start. `config.json` holds only the `wica`
-  section.
+  tab lists the missing key; the user sets it in the Secrets tab (or the shell) and presses Start. `config.json` holds only the WICA
+  document.
 
 ## The Conversation tab
 
@@ -318,11 +359,11 @@ zone.
 - **The config is the app's**, edited in the Setup tab (or by hand in the folder's `config.json`)
   and read at each Start: provider, model and persona all live there. The example configs in
   `examples/configs/` — one per provider, the persona by a path relative to them — show the same
-  demo against each supported provider (see [config.md](config.md), "Providers"); their `agent`
-  block can be pasted into the Setup tab's raw view.
+  demo against each supported provider (see [config.md](config.md), "Providers"); each runs as it
+  is with `--config`, and can be pasted into the Setup tab's raw view.
 - **The API key is referenced, not stored.** A config names no key: it is read from the
   provider's usual variable (`ANTHROPIC_API_KEY`, …) or the one `api_key_env` names, from the
-  shell or from the folder's `.env`, which the Secrets tab writes (the shell wins). No secret lives
+  shell or from the `.env` next to the config, which the Secrets tab writes (the shell wins). No secret lives
   in a config (see config.md, "API key: never in the config").
 - **No key, no start.** A missing key is one of Start's blockers, said on the page; the Setup
   tab's Test makes one free call to the provider to check the key and the model
@@ -336,14 +377,20 @@ zone.
 ## Testing
 
 `tests/test_conversation_demo.py` (fast tier, no page built): the committed default file is the
-app's default and is written into an empty folder; the persona is copied into the folder once
+app's default, a bare WICA document, and is written into an empty folder as it is; a save writes
+the document alone; the demo run from a file uses that file's config and persona (relative to
+it, nothing copied), starts its session at launch (not with `--no-start`) and never writes the
+file; the keys come from the `.env` next to the file; a missing file stops the launch and serves
+no page; every example config of `examples/configs/` runs as a `--config` file (its document
+checked, its persona found); the config app saves a bare document to its file, takes `--env`,
+and refuses a missing file; the persona is copied into the folder once
 and never overwritten; with no key, the default config's Start lists the missing key and starts
 nothing; Start runs the saved config and locks it until Stop, which closes the Wica; the buttons'
 state per status (stopped, starting, running, stopping) and the status line's; a failed build is
 said, leaves the config unlocked, and stays said while the blockers change, until the next Start;
 a key saved in the store clears the key's blocker with no Start; a saved config naming a set
 variable clears it when forced (the save); a tick with no change checks nothing; a relative prompt file is read from the app's folder; the
-command line's `--start` / `--no-start`. `tests-e2e/test_example_flow.py`: a session's wiring
+command line's `--start` / `--no-start`, and `--folder` and `--config` one or the other. `tests-e2e/test_example_flow.py`: a session's wiring
 over the scripted fake, end to end.
 
 ## Benchmark
