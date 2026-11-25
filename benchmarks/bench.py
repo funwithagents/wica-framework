@@ -25,7 +25,7 @@ from examples.conversation_demo.app import build_system, wire
 from examples.conversation_demo.speaking import SpeakingSlot
 from wica import Wica
 from wica.benchmark import Entry, Skip, cli
-from wica.config import WicaConfig
+from wica.config import MissingSecretError, WicaConfig
 from wica.testing import Scenario
 
 BENCH_DIR = Path(__file__).parent
@@ -47,17 +47,18 @@ class DemoTarget:
         self._wica: Wica | None = None
 
     def open(self, scenario: Scenario) -> Wica:
-        # The demo degrades to an explore-only World when the key is unset; a benchmark has no
-        # use for that, so the matrix's gate is a Skip here — checked before any loop starts.
+        # The matrix's gate (a key variable unset) is a Skip, checked before any loop starts; a
+        # key or a provider extra missing at build is one too.
         reason = self.entry.skip_reason()
         if reason is not None:
             raise Skip(reason)
         config = WicaConfig.from_dict(
             {"agent": self.entry.agent}, base_dir=self.entry.base_dir
         )
-        wica, _world, config_error = build_system(config)
-        if wica is None:
-            raise Skip(config_error or "the demo could not build its Wica")
+        try:
+            wica = build_system(config)
+        except (MissingSecretError, ImportError) as exc:
+            raise Skip(str(exc)) from exc
         self._wica = wica
         wire(wica, SpeakingSlot())
         wica.start()

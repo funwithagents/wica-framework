@@ -26,3 +26,7 @@ analysis/
 # Local config overrides you create yourself (a config never holds a key: specs/config.md,
 # "API key: never in the config").
 **/*.local.json
+
+# Keys saved next to a config (the demo run from a file, the config app): the .env beside the
+# config it serves, never committed (specs/conversation-demo.md).
+.env

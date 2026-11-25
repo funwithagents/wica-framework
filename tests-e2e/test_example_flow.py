@@ -91,8 +91,8 @@ class Stack:
 
 def stand_up(config: WicaConfig) -> Stack:
     """Build → (the test as the UI) → wire → start, in the order `main()` uses."""
-    wica, world, config_error = build_system(config)
-    assert wica is not None and config_error is None  # fake provider needs no key
+    wica = build_system(config)
+    world = wica.world
     transcript = TranscriptLog(wica, display_entry)
     reactions = ReactionLog(wica, display_entry)
     speaking = SpeakingSlot()

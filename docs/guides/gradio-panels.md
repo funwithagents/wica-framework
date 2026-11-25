@@ -113,4 +113,4 @@ A presenter with `wica=None` renders empty and subscribes to nothing, for an exp
 - **Input widgets update the World, which works only while running**: start the Wica before `launch()`.
 - **Tear down from the Gradio thread.** `launch()` blocks until the server exits; call `wica.close()` after it returns, never from a Command, the output Command or an Event subscriber.
 
-The shipped demo does exactly this with a Speaking panel, sensor buttons and the explore-only fallback: [`app_ui.py`](../../examples/conversation_demo/app_ui.py) owns the presenters and hands them back, [`app.py`](../../examples/conversation_demo/app.py) wires and starts ([specs/conversation-demo.md](../../specs/conversation-demo.md)).
+The shipped demo does exactly this with a Speaking panel and sensor buttons, once per session: [`app.py`](../../examples/conversation_demo/app.py) builds the presenters, wires and starts a session, and [`app_ui.py`](../../examples/conversation_demo/app_ui.py) draws the panels over it, anew for each session ([specs/conversation-demo.md](../../specs/conversation-demo.md)).

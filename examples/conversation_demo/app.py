@@ -3,53 +3,73 @@
 Run with:
 
     uv run --group demo python -m examples.conversation_demo.app
+        [--folder DIR | --config FILE] [--env PATH]
+        [--host ADDRESS] [--port N] [--start | --no-start]
 
-Configuration comes from examples/configs/anthropic.json, which reads its API key from the
-provider's usual variable, ANTHROPIC_API_KEY — set it before running:
+The page has three tabs: the demo's own **Conversation** (Start, Stop and the robot's panels),
+then app-setup's **Setup** (choose a provider, configure it, install its extra, test its key)
+and **Secrets** (the key variables, saved to the `.env` next to the config). The config is a WICA
+document, as `WicaConfig.from_json_file` reads it (the app is bare: no key around it).
 
-    export ANTHROPIC_API_KEY=sk-...
+- **From the folder** (the default): the app's folder (its `config.json`, its `.env`, its
+  `launch.json`) is `~/.config/wica-conversation-demo` unless `--folder` names another. The default
+  config (`default_config.json`) runs Anthropic's claude-haiku-4-5 with the persona copied into the
+  folder (`wica.md`, edit it there), its key read from ANTHROPIC_API_KEY (the shell, or the
+  Secrets tab). The session starts at launch unless the Setup panel's checkbox or `--no-start`
+  says otherwise; without a key, the Conversation tab says so instead.
+- **From a file** (`--config FILE`, e.g. `examples/configs/fake.json`): the file runs as it is,
+  never written (the Setup tab shows it read-only); its relative paths (the persona) resolve
+  against its directory, its keys come from the `.env` there; the session starts at launch unless
+  `--no-start`.
 
-The other files of examples/configs/ are the same demo on other providers (see specs/config.md).
+`--env PATH` names another `.env` for either. Editing a file without running it is the config app's
+(`python -m examples.config_app FILE`). See specs/conversation-demo.md.
 
 Logging is the application's concern, not the framework's: this demo configures the wica.* loggers
-below (raise the level to DEBUG to see the full World+Agent lifecycle trace — registrations, every
-update and whether it triggered a call, LLM output, command start/end).
+in `main()` (raise the level to DEBUG to see the full World+Agent lifecycle trace — registrations,
+every update and whether it triggered a call, LLM output, command start/end).
 
-This is the first runnable example (see specs/conversation-demo.md). It drives WICA purely through
-its public API: speech and sensor events enter the World; the Agent reasons over the World, issues
-Commands, and replies; the UI shows the live World state and the exact prompt sent to the model.
+It drives WICA purely through its public API: speech and sensor events enter the World; the Agent
+reasons over the World, issues Commands, and replies; the UI shows the live World state and the
+exact prompt sent to the model.
 
 This file is the **app**: the World entries (and how each shows to the model and to the person),
-the `Robot` whose methods are the Commands, and the composition — in this order, which is what the
-framework's output wiring exists to allow (specs/wica.md, "Output wiring is delegated"):
+the `Robot` whose methods are the Commands, and the composition of one session — in this order,
+which is what the framework's output wiring exists to allow (specs/wica.md, "Output wiring is
+delegated"):
 
-    1. build_system(config)         → the Wica (or a World-only fallback), entries registered
-    2. build_ui(wica, world, …)     → the Gradio page, which owns its presenters (app_ui.py):
-                                      the contrib's TranscriptLog + ReactionLog (subscribed to
-                                      the Wica's Events as they are built) and the Speaking slot
-    3. wire(wica, slot)             → the Robot over the World + the UI's Speaking slot; `say`
-                                      set as the output Command on the Wica; Commands registered
-    4. wica.start(); blocks.launch()
+    1. build_system(config)         → the Wica, entries registered
+    2. the presenters               → the contrib's TranscriptLog + ReactionLog (subscribed to the
+                                      Wica's Events as they are built) and the Speaking slot
+    3. wire(wica, slot)             → the Robot over the World + the Speaking slot; `say` set as
+                                      the output Command on the Wica; Commands registered
+    4. wica.start()
 
-Nothing is bound late: every object is built after the ones it needs, and everything is wired
-before `start()`. Steps 1 and 3 build no Gradio page, so the tests run the same wiring against a
-slot they build themselves (tests-e2e/test_example_flow.py). The transcript, the
-World table and the prompt history are the package's reusable `wica.contrib.gradio` components
-(specs/gradio-contrib.md); what is the demo's own is the persona: the entries, the `display_entry`
-hook, the Robot and the Speaking panel.
+`open_session` runs the four steps; the page's Start runs it through `Conversation`
+(session.py) with the saved config. Steps 1 and 3 build no Gradio page, so the tests and the
+benchmark run the same wiring (tests-e2e/test_example_flow.py, benchmarks/bench.py).
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 import logging
 import os
-import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from examples.conversation_demo.app_ui import build_ui
+from app_setup.app import App, AppModel, Section
+from app_setup.autostart import add_start_arguments, starts_at_launch
+from app_setup.config_file import ConfigFileError
+from app_setup.folder import ConfigFolder
+from app_setup.launch import add_config_arguments, open_source
+
+import wica.setup
+from examples.conversation_demo.app_ui import build_page
+from examples.conversation_demo.session import Conversation, Running
 from wica import (
     CommandExecution,
     Content,
@@ -59,8 +79,8 @@ from wica import (
     World,
     WorldEntry,
 )
-from wica.config import MissingSecretError, WicaConfig
-from wica.contrib.gradio import EntryDisplay
+from wica.config import WicaConfig
+from wica.contrib.gradio import EntryDisplay, ReactionLog, TranscriptLog
 
 from examples.conversation_demo.speaking import SpeakingSlot
 
@@ -72,7 +92,41 @@ from examples.conversation_demo.speaking import SpeakingSlot
 
 # --- Configuration -------------------------------------------------------------------
 
-CONFIG_PATH = Path(__file__).parent.parent / "configs" / "anthropic.json"
+# The persona the example configs read, and the one copied into the app's folder.
+PERSONA_FILE = Path(__file__).parent / "prompts" / "wica.md"
+
+# The demo's default config, committed next to this file: a WICA document (the app is bare: its
+# config is the library's own document, with no key around it), Anthropic with the persona the
+# app's folder holds (`wica.md`, relative, so it resolves against the folder), and no key: the key
+# is read from ANTHROPIC_API_KEY, the provider's default variable. app-setup writes it into an
+# empty folder at the first launch.
+DEFAULT_CONFIG_FILE = Path(__file__).parent / "default_config.json"
+DEFAULT_CONFIG: dict[str, Any] = json.loads(
+    DEFAULT_CONFIG_FILE.read_text(encoding="utf-8")
+)
+
+APP = App(
+    name="wica-conversation-demo",
+    title="WICA — talk to a social robot",
+    host="wica",
+    sections=(Section("wica", wica.setup, title="Agent"),),
+    default_config=DEFAULT_CONFIG,
+    autostart=True,
+    # One section, whose document is the whole config: the folder's config.json, a --config file
+    # and the config app's file are WICA documents, as the example configs are.
+    bare=True,
+)
+
+
+def ensure_persona(folder: Path) -> Path:
+    """The persona in the app's folder, copied there from the bundled one when the folder has
+    none: the default config names it (`wica.md`), and the user edits it there. Never
+    overwritten."""
+    persona = folder / PERSONA_FILE.name
+    if not persona.exists():
+        persona.write_text(PERSONA_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    return persona
+
 
 _demo_logger = logging.getLogger(__name__)
 
@@ -256,27 +310,13 @@ class Robot:
 # --- Composition ---------------------------------------------------------------------
 
 
-def build_system(config: WicaConfig) -> tuple[Wica | None, World, str | None]:
+def build_system(config: WicaConfig) -> Wica:
     """Step 1: build the Wica through the single entry point (Wica.init) and register the demo's
-    World entries. Returns `(wica, world, config_error)`. Falls back to explore-only if the config's
-    key variable holds no key — `wica` is None, `world` is a World-only system on its own loop, and
-    `config_error` says what to set — so the app still opens and is explorable without credentials.
-
-    The api key resolves at Agent build inside Wica.init, so that's what we guard: an unset
-    key raises MissingSecretError there (see specs/config.md, specs/wica.md)."""
-    try:
-        wica = Wica.init(config)
-    except MissingSecretError as exc:
-        # Explore-only: a World-only system (no Agent) on its own loop, so the panel and sensor
-        # inputs still work while nothing reasons over them.
-        explore_loop = asyncio.new_event_loop()
-        threading.Thread(target=explore_loop.run_forever, daemon=True).start()
-        world = World(explore_loop)
-        world.start()
-        register_world(world)
-        return None, world, f"environment variable {exc.variable!r} is not set"
+    World entries. The key and the prompt file resolve here: MissingSecretError, ConfigError and
+    ImportError surface from this call (see specs/config.md, specs/wica.md)."""
+    wica = Wica.init(config)
     register_world(wica.world)
-    return wica, wica.world, None
+    return wica
 
 
 def wire(wica: Wica, speaking: SpeakingSlot) -> Robot:
@@ -297,23 +337,74 @@ def wire(wica: Wica, speaking: SpeakingSlot) -> Robot:
     return robot
 
 
-def main() -> None:
+def open_session(config: WicaConfig) -> Running:
+    """One session, in order: build, the presenters (subscribed before anything runs), wire,
+    start. The Wica is closed again when a later step fails."""
+    wica = build_system(config)
+    try:
+        running = Running(
+            config=config,
+            wica=wica,
+            transcript=TranscriptLog(wica, display_entry),
+            reactions=ReactionLog(wica, display_entry),
+            speaking=SpeakingSlot(),
+        )
+        wire(wica, running.speaking)
+        wica.start()
+    except BaseException:
+        wica.close()
+        raise
+    return running
+
+
+def _parser() -> argparse.ArgumentParser:
+    """The command line: `--folder DIR` or `--config FILE`, `--env PATH` (app-setup's), the
+    page's address and `--start` / `--no-start`."""
+    parser = argparse.ArgumentParser(description=APP.title)
+    add_config_arguments(parser, APP)
+    parser.add_argument("--host", default="127.0.0.1", help="the address to serve on")
+    parser.add_argument("--port", type=int, default=None, help="the port to serve on")
+    add_start_arguments(parser)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = _parser()
+    options = parser.parse_args(argv)
+    try:
+        # The folder, or the file run as it is; a missing or unreadable file stops here.
+        source = open_source(options, APP)
+    except ConfigFileError as exc:
+        parser.error(str(exc))
     # WICA is a library and configures no logging itself; the application decides what is shown. Keep
     # third-party logs quiet and show wica.* at INFO (raise to logging.DEBUG for the full trace).
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger("wica").setLevel(logging.INFO)
+    _demo_logger.setLevel(logging.INFO)
     _maybe_enable_console_traces()
 
-    wica, world, config_error = build_system(WicaConfig.from_json_file(CONFIG_PATH))
-    ui = build_ui(wica, world, display_entry, config_error)
-    if wica is not None:
-        wire(wica, ui.speaking)
-        wica.start()
+    conversation = Conversation(open_session)
+    # Building the model makes the folder ready and loads the .env next to the config; the config
+    # is locked while a session runs.
+    model = AppModel(APP, source, locked=conversation.locked)
+    _demo_logger.info("config: %s", source.config_path)
+    if isinstance(source, ConfigFolder):
+        # The folder's persona, copied there once; a file names its own, relative to it.
+        ensure_persona(model.path)
+    # A relative path in the config (the default's `wica.md`) is the folder's, or the file's
+    # directory's: the session builds with it as `base_dir`, and app-setup passes the setup checks
+    # the same directory. From a file, the session starts at launch unless --no-start.
+    starts = starts_at_launch(model, options.start)
+    if starts:
+        # With blockers (no key yet, at the first launch), they show on the Conversation tab.
+        for reason in conversation.start(model):
+            _demo_logger.warning("not started at launch: %s", reason)
     try:
-        ui.blocks.launch()
+        build_page(
+            model, conversation, open_on="conversation" if starts else "setup"
+        ).launch(server_name=options.host, server_port=options.port)
     finally:
-        if wica is not None:
-            wica.close()
+        conversation.stop()
 
 
 if __name__ == "__main__":
