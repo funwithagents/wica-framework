@@ -93,13 +93,12 @@ config = WicaConfig(
     agent=AgentConfig(
         provider="anthropic",
         model="claude-haiku-4-5",
-        api_key_env="WICA_ANTHROPIC_API_KEY",  # read when Wica.init builds the Agent
         system_prompt="You are a friendly social robot.",
     )
 )
 ```
 
-With `api_key_env`, the config carries no secret and is safe to commit; the variable is read by `Wica.init`, which raises `MissingEnvError` when it is unset. The extra for the provider must be installed, or `Wica.init` raises `ImportError` naming it. WICA appends a short **runtime primer** to your system prompt that tells the model how to read observations, that Commands run asynchronously and concurrently, how to speak (the output Command's tag), and that it may write `<noop/>` to not react; your persona stays verbatim before it.
+The key is read from `ANTHROPIC_API_KEY`, the provider's usual variable, when `Wica.init` builds the Agent (`api_key_env` names another); a config never holds the key, so it is safe to commit, and `Wica.init` raises `MissingSecretError` when the variable holds none. The extra for the provider must be installed, or `Wica.init` raises `ImportError` naming it. WICA appends a short **runtime primer** to your system prompt that tells the model how to read observations, that Commands run asynchronously and concurrently, how to speak (the output Command's tag), and that it may write `<noop/>` to not react; your persona stays verbatim before it.
 
 ## The lifecycle, in a host of your own
 

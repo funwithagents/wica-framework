@@ -9,7 +9,7 @@ import pytest
 
 import support
 from support import PROVIDER_CONFIGS, real_chat_model, real_wica, skip_if_rate_limited
-from wica.config import MissingEnvError
+from wica.config import MissingSecretError
 
 CONFIG = PROVIDER_CONFIGS[0]
 
@@ -79,6 +79,6 @@ def test_a_missing_key_is_not_the_preflights_case(monkeypatch: pytest.MonkeyPatc
     """With no key the build raises before any call: the caller's skip-or-fail rule applies."""
     monkeypatch.setattr(support, "_PREFLIGHT", {})
     monkeypatch.delenv("WICA_ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(MissingEnvError):
+    with pytest.raises(MissingSecretError):
         skip_if_rate_limited(CONFIG)
     assert CONFIG not in support._PREFLIGHT

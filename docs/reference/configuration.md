@@ -7,12 +7,13 @@
   "agent": {
     "provider": "anthropic",
     "model": "claude-haiku-4-5",
-    "api_key_env": "WICA_ANTHROPIC_API_KEY",
     "system_prompt_file": "prompts/robot.md",
     "model_kwargs": { "temperature": 0.7 }
   }
 }
 ```
+
+One example config per provider is in [examples/configs/](../../examples/configs/). An application that sets the agent up for its users (a form, a setup page) reads the same fields as data through `wica.setup` ([Setting up from an application](#setting-up-from-an-application)).
 
 On this page: [The loaders](#the-loaders) · [The `agent` block](#the-agent-block) · [API key](#api-key) · [System prompt](#system-prompt) · [History bounds](#history-bounds) · [Providers](#providers) · [Local and self-hosted models](#local-and-self-hosted-models) · [What is not configuration](#what-is-not-configuration).
 
@@ -20,7 +21,7 @@ On this page: [The loaders](#the-loaders) · [The `agent` block](#the-agent-bloc
 
 | Source | Constructor | Notes |
 |---|---|---|
-| Values owned by Python code | `WicaConfig(agent=AgentConfig(...))` | Static type checking; the structural invariants below are enforced on construction, the field types are not |
+| Values owned by Python code | `WicaConfig(agent=AgentConfig(...))` | Static type checking; validated on construction like the loaders (types, bounds, invariants) |
 | A dictionary, including one cut from a larger application config | `WicaConfig.from_dict(data, base_dir=None)` | Pass the WICA-shaped subsection, not the application's other keys |
 | A JSON string | `WicaConfig.from_json(text, base_dir=None)` | Same as `from_dict` |
 | A dedicated JSON file | `WicaConfig.from_json_file(path)` | A relative `system_prompt_file` is located relative to the file's directory, so a config-plus-prompts folder stays relocatable |
@@ -42,9 +43,9 @@ config = WicaConfig.from_json_file("agent.config.json")
 
 **The loaders are strict.** A missing required key, an unknown key (a typo included), an invalid field combination or a wrong type raises `ConfigError`. **`base_dir`** is only there to give a relative `system_prompt_file` a stable origin: without it, `from_dict` and `from_json` keep a relative path as written, and it is read relative to the process working directory when the Agent is built.
 
-**The dataclasses are frozen** and enforce their structural invariants in `__post_init__` (exactly one of `system_prompt`/`system_prompt_file`, at most one of `api_key`/`api_key_env`), so direct construction fails with the same `ConfigError` the loaders raise. Derive a variant with `dataclasses.replace(...)` rather than assigning.
+**The dataclasses are frozen** and validated in `__post_init__` by the same rules as the loaders (field types and bounds, exactly one of `system_prompt`/`system_prompt_file`, `base_url` with its provider only), so direct construction fails with the same `ConfigError` the loaders raise. Derive a variant with `dataclasses.replace(...)` rather than assigning.
 
-**Creating a config has no side effects.** No loader reads the key variable or the prompt file; both are resolved when `Wica.init()` builds the Agent. That is where a referenced but unset `api_key_env` raises `MissingEnvError`, an unreadable prompt file raises `ConfigError`, a provider whose extra is not installed raises `ImportError`, and a `history_budget` with no known context window raises `ConfigError`. A caller that wants to degrade on any of these wraps `Wica.init()`, not config creation.
+**Creating a config has no side effects.** No loader reads the key variable or the prompt file; both are resolved when `Wica.init()` builds the Agent. That is where a key variable with no key under it raises `MissingSecretError`, an unreadable prompt file raises `ConfigError`, a provider whose extra is not installed raises `ImportError`, and a `history_budget` with no known context window raises `ConfigError`. A caller that wants to degrade on any of these wraps `Wica.init()`, not config creation.
 
 ## The `agent` block
 
@@ -54,7 +55,7 @@ config = WicaConfig.from_json_file("agent.config.json")
 | `agent.model` | yes | The model id, or the Hub `repo_id` for `huggingface-hub`; for `openai-chat-completions-compatible`, the name the server expects (any label for `llama-server`, the repo id for `mlx_lm.server`, the model tag for Ollama); a free label for `fake` |
 | `agent.base_url` | with `openai-chat-completions-compatible` only | The server's address, `/v1` included: `http://127.0.0.1:8080/v1`. Required with that provider and rejected with any other, so a typo'd provider cannot send your requests to a vendor instead. See [Local and self-hosted models](#local-and-self-hosted-models) |
 | `agent.system_prompt` / `agent.system_prompt_file` | exactly one | The persona, inline or in a file; see [System prompt](#system-prompt) |
-| `agent.api_key` / `agent.api_key_env` | at most one | A literal key, or the name of the environment variable to read at Agent build; neither uses the provider's own default variable. See [API key](#api-key) |
+| `agent.api_key_env` | no | The name of the environment variable holding the key, read at Agent build. Default: the provider's usual variable. A key itself (`api_key`) is refused. See [API key](#api-key) |
 | `agent.model_kwargs` | no | Forwarded to the provider's model constructor as given: `temperature`, Gemini's `thinking_level`, an output cap (`max_tokens`), the `fake` provider's `script`. Default empty |
 | `agent.hf_provider` | no | `huggingface-hub` only: the Hub backend that serves the model (`auto`, `fireworks-ai`, …). Default `auto` |
 | `agent.history_reactions` | no | A positive integer: keep the last N reactions in the prompt. Default unbounded. See [History bounds](#history-bounds) |
@@ -65,13 +66,27 @@ config = WicaConfig.from_json_file("agent.config.json")
 | `agent.stream_output` | no | Unset (default): `true` with the tag, `false` with the [output Command as a tool call](api.md#the-output-command-as-a-tool-call), where `true` is not supported yet. `true`: an output is delivered while the model is still writing it. `false`: the whole response is written and checked by the [response guards](api.md#response-guards) before anything is delivered, so every response is guarded, spoken ones included. The cost is time: the first words wait for the whole response. Useful in tests and wherever a checked reply matters more than an early one. See [specs/agent.md](../../specs/agent.md), "Output: tags in the model's text" |
 | `agent.context_window` | no | The context window in tokens, for `history_budget`; absent, the model's LangChain profile supplies it. Unused without a budget |
 
-Runtime values that are callables or runtime objects are not configuration and stay on `Wica.init` and the wiring calls: the coalescing window (`Wica.init(config, coalesce_window=0.2)`), an injected event loop (`loop=`), the output Command (`set_output_command`).
+Runtime values that are callables or runtime objects are not configuration and stay on `Wica.init` and the wiring calls: the coalescing window (`Wica.init(config, coalesce_window=0.2)`), an injected event loop (`loop=`), keys your code holds (`secrets=`), the output Command (`set_output_command`).
 
 `agent.force_tool_call` no longer exists and is rejected as an unknown key: remove it from your config. Forcing a tool call is now an option of the wiring, `set_output_command(say, as_tool=True)` ([api.md](api.md#the-output-command-as-a-tool-call)), not configuration.
 
 ## API key
 
-Give a literal `api_key`, or an `api_key_env` naming the environment variable to read, at most one. With neither, the provider's own package reads its standard variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY` then `GEMINI_API_KEY`, `MISTRAL_API_KEY`, the Hub token); `openai-chat-completions-compatible` reads none and sends a placeholder, so a key meant for OpenAI never reaches another server. Prefer `api_key_env`: the config then carries no secret and can be committed, which is what the repo's own configs do (`WICA_<PROVIDER>_API_KEY`). A config with a literal key belongs in a git-ignored file. The variable is read by `Wica.init`, which raises `MissingEnvError` when it is unset; the `fake` provider ignores both fields.
+A config never holds a key: it names the environment variable that does, so every config can be shared or committed as it is. `api_key_env` defaults to the provider's usual variable, so a fresh config works with the key your shell already exports:
+
+| `provider` | `api_key_env` default |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
+| `gemini` | `GEMINI_API_KEY` |
+| `mistral` | `MISTRAL_API_KEY` |
+| `huggingface-hub` | `HF_TOKEN` |
+| `openai-chat-completions-compatible` | none: with no variable named, a placeholder is sent, so a key meant for OpenAI never reaches another server |
+| `fake` | none: no key is read |
+
+Name another variable to keep several keys apart (the repo's own test configs read `WICA_<PROVIDER>_API_KEY`). A key your code holds is passed next to the config, under the variable's name: `Wica.init(config, secrets={"ANTHROPIC_API_KEY": key})`; it is looked up there first, then in the environment. The key is always handed to the provider's package explicitly: WICA does not rely on a package reading a variable of its own.
+
+`Wica.init` raises `MissingSecretError` (a `ConfigError`) when no key is found under the variable; it carries `.variable`. `api_key` in a config is refused at load: move the key to an environment variable and name it in `api_key_env`. `MissingEnvError`, the error's former name, still works and is deprecated.
 
 ## System prompt
 
@@ -123,13 +138,17 @@ WICA runs no model itself. Any server that implements OpenAI's Chat Completions 
 ```
 
 - **`base_url`** includes the `/v1` path. The server must be running before the first reaction; a wrong port ends every reaction `model_error`.
-- **No key is needed** for a server that checks none; give `api_key`/`api_key_env` for one that does.
+- **No key is needed** for a server that checks none; name the variable holding it in `api_key_env` for one that does.
 - **`context_window`** is needed with `history_budget`: a local model has no LangChain profile. Set it to the server's own context size (`-c` on `llama-server`).
 - **`model_timeout`**: the default 10 s is tight for a first request that loads the model, or for a long prompt on a small machine.
 - **`model_timeout` also bounds the longest reply**: the deadline covers the whole streamed call, so a reply still being written when it expires is cut there.
 - **An output cap** (`model_kwargs.max_tokens`) bounds a model that writes text without end. OpenAI's client sends it as `max_completion_tokens`, which Ollama ignores: there, put it in `model_kwargs.extra_body` instead ([guides/local-models.md](../guides/local-models.md#ollama)).
 
 Which servers were tried, which model sizes work and how cancellation behaves: [guides/local-models.md](../guides/local-models.md). `provider: "openai"` stays OpenAI's own API; a `base_url` in its `model_kwargs` still reaches a proxy in front of OpenAI.
+
+## Setting up from an application
+
+`wica.setup` describes this configuration as data for an application that sets the agent up for its users, following the module contract of the `app-setup` project: `config_schema()` (a JSON Schema of the WICA block, a form drawn from it), `required_extras(config)` (`["wica[anthropic]"]`), `check_config(config)` (every problem, each with its JSON Pointer, in the loader's words), `check_setup(config)` (on this machine: the provider's extra, its key variable, the prompt file), and `probe(config)` (one free, authenticated call to the provider: the key is accepted and the model exists; no chat request). Nothing in it is needed to run WICA. See [specs/setup.md](../../specs/setup.md).
 
 ## What is not configuration
 

@@ -23,11 +23,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from wica.config import FAKE_PROVIDER, default_key_env
+
 _ENTRY_KEYS = {"id", "agent", "tags", "enabled", "requires_env", "notes"}
-# The agent block's either-or pairs (specs/config.md): an entry that sets one member of a pair
-# drops the other from the defaults, so a fixture with an inline `system_prompt` can sit in a
-# matrix whose defaults carry the shared `system_prompt_file`.
-_EXCLUSIVE = (("system_prompt", "system_prompt_file"), ("api_key", "api_key_env"))
+# The agent block's either-or pair (specs/config.md): an entry that sets one member drops the
+# other from the defaults, so a fixture with an inline `system_prompt` can sit in a matrix whose
+# defaults carry the shared `system_prompt_file`.
+_EXCLUSIVE = (("system_prompt", "system_prompt_file"),)
 
 
 class MatrixError(ValueError):
@@ -49,10 +51,14 @@ class Entry:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def skip_reason(self) -> str | None:
-        """Why this entry cannot run here: its `api_key_env` or one of `requires_env` unset.
-        None when every variable is set (an entry without any always runs)."""
+        """Why this entry cannot run here: its key variable (`api_key_env`, else the provider's
+        default) or one of `requires_env` unset. None when every variable is set (an entry that
+        reads none always runs)."""
         names = list(self.requires_env)
+        provider = self.agent.get("provider")
         key_env = self.agent.get("api_key_env")
+        if not key_env and isinstance(provider, str) and provider != FAKE_PROVIDER:
+            key_env = default_key_env(provider)
         if key_env:
             names.insert(0, key_env)
         for name in names:
@@ -152,8 +158,7 @@ def load_matrix(path: str | Path) -> Matrix:
 
 def merge_agent(defaults: dict[str, Any], agent: dict[str, Any]) -> dict[str, Any]:
     """*agent* over *defaults*, the entry's keys winning; a default that is the other member of an
-    either-or pair the entry sets (`system_prompt` / `system_prompt_file`, `api_key` /
-    `api_key_env`) is left out."""
+    either-or pair the entry sets (`system_prompt` / `system_prompt_file`) is left out."""
     merged = dict(defaults)
     for first, second in _EXCLUSIVE:
         if first in agent:

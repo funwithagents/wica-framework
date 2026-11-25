@@ -3610,7 +3610,7 @@ def test_only_anthropic_requests_carry_the_breakpoint(
         )
     )
     config = AgentConfig(
-        provider=provider, model="test", system_prompt="You are terse.", api_key="k"
+        provider=provider, model="test", system_prompt="You are terse."
     )
     agent = Agent(config, world=world, loop=loop, model=model)
     agent.on_private_text.subscribe(private)

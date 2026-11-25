@@ -4,12 +4,7 @@ code:
   - examples/conversation_demo/speaking.py
   - examples/conversation_demo/app_ui.py
   - examples/conversation_demo/prompts/wica.md
-  - examples/conversation_demo/agent.config.json
-  - examples/conversation_demo/agent.anthropic.config.json
-  - examples/conversation_demo/agent.openai.config.json
-  - examples/conversation_demo/agent.huggingface-hub.config.json
-  - examples/conversation_demo/agent.gemini.config.json
-  - examples/conversation_demo/agent.mistral.config.json
+  - examples/configs/anthropic.json
 tests:
   - tests/test_conversation_demo.py
   - tests-e2e/test_example_flow.py
@@ -238,24 +233,18 @@ everything is wired before `start()`, the setters' intended zone.
 
 ## Configuration
 
-- **The demo loads from a committed JSON config**, `examples/conversation_demo/agent.config.json`,
+- **The demo loads from a committed JSON config**, `examples/configs/anthropic.json`,
   via `WicaConfig.from_json_file` followed by `Wica.init` (see [config.md](config.md)) — provider,
   model, and persona (`system_prompt_file`, pointing at
   `examples/conversation_demo/prompts/wica.md`) all live
   there. Switching providers/models, or editing the persona, is a file edit, not a code change.
-  Committed per-provider variants sit alongside it — `agent.anthropic.config.json`,
-  `agent.openai.config.json`, `agent.huggingface-hub.config.json`, `agent.gemini.config.json`,
-  `agent.mistral.config.json` — showing the same demo against
-  each supported provider (see [config.md](config.md), "Providers"); copy one over
-  `agent.config.json` to switch backend.
-- **The API key is referenced, not stored.** The committed config uses
-  `"api_key_env": "WICA_ANTHROPIC_API_KEY"` — the WICA-namespaced env var (so it never collides
-  with a provider key another tool in the environment already uses) that `api_key_env` reads at
-  Agent build. No secret lives in the committed file. A literal key (e.g. to try a different
-  provider without exporting an env var) goes in a local `*.local.json` copy instead, which is
-  git-ignored (see config.md, "API key: literal or env reference").
-- **No key, still usable.** With `WICA_ANTHROPIC_API_KEY` unset, `Wica.init` raises
-  `MissingEnvError` when it builds the Agent (the env read is deferred to build, not load — see
+  The example configs next to it — one per provider in `examples/configs/` — show the same demo
+  against each supported provider (see [config.md](config.md), "Providers").
+- **The API key is referenced, not stored.** The config names no key: it is read from the
+  provider's usual variable, `ANTHROPIC_API_KEY`, at Agent build (`api_key_env` names another).
+  No secret lives in a config (see config.md, "API key: never in the config").
+- **No key, still usable.** With `ANTHROPIC_API_KEY` unset, `Wica.init` raises
+  `MissingSecretError` when it builds the Agent (the env read is deferred to build, not load — see
   config.md, "API key"); the demo catches it, still opens, and clearly says what to set — it just
   can't run the robot's reasoning until the variable is present. Nothing contacts a model without
   credentials.

@@ -1,23 +1,54 @@
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
+import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from wica.fields import Field, field_problems, read_fields
 
 
 class ConfigError(ValueError):
     """Raised for a structurally invalid framework config (missing/unknown/mistyped key)."""
 
 
-class MissingEnvError(ConfigError):
-    """Raised when a config field references an environment variable that isn't set."""
+class MissingSecretError(ConfigError):
+    """No key under the variable the config names (`api_key_env`, or the provider's default):
+    neither in the secrets given in code nor in the environment. Carries the variable, so a
+    caller can say which key to set without reading the message. See specs/config.md ("API
+    key")."""
 
-    def __init__(self, env_var: str) -> None:
-        super().__init__(f"environment variable {env_var!r} is not set")
-        self.env_var = env_var
+    def __init__(self, variable: str, *, label: str = "Agent") -> None:
+        super().__init__(
+            f"{label}: no key under {variable!r}: set the environment variable, "
+            "or pass it in `secrets`"
+        )
+        self.variable = variable
+        self.label = label
+
+    @property
+    def env_var(self) -> str:
+        """The variable's name, under its old attribute (deprecated: read `variable`)."""
+        return self.variable
+
+
+def __getattr__(name: str) -> type[MissingSecretError]:
+    # `MissingEnvError` was the error before keys were resolved with `secrets`: kept one
+    # release as the same class, so `except MissingEnvError` still catches it.
+    if name == "MissingEnvError":
+        warnings.warn(
+            "wica.config.MissingEnvError is deprecated: use MissingSecretError",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return MissingSecretError
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 _logger = logging.getLogger(__name__)
@@ -50,7 +81,9 @@ class AgentConfig:
     """Plain data mirroring the dictionary/JSON ``agent`` block.
 
     The ``*_env``/``*_file`` fields hold references resolved at Agent build, not during config
-    creation — see ``resolve_api_key`` / ``resolve_system_prompt`` and specs/config.md.
+    creation — see ``resolve_api_key`` / ``resolve_system_prompt`` and specs/config.md. There is no
+    ``api_key``: a config never holds a key (``Wica.init(..., secrets=...)`` takes keys held in
+    code).
 
     Frozen: derive a variant with ``dataclasses.replace(...)`` rather than assigning. The structural
     invariants are enforced in ``__post_init__``, so direct construction fails the same way the
@@ -61,7 +94,7 @@ class AgentConfig:
     model: str
     system_prompt: str | None = None
     system_prompt_file: str | None = None
-    api_key: str | None = None
+    # The variable holding the key; None for the provider's default (specs/config.md, "API key").
     api_key_env: str | None = None
     model_kwargs: dict[str, Any] = field(default_factory=dict)
     hf_provider: str = "auto"  # only used by provider "huggingface-hub"
@@ -97,38 +130,24 @@ class AgentConfig:
     stream_output: bool | None = None
 
     def __post_init__(self) -> None:
-        # The structural invariants the loaders enforce, applied to direct construction too, so
-        # every AgentConfig instance is valid. See specs/config.md.
+        # The validation the loaders run, over the declared fields, applied to direct construction
+        # too, so every AgentConfig instance is valid. See specs/config.md, specs/setup.md.
         renamed = PROVIDER_RENAMES.get(self.provider)
         if renamed is not None:
             _logger.warning(
                 "agent: provider %r is deprecated, use %r", self.provider, renamed
             )
             object.__setattr__(self, "provider", renamed)
-        _validate_base_url(
-            self.provider, self.base_url, self.model_kwargs, block="agent"
-        )
-        has_inline = self.system_prompt is not None
-        has_file = self.system_prompt_file is not None
-        if has_inline and has_file:
-            raise ConfigError(
-                "agent: specify at most one of 'system_prompt'/'system_prompt_file', not both"
-            )
-        if not has_inline and not has_file:
-            raise ConfigError(
-                "agent: specify one of 'system_prompt'/'system_prompt_file'"
-            )
-        if self.api_key is not None and self.api_key_env is not None:
-            raise ConfigError(
-                "agent: specify at most one of 'api_key'/'api_key_env', not both"
-            )
-        _validate_history_reactions(self.history_reactions, block="agent")
-        _validate_history_budget(self.history_budget, block="agent")
-        _validate_context_window(self.context_window, block="agent")
-        _validate_model_timeout(self.model_timeout, block="agent")
-        _validate_max_next_steps(self.max_next_steps, block="agent")
-        _validate_max_retries(self.max_retries, block="agent")
-        _validate_stream_output(self.stream_output, block="agent")
+        # A None where the dataclass's own default is None stands for an absent key; any other
+        # None was passed and is validated (`max_retries=None` is refused, as in JSON).
+        values = {
+            f.name: getattr(self, f.name)
+            for f in dataclass_fields(self)
+            if getattr(self, f.name) is not None or f.default is not None
+        }
+        problems = agent_problems(values)
+        if problems:
+            raise ConfigError(problems[0][1])
 
     @classmethod
     def from_dict(
@@ -181,23 +200,387 @@ class WicaConfig:
             raise ConfigError(f"in config file {config_path}: {exc}") from exc
 
 
-_AGENT_REQUIRED = {"provider", "model"}
-_AGENT_OPTIONAL_COMMON = {
-    "api_key",
-    "api_key_env",
-    "model_kwargs",
+# --- The fields, declared once ------------------------------------------------------
+#
+# The `agent` block's fields as data: the loaders, `AgentConfig.__post_init__` and
+# `wica.setup.check_config` validate against them, and `wica.setup.config_schema` draws the form
+# from them, so the two cannot drift apart. See specs/setup.md ("Fields are declared once").
+
+_LABEL = "agent:"
+
+FAKE_PROVIDER = "fake"
+
+ProviderKind = Literal["hosted", "local", "fixture"]
+
+API_KEY_REFUSED = (
+    "agent: does not take 'api_key': keep the key in an environment variable and name it "
+    "in 'api_key_env'"
+)
+
+PROVIDER_FIELD = Field(
+    "provider",
+    "string",
+    "Which provider runs the model.",
+    required=True,
+)
+
+# `model` is declared in each provider's own fields, not among the common ones: a model id means
+# nothing to another provider, so a form switching provider drops it (specs/setup.md, "The
+# schema"). Required, with no default, for every provider.
+MODEL_FIELD = Field(
+    "model",
+    "string",
+    "The model, as the provider names it (for the Hugging Face Hub, its repo id; for a "
+    "compatible server, what it expects in a request's 'model').",
+    required=True,
+)
+
+COMMON_FIELDS: tuple[Field, ...] = (
+    Field(
+        "system_prompt",
+        "string",
+        "The persona, written here. Give it here or in 'system_prompt_file', not both.",
+        allow_empty=True,
+    ),
+    Field(
+        "system_prompt_file",
+        "string",
+        "The file holding the persona; a relative path is relative to the config's folder. "
+        "Give it here or in 'system_prompt', not both.",
+    ),
+    Field(
+        "history_reactions",
+        "integer",
+        "How many past reactions the prompt always keeps: history grows to twice this, then "
+        "is cut back to it. Absent, history is unbounded.",
+        minimum=1,
+        advanced=True,
+    ),
+    Field(
+        "history_budget",
+        "number",
+        "The fraction of the model's context window the prompt should stay under: past it, "
+        "the oldest reactions are cut. Absent, off.",
+        exclusive_minimum=0,
+        maximum=1,
+        advanced=True,
+    ),
+    Field(
+        "context_window",
+        "integer",
+        "The model's context window in tokens, for 'history_budget'. Absent, the model's "
+        "profile gives it.",
+        minimum=1,
+        advanced=True,
+    ),
+    Field(
+        "model_timeout",
+        "number",
+        "Seconds one model call may take before the reaction is abandoned; null for no "
+        "deadline.",
+        implied=DEFAULT_MODEL_TIMEOUT,
+        exclusive_minimum=0,
+        advanced=True,
+    ),
+    Field(
+        "max_next_steps",
+        "integer",
+        "How many steps in a row the model's <next> note may wake: 0 turns it off, null "
+        "removes the cap.",
+        implied=DEFAULT_MAX_NEXT_STEPS,
+        minimum=0,
+        advanced=True,
+    ),
+    Field(
+        "max_retries",
+        "integer",
+        "How many times one reaction may call the model again after its response guards "
+        "rejected a response.",
+        default=DEFAULT_MAX_RETRIES,
+        minimum=0,
+        advanced=True,
+    ),
+    Field(
+        "stream_output",
+        "boolean",
+        "Deliver an output while the response streams (true), or once the response guards "
+        "accepted it (false). Absent, the output mode's default.",
+        advanced=True,
+    ),
+)
+
+# `model_kwargs` is a free-form object, which `Field` has no kind for: checked by hand
+# (`agent_problems`) and drawn as raw JSON (`wica.setup`).
+MODEL_KWARGS_DESCRIPTION = (
+    "Extra parameters passed to the provider's model (temperature, an output cap, a "
+    "reasoning level), as a JSON object."
+)
+
+
+def key_env_field(title: str, variable: str | None) -> Field:
+    """The `api_key_env` field of a provider: the environment variable that holds *title*'s
+    key, *variable* by default. With no default (a server that may need no key), the field may
+    stay absent. See specs/config.md ("API key")."""
+    message = f"{_LABEL} 'api_key_env' must be a non-empty string"
+    if variable is None:
+        return Field(
+            "api_key_env",
+            "string",
+            f"The environment variable holding the {title} key. Absent, no key is sent.",
+            secret="env",
+            message=message,
+        )
+    return Field(
+        "api_key_env",
+        "string",
+        f"The environment variable holding the {title} key.",
+        default=variable,
+        secret="env",
+        message=message,
+    )
+
+
+_HF_PROVIDER = Field(
     "hf_provider",
-    "base_url",
-    "history_reactions",
-    "history_budget",
-    "context_window",
-    "model_timeout",
-    "max_next_steps",
-    "max_retries",
-    "stream_output",
+    "string",
+    "The Hub's inference provider that serves the model ('auto' lets the Hub choose).",
+    default="auto",
+)
+_BASE_URL_MESSAGE = (
+    f"{_LABEL} provider {OPENAI_CHAT_COMPLETIONS_COMPATIBLE!r} needs 'base_url', the server's "
+    "address with its /v1 path (e.g. 'http://127.0.0.1:8080/v1')"
+)
+_BASE_URL_DESCRIPTION = (
+    "The server's address with its /v1 path (e.g. http://127.0.0.1:8080/v1)."
+)
+
+
+@dataclass(frozen=True)
+class Provider:
+    """A provider WICA knows: what a setup page and the loader need before it is installed.
+    See specs/setup.md ("Fields are declared once")."""
+
+    name: str
+    title: str
+    kind: ProviderKind
+    # The extra carrying its package (None: built in), and the modules that extra provides.
+    extra: str | None
+    packages: tuple[str, ...]
+    # Its own fields, beside the common ones: `api_key_env` (with the provider's usual
+    # variable as default), `base_url`, `hf_provider`.
+    fields: tuple[Field, ...]
+
+    @property
+    def key_env(self) -> str | None:
+        """The variable its key is read from when the config names none."""
+        for own in self.fields:
+            if own.secret == "env":
+                return own.default
+        return None
+
+    @property
+    def takes_key(self) -> bool:
+        return any(own.secret == "env" for own in self.fields)
+
+
+def _hosted(name: str, title: str, extra: str, package: str, variable: str) -> Provider:
+    return Provider(
+        name,
+        title,
+        "hosted",
+        extra,
+        (package,),
+        (MODEL_FIELD, key_env_field(title, variable)),
+    )
+
+
+# The providers WICA knows, in the order a form offers them. Any other LangChain id is still
+# accepted, with no extra and no default key variable. See specs/config.md ("Providers").
+PROVIDERS: dict[str, Provider] = {
+    provider.name: provider
+    for provider in (
+        _hosted(
+            "anthropic",
+            "Anthropic",
+            "anthropic",
+            "langchain_anthropic",
+            "ANTHROPIC_API_KEY",
+        ),
+        _hosted("openai", "OpenAI", "openai", "langchain_openai", "OPENAI_API_KEY"),
+        _hosted(
+            "gemini", "Gemini", "gemini", "langchain_google_genai", "GEMINI_API_KEY"
+        ),
+        _hosted(
+            "mistral", "Mistral", "mistral", "langchain_mistralai", "MISTRAL_API_KEY"
+        ),
+        Provider(
+            "huggingface-hub",
+            "Hugging Face Hub",
+            "hosted",
+            "huggingface-hub",
+            ("langchain_huggingface",),
+            (MODEL_FIELD, key_env_field("Hugging Face", "HF_TOKEN"), _HF_PROVIDER),
+        ),
+        Provider(
+            OPENAI_CHAT_COMPLETIONS_COMPATIBLE,
+            "OpenAI-compatible server",
+            "local",
+            "openai-compatible",
+            ("langchain_openai",),
+            (
+                MODEL_FIELD,
+                Field(
+                    "base_url",
+                    "string",
+                    _BASE_URL_DESCRIPTION,
+                    required=True,
+                    message=_BASE_URL_MESSAGE,
+                ),
+                key_env_field("server's", None),
+            ),
+        ),
+        Provider(FAKE_PROVIDER, "Scripted fake", "fixture", None, (), (MODEL_FIELD,)),
+    )
 }
-_AGENT_PROMPT_KEYS = {"system_prompt", "system_prompt_file"}
-_WICA_ALLOWED = {"agent"}
+
+# The fields a provider that does not declare them still accepts (and type-checks), as before
+# they were declared per provider: they are just not drawn in its branch of the form.
+_LOOSE_FIELDS: tuple[Field, ...] = (
+    MODEL_FIELD,
+    key_env_field("provider's", None),
+    _HF_PROVIDER,
+    Field("base_url", "string", _BASE_URL_DESCRIPTION),
+)
+
+_AGENT_KEYS = frozenset(
+    {PROVIDER_FIELD.name, "model_kwargs"}
+    | {f.name for f in COMMON_FIELDS}
+    | {f.name for f in _LOOSE_FIELDS}
+)
+
+
+def provider_for(name: str) -> Provider | None:
+    """The provider *name* selects (an old name resolves quietly), or None for one WICA does
+    not know."""
+    return PROVIDERS.get(PROVIDER_RENAMES.get(name, name))
+
+
+def default_key_env(name: str) -> str | None:
+    """The variable a provider's key is read from when `api_key_env` names none."""
+    provider = provider_for(name)
+    return provider.key_env if provider is not None else None
+
+
+def install_hint(provider: Provider) -> str:
+    """What to install for a provider whose package is missing."""
+    requirement = f"wica[{provider.extra}]"
+    return (
+        f"provider {provider.name!r} needs {requirement}, which is not installed: "
+        f"install it (pip install '{requirement}', or uv add '{requirement}')"
+    )
+
+
+def import_provider(name: str) -> None:
+    """Import the packages the provider's extra provides, raising `ImportError` with the install
+    hint when one is missing. `build_chat_model` calls it before its own imports and
+    `wica.setup.check_setup` tries it, so the hint has one home. Nothing for `fake` or a
+    provider WICA does not know."""
+    provider = provider_for(name)
+    if provider is None:
+        return
+    for package in provider.packages:
+        try:
+            importlib.import_module(package)
+        except ImportError as exc:
+            raise ImportError(install_hint(provider)) from exc
+
+
+def agent_fields(provider: str) -> tuple[Field, ...]:
+    """The fields an `agent` block selecting *provider* is validated against: the provider's own
+    (`model` first), the loose ones it does not declare (`model` among them, for a provider WICA
+    does not know), then the common ones."""
+    selected = provider_for(provider)
+    own = selected.fields if selected is not None else ()
+    declared = {f.name for f in own}
+    return (
+        own + tuple(f for f in _LOOSE_FIELDS if f.name not in declared) + COMMON_FIELDS
+    )
+
+
+def agent_problems(data: Any) -> list[tuple[str, str]]:
+    """Every problem that makes an `agent` block invalid, as `(field name, message)` — the name
+    is "" for the block as a whole. The loaders and `AgentConfig` raise the first; `wica.setup`
+    reports them all. Reads nothing but the block. See specs/setup.md ("Fields are declared
+    once")."""
+    if not isinstance(data, dict):
+        return [("", f"{_LABEL} must be a JSON object")]
+    problems: list[tuple[str, str]] = []
+    if "api_key" in data:
+        problems.append(("api_key", API_KEY_REFUSED))
+    for key in sorted(set(data) - _AGENT_KEYS - {"api_key"}, key=str):
+        problems.append((str(key), f"{_LABEL} unknown key {key!r}"))
+    provider = data.get("provider")
+    fields = (PROVIDER_FIELD,) + agent_fields(
+        provider if isinstance(provider, str) else ""
+    )
+    present = []
+    for declared in fields:
+        if declared.required and declared.name not in data:
+            problems.append(
+                (
+                    declared.name,
+                    declared.message
+                    or f"{_LABEL} missing required key {declared.name!r}",
+                )
+            )
+        else:
+            present.append(declared)
+    problems += field_problems(data, present, label=_LABEL)
+    if "model_kwargs" in data and not isinstance(data["model_kwargs"], dict):
+        problems.append(("model_kwargs", f"{_LABEL} 'model_kwargs' must be an object"))
+    if problems:
+        return problems
+    return _rule_problems(data)
+
+
+def _rule_problems(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """The rules across fields, over a block whose fields are valid."""
+    problems: list[tuple[str, str]] = []
+    has_inline = data.get("system_prompt") is not None
+    has_file = data.get("system_prompt_file") is not None
+    if has_inline and has_file:
+        problems.append(
+            (
+                "",
+                f"{_LABEL} specify at most one of 'system_prompt'/'system_prompt_file', "
+                "not both",
+            )
+        )
+    elif not has_inline and not has_file:
+        problems.append(
+            ("", f"{_LABEL} specify one of 'system_prompt'/'system_prompt_file'")
+        )
+    # `base_url` is for the compatible server only (silently ignored, it would send the requests
+    # to the vendor instead of the intended server); there, the address has one home. See
+    # specs/config.md ("Providers").
+    provider = PROVIDER_RENAMES.get(data["provider"], data["provider"])
+    if provider != OPENAI_CHAT_COMPLETIONS_COMPATIBLE:
+        if data.get("base_url") is not None:
+            problems.append(
+                (
+                    "base_url",
+                    f"{_LABEL} 'base_url' is only for provider "
+                    f"{OPENAI_CHAT_COMPLETIONS_COMPATIBLE!r}, not {provider!r}",
+                )
+            )
+    elif "base_url" in data.get("model_kwargs", {}):
+        problems.append(
+            (
+                "model_kwargs",
+                f"{_LABEL} set the server's address in 'base_url', not in 'model_kwargs'",
+            )
+        )
+    return problems
 
 
 def _as_base_dir(base_dir: str | Path | None) -> Path | None:
@@ -207,272 +590,100 @@ def _as_base_dir(base_dir: str | Path | None) -> Path | None:
     return Path(base_dir) if base_dir is not None else None
 
 
-def _validate_base_url(
-    provider: str, base_url: Any, model_kwargs: Any, *, block: str
-) -> None:
-    """`base_url` is required with openai-chat-completions-compatible and rejected with any other
-    provider (silently ignored, it would send the requests to the vendor instead of the intended
-    server); with that provider `model_kwargs.base_url` is rejected too, so the address has one
-    home. See specs/config.md ("Providers")."""
-    if provider != OPENAI_CHAT_COMPLETIONS_COMPATIBLE:
-        if base_url is not None:
-            raise ConfigError(
-                f"{block}: 'base_url' is only for provider "
-                f"{OPENAI_CHAT_COMPLETIONS_COMPATIBLE!r}, not {provider!r}"
-            )
-        return
-    if base_url is None:
-        raise ConfigError(
-            f"{block}: provider {OPENAI_CHAT_COMPLETIONS_COMPATIBLE!r} needs 'base_url', "
-            "the server's address with its /v1 path (e.g. 'http://127.0.0.1:8080/v1')"
-        )
-    if not isinstance(base_url, str) or not base_url:
-        raise ConfigError(
-            f"{block}: 'base_url' must be a non-empty string, got {base_url!r}"
-        )
-    if isinstance(model_kwargs, dict) and "base_url" in model_kwargs:
-        raise ConfigError(
-            f"{block}: set the server's address in 'base_url', not in 'model_kwargs'"
-        )
-
-
-def _validate_history_reactions(value: Any, *, block: str) -> int | None:
-    """None (unbounded) or a positive int — the number of reactions the history window keeps.
-    A bool is rejected even though it is an int subclass. See specs/config.md."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ConfigError(
-            f"{block}: 'history_reactions' must be a positive integer or null, got {value!r}"
-        )
-    return value
-
-
-def _validate_history_budget(value: Any, *, block: str) -> float | None:
-    """None (off) or a number in (0, 1] — the fraction of the context window the prompt should stay
-    under. See specs/config.md."""
-    if value is None:
-        return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not 0 < value <= 1
-    ):
-        raise ConfigError(
-            f"{block}: 'history_budget' must be a number in (0, 1] or null, got {value!r}"
-        )
-    return float(value)
-
-
-def _validate_context_window(value: Any, *, block: str) -> int | None:
-    """None (use the model profile) or a positive int — the context window in tokens."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ConfigError(
-            f"{block}: 'context_window' must be a positive integer or null, got {value!r}"
-        )
-    return value
-
-
-def _validate_model_timeout(value: Any, *, block: str) -> float | None:
-    """None (no deadline) or a positive number of seconds. See specs/config.md."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
-        raise ConfigError(
-            f"{block}: 'model_timeout' must be a positive number of seconds or null, got {value!r}"
-        )
-    return float(value)
-
-
-def _validate_max_next_steps(value: Any, *, block: str) -> int | None:
-    """A non-negative integer, or None for no cap. See specs/config.md."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ConfigError(
-            f"{block}: 'max_next_steps' must be a non-negative integer or null, got {value!r}"
-        )
-    return value
-
-
-def _validate_max_retries(value: Any, *, block: str) -> int:
-    """A non-negative integer. See specs/config.md."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ConfigError(
-            f"{block}: 'max_retries' must be a non-negative integer, got {value!r}"
-        )
-    return value
-
-
-def _validate_stream_output(value: Any, *, block: str) -> bool | None:
-    """A boolean, or None for the output mode's default. See specs/config.md."""
-    if value is not None and not isinstance(value, bool):
-        raise ConfigError(
-            f"{block}: 'stream_output' must be true, false or null, got {value!r}"
-        )
-    return value
-
-
-def _require_str(data: dict[str, Any], key: str, *, block: str) -> str:
-    if key not in data:
-        raise ConfigError(f"{block}: missing required key {key!r}")
-    value = data[key]
-    if not isinstance(value, str):
-        raise ConfigError(
-            f"{block}: {key!r} must be a string, got {type(value).__name__}"
-        )
-    return value
-
-
-def _validate_api_key(
-    data: dict[str, Any], *, block: str
-) -> tuple[str | None, str | None]:
-    """Structural check only — no env read. Enforces at-most-one and string types, and passes both
-    fields through onto AgentConfig; resolve_api_key does the env read later at build."""
-    has_literal = "api_key" in data
-    has_env_ref = "api_key_env" in data
-    if has_literal and has_env_ref:
-        raise ConfigError(
-            f"{block}: specify at most one of 'api_key'/'api_key_env', not both"
-        )
-    api_key = _require_str(data, "api_key", block=block) if has_literal else None
-    api_key_env = (
-        _require_str(data, "api_key_env", block=block) if has_env_ref else None
-    )
-    return api_key, api_key_env
-
-
-def _validate_system_prompt(
-    data: dict[str, Any], *, base_dir: Path | None, block: str
-) -> tuple[str | None, str | None]:
-    """Structural check + *locate* (no read). Enforces exactly-one and string types. For a relative
-    `system_prompt_file`, a caller-supplied base_dir (from_json_file derives it from the config
-    directory) absolutizes it against that directory so the path is bound to the config's location,
-    not the process CWD — a locate, not a file read; the read is deferred to resolve_system_prompt
-    at build. With base_dir None the path is stored as given. See specs/config.md ("System
-    prompt")."""
-    has_inline = "system_prompt" in data
-    has_file = "system_prompt_file" in data
-    if has_inline and has_file:
-        raise ConfigError(
-            f"{block}: specify at most one of 'system_prompt'/'system_prompt_file', not both"
-        )
-    if not has_inline and not has_file:
-        raise ConfigError(
-            f"{block}: specify one of 'system_prompt'/'system_prompt_file'"
-        )
-    if has_inline:
-        return _require_str(data, "system_prompt", block=block), None
-    prompt_file = _require_str(data, "system_prompt_file", block=block)
-    if base_dir is not None and not Path(prompt_file).is_absolute():
-        # Locate against the config directory (absolutize) — no file *read*; .resolve() only
-        # normalizes `..`/symlinks (a stat-level lookup, tolerant of a missing file) so the stored
-        # path is stable regardless of the process CWD at read time.
-        prompt_file = str((base_dir / prompt_file).resolve())
-    return None, prompt_file
-
-
 def _parse_agent_block(
     data: dict[str, Any], *, base_dir: Path | None
 ) -> dict[str, Any]:
-    block = "agent"
-    if not isinstance(data, dict):
-        raise ConfigError(f"{block}: must be a JSON object")
-    allowed = _AGENT_REQUIRED | _AGENT_OPTIONAL_COMMON | _AGENT_PROMPT_KEYS
-    unknown = set(data) - allowed
-    if unknown:
-        raise ConfigError(f"{block}: unknown key(s) {sorted(unknown)}")
-
-    provider = _require_str(data, "provider", block=block)
-    model = _require_str(data, "model", block=block)
-    system_prompt, system_prompt_file = _validate_system_prompt(
-        data, base_dir=base_dir, block=block
+    """Validate an `agent` block (raising its first problem) and read its values, a default
+    where one is absent. For a relative `system_prompt_file`, a caller-supplied base_dir
+    (from_json_file derives it from the config directory) absolutizes it against that directory,
+    so the path is bound to the config's location, not the process CWD — a locate, not a file
+    read; the read is deferred to resolve_system_prompt at build. See specs/config.md."""
+    problems = agent_problems(data)
+    if problems:
+        raise ConfigError(problems[0][1])
+    values = read_fields(
+        data, agent_fields(data["provider"]), label=_LABEL, error=ConfigError
     )
-    api_key, api_key_env = _validate_api_key(data, block=block)
-
-    model_kwargs = data.get("model_kwargs", {})
-    if not isinstance(model_kwargs, dict):
-        raise ConfigError(f"{block}: 'model_kwargs' must be an object")
-
-    hf_provider = data["hf_provider"] if "hf_provider" in data else "auto"
-    if not isinstance(hf_provider, str):
-        raise ConfigError(
-            f"{block}: 'hf_provider' must be a string, got {type(hf_provider).__name__}"
-        )
-
-    base_url = data.get("base_url")
-    if base_url is not None and not isinstance(base_url, str):
-        raise ConfigError(
-            f"{block}: 'base_url' must be a string, got {type(base_url).__name__}"
-        )
-
-    history_reactions = _validate_history_reactions(
-        data.get("history_reactions"), block=block
-    )
-    history_budget = _validate_history_budget(data.get("history_budget"), block=block)
-    context_window = _validate_context_window(data.get("context_window"), block=block)
-    model_timeout = _validate_model_timeout(
-        data.get("model_timeout", DEFAULT_MODEL_TIMEOUT), block=block
-    )
-    max_next_steps = _validate_max_next_steps(
-        data.get("max_next_steps", DEFAULT_MAX_NEXT_STEPS), block=block
-    )
-    max_retries = _validate_max_retries(
-        data.get("max_retries", DEFAULT_MAX_RETRIES), block=block
-    )
-    stream_output = _validate_stream_output(data.get("stream_output"), block=block)
-
+    prompt_file = values["system_prompt_file"]
+    if (
+        prompt_file is not None
+        and base_dir is not None
+        and not Path(prompt_file).is_absolute()
+    ):
+        # Locate against the config directory (absolutize) — no file *read*; .resolve() only
+        # normalizes `..`/symlinks (a stat-level lookup, tolerant of a missing file).
+        prompt_file = str((base_dir / prompt_file).resolve())
     return {
-        "provider": provider,
-        "model": model,
-        "system_prompt": system_prompt,
-        "system_prompt_file": system_prompt_file,
-        "api_key": api_key,
-        "api_key_env": api_key_env,
-        "model_kwargs": model_kwargs,
-        "hf_provider": hf_provider,
-        "base_url": base_url,
-        "history_reactions": history_reactions,
-        "history_budget": history_budget,
-        "context_window": context_window,
-        "model_timeout": model_timeout,
-        "max_next_steps": max_next_steps,
-        "max_retries": max_retries,
-        "stream_output": stream_output,
+        "provider": data["provider"],
+        "model": values["model"],
+        "system_prompt": values["system_prompt"],
+        "system_prompt_file": prompt_file,
+        # Kept as written: None leaves the variable to the provider's default at build.
+        "api_key_env": data.get("api_key_env"),
+        "model_kwargs": data.get("model_kwargs", {}),
+        "hf_provider": values["hf_provider"],
+        "base_url": values["base_url"],
+        "history_reactions": values["history_reactions"],
+        "history_budget": values["history_budget"],
+        "context_window": values["context_window"],
+        # Absent takes the default; an explicit null removes the deadline (or the cap).
+        "model_timeout": values["model_timeout"]
+        if "model_timeout" in data
+        else DEFAULT_MODEL_TIMEOUT,
+        "max_next_steps": values["max_next_steps"]
+        if "max_next_steps" in data
+        else DEFAULT_MAX_NEXT_STEPS,
+        "max_retries": values["max_retries"],
+        "stream_output": values["stream_output"],
     }
 
 
-def _parse_wica_block(data: dict[str, Any], *, base_dir: Path | None) -> dict[str, Any]:
+def wica_problems(data: Any) -> list[tuple[str, str]]:
+    """Every problem of a WICA block (`{"agent": {...}}`), as `(JSON Pointer, message)`: its own
+    shape, then the `agent` block's problems under `/agent`. The loaders raise the first;
+    `wica.setup.check_config` reports them all. See specs/setup.md."""
     if not isinstance(data, dict):
-        raise ConfigError("config: must be a JSON object")
-    unknown = set(data) - _WICA_ALLOWED
-    if unknown:
-        raise ConfigError(f"config: unknown key(s) {sorted(unknown)}")
-
+        return [("", "config: must be a JSON object")]
+    problems = [
+        (f"/{key}", f"config: unknown key {key!r}")
+        for key in sorted(set(data) - {"agent"}, key=str)
+    ]
     if "agent" not in data:
-        raise ConfigError("config: missing required key 'agent'")
-    agent_data = data["agent"]
-    if not isinstance(agent_data, dict):
-        raise ConfigError("config: 'agent' must be an object")
-    agent = AgentConfig(**_parse_agent_block(agent_data, base_dir=base_dir))
+        return [*problems, ("/agent", "config: missing required key 'agent'")]
+    if not isinstance(data["agent"], dict):
+        return [*problems, ("/agent", "config: 'agent' must be an object")]
+    return problems + [
+        (f"/agent/{name}" if name else "/agent", message)
+        for name, message in agent_problems(data["agent"])
+    ]
 
-    return {"agent": agent}
+
+def _parse_wica_block(data: dict[str, Any], *, base_dir: Path | None) -> dict[str, Any]:
+    problems = wica_problems(data)
+    if problems:
+        raise ConfigError(problems[0][1])
+    return {
+        "agent": AgentConfig(**_parse_agent_block(data["agent"], base_dir=base_dir))
+    }
 
 
-def resolve_api_key(config: AgentConfig) -> str | None:
-    """Resolve the effective api key at Agent build: literal `api_key` if set; else the value of
-    the env var named by `api_key_env` (raising MissingEnvError if unset); else None (so the
-    provider reads its own standard env var). See specs/config.md ("API key")."""
-    if config.api_key is not None:
-        return config.api_key
-    if config.api_key_env is not None:
-        value = os.environ.get(config.api_key_env)
-        if not value:
-            raise MissingEnvError(config.api_key_env)
-        return value
-    return None
+def resolve_api_key(
+    config: AgentConfig, secrets: Mapping[str, str] | None = None
+) -> str | None:
+    """Resolve the key at Agent build: the variable `api_key_env` names, else the provider's
+    default; its key from *secrets* (variable name → key, given in code) first, then the
+    environment. No key under it raises MissingSecretError. None when there is no variable: the
+    `fake` provider, a compatible server or a provider WICA does not know naming none. See
+    specs/config.md ("API key")."""
+    if config.provider == FAKE_PROVIDER:
+        return None
+    variable = config.api_key_env or default_key_env(config.provider)
+    if variable is None:
+        return None
+    key = (secrets or {}).get(variable) or os.environ.get(variable)
+    if not key:
+        raise MissingSecretError(variable)
+    return key
 
 
 def resolve_system_prompt(config: AgentConfig) -> str:

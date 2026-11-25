@@ -170,7 +170,7 @@ def test_the_readme_quick_start_runs(monkeypatch: pytest.MonkeyPatch, capsys) ->
     monkeypatch.setattr(
         wica.agent,
         "build_chat_model",
-        lambda config: FakeChatModel(
+        lambda config, **kwargs: FakeChatModel(
             script=[{"text": "<say>Hello! Nice to meet you.</say>"}], delay_s=0
         ),
     )

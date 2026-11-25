@@ -13,6 +13,7 @@ See specs/conversation-demo.md ("Reused from the Gradio contrib").
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -212,7 +213,7 @@ def test_say_cut_off_while_waiting_for_more_words_reports_what_was_heard(robot: 
 def test_persona_describes_the_say_tag_and_no_removed_mechanism():
     """The persona under test (the benchmark's too) must teach the tag, not a `say` call, and
     must not tell the model to call `noop`."""
-    persona = (app.CONFIG_PATH.parent / "prompts" / "wica.md").read_text()
+    persona = (Path(app.__file__).parent / "prompts" / "wica.md").read_text()
     assert "<say>" in persona and "</say>" in persona
     assert "say(" not in persona
     assert "noop" not in persona

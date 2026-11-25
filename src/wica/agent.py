@@ -41,6 +41,7 @@ from wica.config import (
     AgentConfig,
     OPENAI_CHAT_COMPLETIONS_COMPATIBLE,
     ConfigError,
+    import_provider,
     resolve_api_key,
     resolve_system_prompt,
 )
@@ -935,7 +936,9 @@ def _resolve_history_budget(
     return high, high // 2
 
 
-def build_chat_model(config: AgentConfig) -> BaseChatModel:
+def build_chat_model(
+    config: AgentConfig, *, secrets: Mapping[str, str] | None = None
+) -> BaseChatModel:
     """Construct the LangChain chat model for an AgentConfig — the single source of truth for
     provider construction, shared by the Agent constructor and the e2e helper (so tests exercise
     the exact model production builds).
@@ -949,11 +952,13 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
     ("Provider-agnostic model, from config") and specs/config.md ("Providers").
 
     Provider integration packages are imported lazily, inside their branch, so core wica needs
-    none of them installed — an unselected provider fails here with a clear ImportError.
+    none of them installed — a provider whose extra is missing fails here with an ImportError
+    naming the extra (`import_provider`, the hint's one home).
 
-    The api key resolves *here*, at build: the config holds `api_key`/`api_key_env` verbatim, and
-    resolve_api_key does the env read (raising MissingEnvError if the referenced var is unset). See
-    specs/config.md ("API key").
+    The key resolves *here*, at build: the config names its variable (`api_key_env`, else the
+    provider's default) and resolve_api_key reads it from *secrets*, then the environment
+    (raising MissingSecretError when there is no key). The key is always passed to the provider's
+    package explicitly. See specs/config.md ("API key").
     """
     if config.provider == _FAKE_PROVIDER:
         # The fake's construction payload lives in model_kwargs (script/default/loop/delay_s), which
@@ -963,7 +968,8 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
 
         return FakeChatModel(**config.model_kwargs)
 
-    api_key = resolve_api_key(config)
+    import_provider(config.provider)
+    api_key = resolve_api_key(config, secrets)
 
     if config.provider == _HUGGINGFACE_HUB_PROVIDER:
         from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
@@ -971,8 +977,7 @@ def build_chat_model(config: AgentConfig) -> BaseChatModel:
         endpoint_kwargs = dict(config.model_kwargs)
         if api_key is not None:
             # This branch builds the model directly, so it owns the kwarg name: the resolved
-            # api_key/api_key_env is HF's token, not the generic `api_key` the init_chat_model
-            # providers receive.
+            # key is HF's token, not the generic `api_key` the init_chat_model providers receive.
             endpoint_kwargs["huggingfacehub_api_token"] = api_key
         endpoint = HuggingFaceEndpoint(
             repo_id=config.model,
@@ -1024,10 +1029,11 @@ class Agent:
         loop: asyncio.AbstractEventLoop,
         coalesce_window: float = 0.2,
         model: BaseChatModel | None = None,
+        secrets: Mapping[str, str] | None = None,
     ) -> None:
         # Config-driven construction *is* the constructor — resolution happens here, at build. The
-        # config holds system_prompt/system_prompt_file (and api_key/api_key_env, resolved inside
-        # build_chat_model) verbatim; resolve_system_prompt reads the prompt file if that's the form
+        # config holds system_prompt/system_prompt_file (and api_key_env, resolved inside
+        # build_chat_model against `secrets`, then the environment) verbatim; resolve_system_prompt reads the prompt file if that's the form
         # given, so an unreadable file or unset key env var surfaces here, not at config load. See
         # specs/config.md ("Flow into the Agent") and specs/agent.md.
         #
@@ -1090,7 +1096,9 @@ class Agent:
         # X at step start (hysteresis keeps the cached prefix stable). See specs/agent.md
         # ("History window").
         self._history_reactions = config.history_reactions
-        self.model = model if model is not None else build_chat_model(config)
+        self.model = (
+            model if model is not None else build_chat_model(config, secrets=secrets)
+        )
         # Token marks for the usage-driven cut (None = off): high = window × budget, low = half.
         # The window is resolved once here — config override, else the model profile — and a
         # budget without a known window is a build error. See specs/agent.md ("History budget").

@@ -1,0 +1,7 @@
+{
+  "agent": {
+    "provider": "mistral",
+    "model": "ministral-3b-latest",
+    "system_prompt_file": "../conversation_demo/prompts/wica.md"
+  }
+}
