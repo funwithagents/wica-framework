@@ -66,7 +66,7 @@ wheels = [
 [[package]]
 name = "app-setup"
 version = "0.1.0"
-source = { git = "https://github.com/funwithagents/app-setup?rev=draft-and-saved#35a7cffdd63bd753e44ac5d0a52e77ef638483ba" }
+source = { git = "https://github.com/funwithagents/app-setup?rev=draft-and-saved#4bd9ef2b546ab8550d46b797f0feea4c8d0246fc" }
 dependencies = [
     { name = "packaging" },
 ]
