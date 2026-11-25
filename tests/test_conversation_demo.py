@@ -262,18 +262,31 @@ def test_the_committed_default_config_is_the_app_s_default(tmp_path: Path):
     model = _model(tmp_path, Conversation(app.open_session))
 
     assert app.APP.default_config == committed
-    assert model.saved_config() == committed  # written into the empty folder
+    # The app is bare: the folder's config.json is the WICA document itself, wrapped for the
+    # panels only.
+    written = json.loads((tmp_path / "demo" / "config.json").read_text())
+    assert written == committed  # written into the empty folder
+    assert model.saved_config() == {"wica": committed}
     assert committed == {
-        "wica": {
-            "agent": {
-                "provider": "anthropic",
-                "model": "claude-haiku-4-5",
-                "system_prompt_file": "wica.md",
-            }
+        "agent": {
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5",
+            "system_prompt_file": "wica.md",
         }
     }
-    assert wica_setup.check_config(committed["wica"]) == []
-    assert app.APP.autostart is True
+    assert wica_setup.check_config(committed) == []
+    assert app.APP.autostart is True and app.APP.bare is True
+
+
+def test_a_save_writes_the_wica_document_alone_to_the_folder(tmp_path: Path):
+    model = _model(tmp_path, Conversation(app.open_session))
+    _fake(model)
+
+    written = json.loads((tmp_path / "demo" / "config.json").read_text())
+    assert written["agent"]["provider"] == "fake" and "wica" not in written
+    assert WicaConfig.from_json_file(tmp_path / "demo" / "config.json").agent.model == (
+        "scripted"
+    )
 
 
 def test_the_persona_is_copied_into_the_folder_once_and_never_overwritten(
@@ -507,9 +520,244 @@ def test_launching_leaves_the_working_directory_alone(
 def test_the_command_line_overrides_the_saved_launch_choice(
     argv: list[str], start: bool | None, tmp_path: Path
 ):
-    options = app._arguments([*argv, "--folder", str(tmp_path)])  # pyright: ignore[reportPrivateUsage]
-    assert (options.start, options.folder, options.host) == (
+    parser = app._parser()  # pyright: ignore[reportPrivateUsage]
+    options = parser.parse_args([*argv, "--folder", str(tmp_path)])
+    assert (options.start, options.folder, options.config, options.host) == (
         start,
         tmp_path,
+        None,
         "127.0.0.1",
     )
+
+
+def test_folder_and_config_are_one_or_the_other(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    parser = app._parser()  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--folder", str(tmp_path), "--config", "x.json"])
+    assert "not allowed with" in capsys.readouterr().err
+
+
+# --- Running from a config file, and the config app ---------------------------------
+
+from app_setup.autostart import starts_at_launch  # noqa: E402
+from app_setup.config_file import ConfigFile  # noqa: E402
+from app_setup.launch import open_source  # noqa: E402
+
+from examples.config_app import __main__ as config_app  # noqa: E402
+
+# A variable no shell sets, so the tests never read nor write a real key.
+_TEST_KEY = "WICA_DEMO_TEST_ONLY_KEY"
+
+
+def _config_file(folder: Path, agent: dict[str, object]) -> Path:
+    """A WICA document in *folder*, its persona next to it (`persona.md`, relative)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "persona.md").write_text("You are a test robot.", encoding="utf-8")
+    path = folder / "robot.json"
+    path.write_text(
+        json.dumps({"agent": {**agent, "system_prompt_file": "persona.md"}}, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+class _Launched:
+    """`build_page` stood in for: what `main` hands the page, seen while it is served."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(
+        self, model: AppModel, conversation: Conversation, open_on: str
+    ) -> object:
+        launched = self
+
+        class Page:
+            def launch(self, **kwargs: object) -> None:
+                running = conversation.current
+                launched.calls.append(
+                    {
+                        "model": model,
+                        "open_on": open_on,
+                        "status": conversation.status,
+                        "config": None if running is None else running.config,
+                    }
+                )
+
+        return Page()
+
+
+@pytest.fixture
+def launched(monkeypatch: pytest.MonkeyPatch) -> _Launched:
+    page = _Launched()
+    monkeypatch.setattr(app, "build_page", page)
+    monkeypatch.setattr(app.logging, "basicConfig", lambda **k: None)
+    return page
+
+
+def test_the_demo_runs_a_config_file_as_it_is_and_starts_at_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: _Launched
+):
+    path = _config_file(
+        tmp_path / "configs",
+        {
+            "provider": "fake",
+            "model": "scripted",
+            "model_kwargs": {"default": {"text": "<say>Hi.</say>"}, "delay_s": 0},
+        },
+    )
+    before = path.read_bytes()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # the persona is found against the file, not here
+
+    app.main(["--config", str(path)])
+
+    [call] = launched.calls
+    model = call["model"]
+    assert isinstance(model, AppModel) and isinstance(model.source, ConfigFile)
+    # Started at launch, from the file's own config and persona, and the page opens on it.
+    assert (call["status"], call["open_on"]) == ("running", "conversation")
+    config = call["config"]
+    assert isinstance(config, WicaConfig)
+    assert config.agent.provider == "fake"
+    assert config.agent.system_prompt_file == str(
+        (path.parent / "persona.md").resolve()
+    )
+    # Read-only: never written, nothing copied next to it, no folder made.
+    assert not model.editable
+    with pytest.raises(RuntimeError):
+        model.save(model.saved_config())
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in path.parent.iterdir()) == ["persona.md", "robot.json"]
+
+
+def test_from_a_file_no_start_leaves_the_session_stopped(
+    tmp_path: Path, launched: _Launched
+):
+    path = _config_file(tmp_path, {"provider": "fake", "model": "scripted"})
+
+    app.main(["--config", str(path), "--no-start"])
+
+    [call] = launched.calls
+    assert (call["status"], call["open_on"]) == ("stopped", "setup")
+
+
+def test_from_a_file_the_keys_come_from_the_env_next_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: _Launched
+):
+    monkeypatch.setenv(_TEST_KEY, "restored after the test")
+    monkeypatch.delenv(_TEST_KEY)
+    path = _config_file(
+        tmp_path,
+        {
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5",
+            "api_key_env": _TEST_KEY,
+        },
+    )
+    (path.parent / ".env").write_text(f"{_TEST_KEY}=sk-test\n", encoding="utf-8")
+
+    app.main(["--config", str(path), "--no-start"])
+
+    model = launched.calls[0]["model"]
+    assert isinstance(model, AppModel)
+    assert model.source.env_path == path.parent / ".env"
+    assert model.blockers(model.saved_config()) == []
+
+
+def test_a_missing_config_file_stops_the_demo_at_launch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], launched: _Launched
+):
+    missing = tmp_path / "nowhere.json"
+
+    with pytest.raises(SystemExit) as exited:
+        app.main(["--config", str(missing)])
+
+    assert exited.value.code == 2
+    assert str(missing) in capsys.readouterr().err
+    assert launched.calls == [] and not missing.exists()
+
+
+def test_every_example_config_runs_as_a_config_file(tmp_path: Path):
+    options = app._parser().parse_args([])  # pyright: ignore[reportPrivateUsage]
+    examples = sorted((_ROOT / "examples" / "configs").glob("*.json"))
+    assert examples
+    for path in examples:
+        options.config = path
+        model = AppModel(app.APP, open_source(options, app.APP))
+        saved = model.saved_config()
+        assert saved == {"wica": json.loads(path.read_text())}, path.name
+        assert model.check_config(saved) == [], path.name
+        # The persona, relative to the file, is found against its directory.
+        prompt = [
+            item
+            for item in model.check_setup(saved)
+            if item.id == "file:system_prompt_file"
+        ]
+        assert [item.status for item in prompt] == ["ready"], path.name
+        assert starts_at_launch(model, None) and not model.editable
+
+
+def _config_app_model(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> AppModel:
+    """The config app's `main`, its page stood in for: the model it would serve."""
+    models: list[AppModel] = []
+
+    class Page:
+        def launch(self, **kwargs: object) -> None:
+            pass
+
+    def page(model: AppModel) -> Page:
+        models.append(model)
+        return Page()
+
+    monkeypatch.setattr(config_app, "config_page", page)
+    config_app.main(argv)
+    [model] = models
+    return model
+
+
+def test_the_config_app_saves_a_wica_document_to_its_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = _config_file(tmp_path, {"provider": "fake", "model": "scripted"})
+
+    model = _config_app_model(monkeypatch, [str(path)])
+    saved = model.saved_config()
+    saved["wica"]["agent"]["model"] = "another"
+    model.save(saved)
+
+    written = json.loads(path.read_text())
+    assert written == {
+        "agent": {
+            "provider": "fake",
+            "model": "another",
+            "system_prompt_file": "persona.md",
+        }
+    }
+    assert WicaConfig.from_json_file(path).agent.model == "another"
+    assert model.source.env_path == tmp_path / ".env"
+
+
+def test_the_config_app_takes_another_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = _config_file(tmp_path / "configs", {"provider": "fake", "model": "m"})
+    env = tmp_path / "keys.env"
+
+    model = _config_app_model(monkeypatch, [str(path), "--env", str(env)])
+
+    assert model.editable and model.source.env_path == env
+
+
+def test_the_config_app_refuses_a_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    missing = tmp_path / "nowhere.json"
+    with pytest.raises(SystemExit) as exited:
+        _config_app_model(monkeypatch, [str(missing)])
+    assert exited.value.code == 2
+    assert str(missing) in capsys.readouterr().err
+    assert not missing.exists()

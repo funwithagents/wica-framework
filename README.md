@@ -129,7 +129,20 @@ The repo ships a browser UI to talk to a simulated social robot and watch the fr
 uv run --group demo python -m examples.conversation_demo.app
 ```
 
-then open the address Gradio prints. It runs Anthropic's `claude-haiku-4-5` with its key from `ANTHROPIC_API_KEY`: without one, the Conversation tab says so instead of starting. Its **Secrets** tab saves the key to the demo's folder (`~/.config/wica-conversation-demo`), its **Setup** tab chooses another provider and model, installs the provider's extra and tests the key, and **Start** runs the robot. The robot's persona is `wica.md` in that folder, to edit there. `--no-start` opens the page without starting; `--folder` keeps another config. One example config per provider is in `examples/configs/`. Its three panels are reusable in your own app ([docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)); its design is [specs/conversation-demo.md](specs/conversation-demo.md).
+then open the address Gradio prints. It runs Anthropic's `claude-haiku-4-5` with its key from `ANTHROPIC_API_KEY`: without one, the Conversation tab says so instead of starting. Its **Secrets** tab saves the key to the demo's folder (`~/.config/wica-conversation-demo`), its **Setup** tab chooses another provider and model, installs the provider's extra and tests the key, and **Start** runs the robot. The robot's persona is `wica.md` in that folder, to edit there. `--no-start` opens the page without starting; `--folder` keeps another config. Its three panels are reusable in your own app ([docs/guides/gradio-panels.md](docs/guides/gradio-panels.md)); its design is [specs/conversation-demo.md](specs/conversation-demo.md).
+
+A config is a WICA document, the one `WicaConfig.from_json_file` reads: one example per provider is in `examples/configs/`. The demo runs one as it is, or edits one without running it:
+
+```
+uv run --group demo python -m examples.conversation_demo.app --config examples/configs/fake.json
+uv run --group demo python -m examples.config_app examples/configs/anthropic.json
+```
+
+- **`--config FILE`** runs the file as it is: never written (the Setup tab shows it read-only), the persona found next to it, the session started at launch unless `--no-start`. The scripted fake above needs no key.
+- **The config app** (`examples.config_app FILE`) has the Setup and Secrets tabs only, and no robot: Save writes the file back.
+- **The keys** are read from the `.env` next to the config (the folder's, or the file's directory), unless `--env PATH` names another; the shell wins. `.env` is git-ignored.
+
+A folder made by an earlier version of the demo holds its config under a `"wica"` key, which this version reports as a problem instead of starting: delete `~/.config/wica-conversation-demo` (or its `config.json`) once, and the next launch writes the new default.
 
 ## Documentation
 

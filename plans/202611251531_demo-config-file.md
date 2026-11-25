@@ -1,6 +1,6 @@
 # The conversation demo from a config file, and a config app
 
-**Status:** In progress
+**Status:** Done
 
 Builds [specs/conversation-demo.md](../specs/conversation-demo.md) "The app: a folder or a file, a Setup tab, a session" as revised: the demo's config is a WICA document (a bare app), the demo runs a given file as it is (`--config FILE`), and a config app edits a file without running a robot.
 
