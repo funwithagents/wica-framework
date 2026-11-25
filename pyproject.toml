@@ -79,9 +79,7 @@ demo = [
 ]
 
 [tool.uv.sources]
-# On app-setup's config-file branch (a config file as a source, bare apps, a config app) until its
-# PR #11 is merged; back to `main` then.
-app-setup = { git = "https://github.com/funwithagents/app-setup", rev = "config-file" }
+app-setup = { git = "https://github.com/funwithagents/app-setup", rev = "main" }
 
 [tool.ruff]
 target-version = "py312"
